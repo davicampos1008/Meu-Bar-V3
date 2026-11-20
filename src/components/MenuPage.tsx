@@ -1,0 +1,872 @@
+import React, { useEffect, useState } from 'react';
+import { ALL_TAGS, CATS } from '../lib/catalog';
+import { sb } from '../lib/supabase';
+import {
+  applyBarTheme,
+  beep,
+  getActivePromotion,
+  getBarMenuDesign,
+  getMissingIngredientsForRecipe,
+  getPromoAdjustedPrice,
+  makeDrink,
+  money,
+  norm,
+  recipeTags,
+  today,
+} from '../lib/utils';
+import type { Bar, BarItem, ClientOrderLocal, MenuBlockId, Recipe } from '../types/meubar';
+import {
+  buildMenuBackgroundStyle,
+  FooterOrnamentView,
+  MenuDrinksCatalog,
+  MenuHeaderCard,
+  MenuPromoBanner,
+  normalizeBlockOrder,
+  SideDetailWrapper,
+} from './MenuVisualRenderer';
+import { PWAInstallButton } from './PWAControls';
+import { BrandMark } from './SharedUI';
+
+interface MenuBarData extends Partial<Bar> {
+  name: string;
+  kind: string;
+  open: boolean;
+}
+
+interface MenuItem extends Recipe {
+  price?: number | null;
+}
+
+export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
+  barId,
+  mesa,
+}) => {
+  const [loading, setLoading] = useState(true);
+  const [errTitle, setErrTitle] = useState('');
+  const [errMsg, setErrMsg] = useState('');
+  const [bar, setBar] = useState<MenuBarData | null>(null);
+  const [items, setItems] = useState<MenuItem[]>([]);
+  const [ownerDiag, setOwnerDiag] = useState<string[]>([]);
+  const [activeClients, setActiveClients] = useState<string[]>([]);
+  const [name, setName] = useState('');
+  const [gateInput, setGateInput] = useState('');
+  const [gateErr, setGateErr] = useState('');
+  const [checkingName, setCheckingName] = useState(false);
+  const [cat, setCat] = useState('Todas');
+  const [query, setQuery] = useState('');
+  const [tags, setTags] = useState<Set<string>>(new Set());
+  const [showTags, setShowTags] = useState(false);
+  const [mine, setMine] = useState<ClientOrderLocal[]>([]);
+  const [selectedRecipe, setSelectedRecipe] = useState<MenuItem | null>(null);
+  const [showOrders, setShowOrders] = useState(false);
+  const [readyAlert, setReadyAlert] = useState<ClientOrderLocal[] | null>(null);
+  const [toastMsg, setToastMsg] = useState('');
+
+  // Order form state
+  const [note, setNote] = useState('');
+  const [qty, setQty] = useState(1);
+  const [orderErr, setOrderErr] = useState('');
+  const [sending, setSending] = useState(false);
+
+  const showToast = (msg: string) => {
+    setToastMsg(msg);
+    setTimeout(() => setToastMsg((prev) => (prev === msg ? '' : prev)), 2400);
+  };
+
+  const saveMine = (next: ClientOrderLocal[]) => {
+    setMine(next);
+    try {
+      localStorage.setItem('mine' + barId, JSON.stringify(next));
+    } catch {
+      // ignore storage errors
+    }
+  };
+
+  const loadMenu = async (silent = false) => {
+    if (!barId) {
+      setErrTitle('Link inválido');
+      setErrMsg('Falta o código do bar na URL. Abra pelo QR ou pelo link completo.');
+      setLoading(false);
+      return;
+    }
+    if (!silent) {
+      setLoading(true);
+      setErrTitle('');
+      setErrMsg('');
+    }
+
+    try {
+      const timeout = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('Tempo esgotado ao falar com o servidor (12s).')), 12000)
+      );
+      const res = await Promise.race([
+        sb.rpc('get_menu', { p_bar: barId }),
+        timeout,
+      ]);
+
+      if (res.error) {
+        if (!silent) {
+          setErrTitle('Erro no cardápio');
+          setErrMsg(res.error.message || String(res.error));
+          setLoading(false);
+        }
+        return;
+      }
+
+      const data = res.data as {
+        bar?: MenuBarData;
+        items?: MenuItem[];
+        active_clients?: string[];
+      } | null;
+      if (!data || !data.bar) {
+        if (!silent) {
+          setErrTitle('Bar não encontrado');
+          setErrMsg('Peça um novo QR para quem está no bar. Confira se o id na URL está certo.');
+          setLoading(false);
+        }
+        return;
+      }
+
+      setBar((prev) => ({ ...(prev || {}), ...data.bar! }));
+      applyBarTheme(data.bar);
+      setActiveClients(Array.isArray(data.active_clients) ? data.active_clients : []);
+
+      let resolvedItems: MenuItem[] = Array.isArray(data.items) ? data.items : [];
+      const diag: string[] = [];
+
+      // Fallback autenticado: garante que receitas/preços recém-criados apareçam e mostra diagnóstico claro para o dono se algo faltar
+      if (resolvedItems.length === 0) {
+        const { data: sessData } = await sb.auth.getSession();
+        if (sessData?.session) {
+          const isHome = data.bar.kind === 'home' || data.bar.kind === 'casa';
+          const [ri, rp, rr] = await Promise.all([
+            sb.from('bar_items').select('*').eq('bar_id', barId),
+            sb.from('bar_prices').select('recipe_id, price').eq('bar_id', barId),
+            sb.from('recipes').select('*').order('name'),
+          ]);
+          const barItems = (ri.data as BarItem[]) || [];
+          const prMap: Record<string, number> = {};
+          ((rp.data as { recipe_id: string; price: number }[]) || []).forEach((x) => {
+            prMap[x.recipe_id] = Number(x.price);
+          });
+          const allRecs = (rr.data as Recipe[]) || [];
+          resolvedItems = allRecs
+            .filter((r) => makeDrink(r, barItems) && (isHome || prMap[r.id] != null))
+            .map((r) => ({ ...r, price: prMap[r.id] ?? null }));
+
+          if (resolvedItems.length === 0) {
+            const stockedCount = barItems.filter((i) => i.in_stock).length;
+            const makeable = allRecs.filter((r) => makeDrink(r, barItems));
+            const pricedRecs = allRecs.filter((r) => prMap[r.id] != null);
+
+            diag.push(
+              `Estoque ativo: ${stockedCount} item(ns) · Drinks possíveis pelo estoque: ${makeable.length} · Drinks precificados: ${pricedRecs.length}`
+            );
+
+            if (!isHome && makeable.length > 0) {
+              diag.push(
+                `Falta preço para liberar: ${makeable
+                  .slice(0, 5)
+                  .map((r) => r.name)
+                  .join(', ')}`
+              );
+            }
+            if (pricedRecs.length > 0) {
+              const firstPriced = pricedRecs.slice(0, 3).map((r) => {
+                const miss = getMissingIngredientsForRecipe(r, barItems);
+                return `${r.name} (falta no estoque: ${miss.join(', ') || 'nada'})`;
+              });
+              diag.push(`Precificados sem estoque completo: ${firstPriced.join(' · ')}`);
+            }
+          }
+        }
+      }
+
+      setOwnerDiag(diag);
+      setItems(resolvedItems);
+      document.title = data.bar.name;
+
+      if (!silent) {
+        const nm = localStorage.getItem('nm');
+        if (nm && localStorage.getItem('nmd') === today()) {
+          setName(nm);
+        }
+        try {
+          const stored = JSON.parse(localStorage.getItem('mine' + barId) || '[]') as ClientOrderLocal[];
+          setMine(stored.filter((o) => o.d === today()));
+        } catch {
+          setMine([]);
+        }
+      }
+    } catch (e) {
+      if (!silent) {
+        setErrTitle('Falha ao carregar');
+        setErrMsg(e instanceof Error ? e.message : String(e));
+      }
+    } finally {
+      if (!silent) setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (cat !== 'Todas' && items.length > 0 && !items.some((i) => i.category === cat)) {
+      setCat('Todas');
+    }
+  }, [items, cat]);
+
+  useEffect(() => {
+    void loadMenu(false);
+
+    if (!barId) return () => applyBarTheme(null);
+
+    // Atualiza o cardápio automaticamente ao vivo sem apagar nome ou pedidos do cliente
+    const ch = sb
+      .channel('menu-live-' + barId)
+      .on('broadcast', { event: 'menu-updated' }, (payload) => {
+        const incoming = (payload?.payload as { bar?: Partial<Bar> | null } | undefined)?.bar;
+        if (incoming) {
+          setBar((prev) => {
+            if (!prev) return prev;
+            const merged = { ...prev, ...incoming };
+            applyBarTheme(merged);
+            return merged;
+          });
+        }
+        void loadMenu(true);
+      })
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'bars', filter: 'id=eq.' + barId },
+        () => {
+          void loadMenu(true);
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'bar_items', filter: 'bar_id=eq.' + barId },
+        () => {
+          void loadMenu(true);
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'bar_prices', filter: 'bar_id=eq.' + barId },
+        () => {
+          void loadMenu(true);
+        }
+      )
+      .subscribe();
+
+    // Checagem silenciosa a cada 5 segundos para conferir novos drinks disponíveis
+    const syncInterval = setInterval(() => {
+      void loadMenu(true);
+    }, 5000);
+
+    return () => {
+      clearInterval(syncInterval);
+      void sb.removeChannel(ch);
+      applyBarTheme(null);
+    };
+  }, [barId]);
+
+  useEffect(() => {
+    if (!bar) return;
+    const id = setInterval(async () => {
+      const activeIds = mine.filter((o) => o.status !== 'done').map((o) => o.id);
+      if (!activeIds.length) return;
+      const res = await sb.rpc('order_status', { p_ids: activeIds });
+      if (!res.data) return;
+
+      const statusRows = res.data as { id: string; status: string }[];
+      let changed = false;
+      const freshReady: ClientOrderLocal[] = [];
+
+      const next = mine.map((o) => {
+        const found = statusRows.find((d) => d.id === o.id);
+        if (!found) return o;
+        const updated = { ...o, status: found.status };
+        if (updated.status !== o.status) changed = true;
+        if (updated.status === 'ready' && !updated.ack) {
+          updated.ack = true;
+          changed = true;
+          freshReady.push(updated);
+        }
+        return updated;
+      });
+
+      if (changed) saveMine(next);
+      if (freshReady.length) {
+        beep(880, 0.6);
+        if (navigator.vibrate) navigator.vibrate([300, 120, 300, 120, 300]);
+        document.title = '🍸 Seu drink está pronto!';
+        setReadyAlert(freshReady);
+      }
+    }, 5000);
+
+    return () => clearInterval(id);
+  }, [bar, mine]);
+
+  if (loading) {
+    return (
+      <div className="gate">
+        <p className="mu">Carregando cardápio…</p>
+      </div>
+    );
+  }
+
+  if (errTitle || !bar) {
+    return (
+      <div className="gate">
+        <h1 className="mt-6">{errTitle || 'Erro'}</h1>
+        <p className="mu">{errMsg}</p>
+        <p className="mu mt-4 break-all">{window.location.href}</p>
+        <button type="button" className="b mt-4.5" onClick={() => void loadMenu(false)}>
+          Tentar de novo
+        </button>
+      </div>
+    );
+  }
+
+  const priced = bar.kind !== 'home' && bar.kind !== 'casa';
+  const totalCount = mine.reduce((s, o) => s + o.qty, 0);
+  const totalPay = mine.reduce((s, o) => s + o.qty * (o.price || 0), 0);
+
+  if (!name) {
+    const enterMenu = async () => {
+      const n = gateInput.trim();
+      if (n.length < 2) {
+        setGateErr('Digite pelo menos 2 letras.');
+        return;
+      }
+      setCheckingName(true);
+      let serverActive = activeClients;
+      try {
+        const rpc = await Promise.race([
+          sb.rpc('active_client_names', { p_bar: barId }),
+          new Promise<{ data: null; error: Error }>((resolve) =>
+            setTimeout(() => resolve({ data: null, error: new Error('timeout') }), 4000)
+          ),
+        ]);
+        if (!rpc.error && Array.isArray(rpc.data)) {
+          serverActive = rpc.data as string[];
+        }
+      } catch {
+        // fallback to already fetched activeClients
+      }
+      setCheckingName(false);
+
+      const savedLocal = localStorage.getItem('nm');
+      const isMyExistingTab =
+        Boolean(savedLocal && norm(savedLocal) === norm(n)) &&
+        mine.some((o) => o.status !== 'done');
+
+      const duplicate = serverActive.find((x) => norm(x) === norm(n));
+      if (duplicate && !isMyExistingTab) {
+        setGateErr(
+          `Já existe um cliente ativo com o nome "${duplicate}" agora. Use nome + sobrenome ou mesa (ex: ${n} Silva).`
+        );
+        return;
+      }
+
+      setGateErr('');
+      setName(n);
+      localStorage.setItem('nm', n);
+      localStorage.setItem('nmd', today());
+    };
+
+    return (
+      <div className="gate">
+        <BrandMark bar={bar} big />
+        <p className="mu mt-6">Bem-vindo ao</p>
+        <h1>{bar.name}</h1>
+        {mesa && <p className="tag mt-1">🪑 {mesa}</p>}
+        <p className="mu my-2.5 mb-5.5">
+          Para fazer seu pedido, diga como devemos te chamar.
+        </p>
+        <input
+          value={gateInput}
+          onChange={(e) => {
+            setGateInput(e.target.value);
+            if (gateErr) setGateErr('');
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') void enterMenu();
+          }}
+          placeholder="Seu nome (ex: João Silva)"
+          maxLength={40}
+          autoComplete="given-name"
+          autoFocus
+        />
+        <button
+          type="button"
+          className="b"
+          disabled={checkingName}
+          onClick={() => void enterMenu()}
+        >
+          {checkingName ? 'Verificando…' : 'Ver cardápio'}
+        </button>
+        {gateErr && <p className="err">{gateErr}</p>}
+      </div>
+    );
+  }
+
+  const design = getBarMenuDesign(bar);
+  const activePromo = getActivePromotion(bar);
+  const blockOrder = normalizeBlockOrder(design.block_order);
+  const accent = bar.color_accent || '#e5a93c';
+  const surface = bar.color_surface || '#141218';
+  const colorBg = bar.color_bg || '#0b0a0d';
+  const colorText = bar.color_text || '#f6f1ea';
+  const bgStyle = buildMenuBackgroundStyle(colorBg, design, accent);
+
+  const cats = ['Todas', ...Array.from(new Set(items.map((i) => i.category)))];
+  const filtered = items.filter((i) => {
+    if (cat !== 'Todas' && i.category !== cat) return false;
+    if (tags.size > 0) {
+      const t = new Set(recipeTags(i));
+      for (const x of tags) {
+        if (!t.has(x)) return false;
+      }
+    }
+    if (query.trim()) {
+      const q = query.trim().toLowerCase();
+      const inName = (i.name || '').toLowerCase().includes(q);
+      const inIng = (i.ingredients || []).some((x) => (x.n || '').toLowerCase().includes(q));
+      if (!inName && !inIng) return false;
+    }
+    return true;
+  });
+
+  const displayMode = bar.menu_display_mode || 'grid-classic';
+  const okColor = bar.color_ok || '#34d399';
+
+  const openRecipeDetail = (r: MenuItem) => {
+    setSelectedRecipe(r);
+    setNote('');
+    setQty(1);
+    setOrderErr('');
+  };
+
+  const handlePlaceOrder = async (recipe: MenuItem, orderQty: number, orderNote: string) => {
+    setSending(true);
+    setOrderErr('');
+    const finalNote = mesa
+      ? orderNote.trim()
+        ? `${mesa} · ${orderNote.trim()}`
+        : mesa
+      : orderNote.trim();
+
+    const res = await sb.rpc('place_order', {
+      p_bar: barId,
+      p_name: name,
+      p_recipe: recipe.id,
+      p_qty: orderQty,
+      p_note: finalNote,
+    });
+    setSending(false);
+    if (res.error) {
+      setOrderErr(res.error.message);
+      return;
+    }
+
+    const { finalPrice } = getPromoAdjustedPrice(recipe.price, recipe.category, activePromo);
+    const next = [
+      ...mine,
+      {
+        id: String(res.data),
+        recipe_id: recipe.id,
+        name: recipe.name,
+        qty: orderQty,
+        price: finalPrice ?? recipe.price,
+        status: 'pending',
+        d: today(),
+      },
+    ];
+    saveMine(next);
+    setSelectedRecipe(null);
+    showToast(`Pedido enviado, ${name}!`);
+  };
+
+  const statusLabels: Record<string, string> = {
+    pending: 'Preparando',
+    ready: 'Pronto, pode buscar',
+    done: 'Entregue',
+  };
+
+  const renderSection = (blockId: MenuBlockId) => {
+    if (blockId === 'header') {
+      return <MenuHeaderCard bar={bar} design={design} mesa={mesa} />;
+    }
+
+    if (blockId === 'promo') {
+      return activePromo ? (
+        <MenuPromoBanner promo={activePromo} accent={accent} surface={surface} />
+      ) : null;
+    }
+
+    if (blockId === 'filters') {
+      return (
+        <div>
+          {!bar.open && (
+            <p className="err !text-base mt-2">
+              Pedidos pausados no momento. Tente de novo em instantes.
+            </p>
+          )}
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Buscar drink ou ingrediente…"
+            className="mt-3"
+          />
+
+          <div className="row mt-2.5">
+            <button
+              type="button"
+              className="b g sm"
+              onClick={() => setShowTags((s) => !s)}
+            >
+              ✨ O que tomar?
+            </button>
+          </div>
+
+          {cats.length > 2 && (
+            <div className="chips">
+              {cats.map((c) => (
+                <span
+                  key={c}
+                  className={`chip ${cat === c ? 'on' : ''}`}
+                  onClick={() => setCat(c)}
+                >
+                  {c}
+                </span>
+              ))}
+            </div>
+          )}
+
+          {showTags && (
+            <>
+              <div className="chips !flex-wrap !overflow-visible">
+                {ALL_TAGS.map((t) => (
+                  <span
+                    key={t}
+                    className={`chip ${tags.has(t) ? 'on' : ''}`}
+                    onClick={() => {
+                      const next = new Set(tags);
+                      if (next.has(t)) next.delete(t);
+                      else next.add(t);
+                      setTags(next);
+                    }}
+                  >
+                    {t}
+                  </span>
+                ))}
+                {tags.size > 0 && (
+                  <span
+                    className="chip border-dashed"
+                    onClick={() => setTags(new Set())}
+                  >
+                    Limpar filtros
+                  </span>
+                )}
+              </div>
+              {tags.size > 0 && (
+                <p className="mu">
+                  {tags.size} filtro(s) · {filtered.length} opção(ões)
+                </p>
+              )}
+            </>
+          )}
+        </div>
+      );
+    }
+
+    if (blockId === 'drinks') {
+      if (items.length === 0) {
+        return (
+          <div className="panel mt-3">
+            <p className="mu">Nenhum drink disponível no cardápio agora.</p>
+            {priced && (
+              <p className="mu mt-1 text-[0.78rem]">
+                Assim que houver ingredientes no estoque e preço salvo para o drink, ele aparece aqui
+                automaticamente em segundos.
+              </p>
+            )}
+            {ownerDiag.length > 0 && (
+              <div className="alert-box mt-2.5 text-left">
+                <b>🔍 Diagnóstico da loja (visível só para quem gerencia):</b>
+                {ownerDiag.map((line, i) => (
+                  <p key={i} className="mu mt-1 text-[0.78rem]">
+                    • {line}
+                  </p>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      }
+      if (filtered.length === 0) {
+        return (
+          <div className="panel mt-3">
+            <p className="mu">Nenhum drink encontrado com esse filtro.</p>
+            <button
+              type="button"
+              className="b g sm mt-2"
+              onClick={() => {
+                setCat('Todas');
+                setQuery('');
+                setTags(new Set());
+              }}
+            >
+              Limpar filtros
+            </button>
+          </div>
+        );
+      }
+      return (
+        <MenuDrinksCatalog
+          recipes={filtered}
+          displayMode={displayMode}
+          design={design}
+          accent={accent}
+          surface={surface}
+          okColor={okColor}
+          textColor={colorText}
+          activePromo={activePromo}
+          onSelectDrink={(r) => openRecipeDetail(r as MenuItem)}
+        />
+      );
+    }
+
+    return (
+      <FooterOrnamentView
+        id={design.footer_ornament}
+        accent={accent}
+        barName={bar.name}
+        footerText={design.footer_text}
+      />
+    );
+  };
+
+  const selectedPriceInfo = selectedRecipe
+    ? getPromoAdjustedPrice(selectedRecipe.price, selectedRecipe.category, activePromo)
+    : null;
+
+  return (
+    <div style={{ ...bgStyle, color: colorText, minHeight: '100dvh' }}>
+      {toastMsg && <div className="toast">{toastMsg}</div>}
+
+      <div className="top">
+        <BrandMark bar={bar} />
+        <div className="row">
+          <PWAInstallButton variant="pill" />
+          <button
+            type="button"
+            className="lnk"
+            onClick={() => {
+              localStorage.removeItem('nm');
+              setName('');
+            }}
+          >
+            {name} · trocar
+          </button>
+        </div>
+      </div>
+
+      <div className="w">
+        <SideDetailWrapper sideDetail={design.side_detail} accent={accent}>
+          {blockOrder.map((blockId) => {
+            const node = renderSection(blockId);
+            return node ? <div key={blockId}>{node}</div> : null;
+          })}
+        </SideDetailWrapper>
+      </div>
+
+      {mine.length > 0 && (
+        <button type="button" className="cart" onClick={() => setShowOrders(true)}>
+          <span>
+            🍸 {totalCount} {totalCount === 1 ? 'item pedido' : 'itens pedidos'}
+          </span>
+          {priced && <b>{money(totalPay)}</b>}
+        </button>
+      )}
+
+      {selectedRecipe && (
+        <div className="ov">
+          <div
+            className={`hero c${Math.max(0, CATS.indexOf(selectedRecipe.category))}`}
+            style={
+              selectedRecipe.image_url
+                ? { backgroundImage: `url('${selectedRecipe.image_url}')` }
+                : undefined
+            }
+          >
+            {selectedRecipe.image_url ? null : '🍸'}
+          </div>
+          <div className="w">
+            <button
+              type="button"
+              className="b g"
+              onClick={() => setSelectedRecipe(null)}
+            >
+              ← Voltar
+            </button>
+            <h1 className="mt-4">{selectedRecipe.name}</h1>
+            {selectedPriceInfo?.finalPrice != null && (
+              <p className="text-[1.4rem] text-[var(--ok)] font-bold">
+                {selectedPriceInfo.discounted && selectedPriceInfo.originalPrice != null && (
+                  <span className="text-base line-through opacity-55 mr-2">
+                    {money(selectedPriceInfo.originalPrice)}
+                  </span>
+                )}
+                {money(selectedPriceInfo.finalPrice)}
+              </p>
+            )}
+            {selectedRecipe.description && <p className="desc">{selectedRecipe.description}</p>}
+
+            <h2 className="mt-5.5 mb-1">O que leva</h2>
+            <div className="chips !flex-wrap !overflow-visible">
+              {(selectedRecipe.ingredients || []).map((i, idx) => (
+                <span key={`${i.n}-${idx}`} className="chip st1">
+                  {i.n}
+                </span>
+              ))}
+            </div>
+
+            {selectedRecipe.story && (
+              <>
+                <h2 className="mt-4.5 mb-1.5">A história</h2>
+                <p className="mu story">{selectedRecipe.story}</p>
+              </>
+            )}
+
+            {mesa && (
+              <p className="tag mt-3">
+                🪑 Pedido vinculado automaticamente à <b>{mesa}</b>
+              </p>
+            )}
+
+            <label>Observação (opcional)</label>
+            <input
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              maxLength={140}
+              placeholder="Ex: sem açúcar, pouco gelo"
+            />
+
+            <label>Quantidade</label>
+            <select value={qty} onChange={(e) => setQty(Number(e.target.value))}>
+              {[1, 2, 3, 4, 5].map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+
+            <button
+              type="button"
+              className="b full mt-4"
+              disabled={!bar.open || sending}
+              onClick={() => void handlePlaceOrder(selectedRecipe, qty, note)}
+            >
+              {sending
+                ? 'Enviando...'
+                : `Pedir${
+                    selectedPriceInfo?.finalPrice != null
+                      ? ` · ${money(selectedPriceInfo.finalPrice)}`
+                      : ''
+                  }`}
+            </button>
+            {orderErr && <p className="err">{orderErr}</p>}
+          </div>
+        </div>
+      )}
+
+      {showOrders && (
+        <div className="ov">
+          <div className="w">
+            <button type="button" className="b g" onClick={() => setShowOrders(false)}>
+              ← Voltar
+            </button>
+            <h1 className="mt-3.5 mb-1">Meus pedidos</h1>
+            <p className="mu">
+              {name} · hoje{mesa ? ` · ${mesa}` : ''}
+            </p>
+            <div className="list mt-2.5">
+              {mine.map((x) => {
+                const matchRecipe = items.find(
+                  (it) => it.id === x.recipe_id || it.name === x.name
+                );
+                return (
+                  <div key={x.id}>
+                    <span>
+                      <b>
+                        {x.qty}× {x.name}
+                      </b>
+                      <br />
+                      <span className="mu">{statusLabels[x.status] || ''}</span>
+                    </span>
+                    <div className="row">
+                      {priced && x.price != null && <b>{money(x.qty * x.price)}</b>}
+                      {matchRecipe && bar.open && (
+                        <button
+                          type="button"
+                          className="b g sm"
+                          onClick={() => {
+                            setShowOrders(false);
+                            openRecipeDetail(matchRecipe);
+                          }}
+                        >
+                          Repetir
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="pay mt-4.5">
+              <div className="row sp">
+                <span>Total de itens</span>
+                <b>{totalCount}</b>
+              </div>
+              {priced && (
+                <>
+                  <div className="row sp mt-1.5">
+                    <span>Total a pagar</span>
+                    <span className="tt">{money(totalPay)}</span>
+                  </div>
+                  <p className="mu mt-2">O pagamento é feito direto no caixa.</p>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {readyAlert && (
+        <div className="ov !z-40">
+          <div className="call">
+            Seu drink está pronto!
+            <br />
+            <span className="text-[var(--ok)]">{name}</span>
+          </div>
+          <div className="w">
+            <p className="mu text-center mb-2">
+              {readyAlert.map((x) => `${x.qty}× ${x.name}`).join(', ')}
+            </p>
+            <button
+              type="button"
+              className="b ok full"
+              onClick={() => {
+                setReadyAlert(null);
+                document.title = bar.name;
+              }}
+            >
+              Vou buscar no bar
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};

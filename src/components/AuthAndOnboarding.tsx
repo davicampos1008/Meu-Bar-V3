@@ -1,0 +1,409 @@
+import React, { useState } from 'react';
+import { sb, writeBarSafe } from '../lib/supabase';
+import { slugHandle } from '../lib/utils';
+import type { JobPost, StaffProfile, UserCoords } from '../types/meubar';
+import { PWAInstallButton } from './PWAControls';
+import { BrandMark, ImageUploader, LocationPicker } from './SharedUI';
+
+export const LoginScreen: React.FC = () => {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [msg, setMsg] = useState('');
+  const [isOk, setIsOk] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const formatAuthError = (raw: string) => {
+    const low = raw.toLowerCase();
+    if (low.includes('email not confirmed')) {
+      return 'O Supabase ainda está exigindo confirmação de e-mail neste projeto. Para testar sem confirmar e-mail, desative "Confirm email" no painel do Supabase (Authentication → Providers → Email) e salve.';
+    }
+    if (low.includes('invalid login credentials')) {
+      return 'E-mail ou senha incorretos.';
+    }
+    if (low.includes('user already registered')) {
+      return 'Este e-mail já possui conta. Clique em "Entrar".';
+    }
+    return raw;
+  };
+
+  const handleAuth = async (mode: 'in' | 'up') => {
+    setMsg('');
+    setIsOk(false);
+    const em = email.trim();
+    if (!em || !password) {
+      setMsg('Preencha e-mail e senha.');
+      return;
+    }
+    if (password.length < 6) {
+      setMsg('A senha deve ter pelo menos 6 caracteres.');
+      return;
+    }
+
+    setBusy(true);
+    if (mode === 'in') {
+      const r = await sb.auth.signInWithPassword({ email: em, password });
+      setBusy(false);
+      if (r.error) {
+        setMsg(formatAuthError(r.error.message));
+      }
+      return;
+    }
+
+    const r = await sb.auth.signUp({ email: em, password });
+    if (r.error) {
+      setBusy(false);
+      setMsg(formatAuthError(r.error.message));
+      return;
+    }
+
+    if (!r.data.session) {
+      const loginTry = await sb.auth.signInWithPassword({ email: em, password });
+      setBusy(false);
+      if (loginTry.error) {
+        setMsg(formatAuthError(loginTry.error.message));
+      } else {
+        setIsOk(true);
+        setMsg('Conta criada e conectada!');
+      }
+      return;
+    }
+
+    setBusy(false);
+  };
+
+  return (
+    <div className="w narrow">
+      <div className="text-center mb-3.5">
+        <BrandMark big />
+      </div>
+      <p className="mu text-center">
+        Entre ou crie sua conta para gerenciar o bar, receitas, currículo e vagas.
+      </p>
+      <div className="panel">
+        <label>E-mail</label>
+        <input
+          type="email"
+          autoComplete="email"
+          placeholder="voce@exemplo.com"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+        />
+        <label>Senha</label>
+        <input
+          type="password"
+          autoComplete="current-password"
+          placeholder="Mínimo 6 caracteres"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') void handleAuth('in');
+          }}
+        />
+        <div className="row mt-4">
+          <button
+            type="button"
+            className="b grow"
+            disabled={busy}
+            onClick={() => void handleAuth('in')}
+          >
+            Entrar
+          </button>
+          <button
+            type="button"
+            className="b g grow"
+            disabled={busy}
+            onClick={() => void handleAuth('up')}
+          >
+            Criar conta
+          </button>
+        </div>
+        {msg && <p className={isOk ? 'ok-txt' : 'err'}>{msg}</p>}
+      </div>
+      <div className="text-center mt-4">
+        <PWAInstallButton variant="button" />
+      </div>
+    </div>
+  );
+};
+
+export const OnboardingScreen: React.FC<{
+  userId: string;
+  profile: StaffProfile;
+  jobs: JobPost[];
+  userCoords: UserCoords | null;
+  hasExistingBars: boolean;
+  onDetectCoords: () => Promise<UserCoords | null>;
+  onGoSeeker: () => void;
+  onBarCreated: (barId: string) => Promise<void>;
+  onOpenStandalone: (jobsFirst: boolean) => void;
+  onRefreshJobs: () => Promise<void>;
+  onBackToApp?: () => void;
+  onToast: (msg: string) => void;
+}> = ({
+  userId,
+  profile,
+  jobs,
+  userCoords,
+  hasExistingBars,
+  onDetectCoords,
+  onGoSeeker,
+  onBarCreated,
+  onOpenStandalone,
+  onRefreshJobs,
+  onBackToApp,
+  onToast,
+}) => {
+  const [barName, setBarName] = useState('');
+  const [barHandle, setBarHandle] = useState('');
+  const [manualHandle, setManualHandle] = useState(false);
+  const [city, setCity] = useState('');
+  const [lat, setLat] = useState('');
+  const [lon, setLon] = useState('');
+  const [kind, setKind] = useState('home');
+  const [memberName, setMemberName] = useState('');
+  const [logoUrl, setLogoUrl] = useState('');
+  const [bannerUrl, setBannerUrl] = useState('');
+  const [createErr, setCreateErr] = useState('');
+  const [creating, setCreating] = useState(false);
+
+  const [reqHandle, setReqHandle] = useState('');
+  const [reqPass, setReqPass] = useState('');
+  const [reqRole, setReqRole] = useState('barman');
+  const [reqErr, setReqErr] = useState('');
+  const [reqOk, setReqOk] = useState('');
+
+  const handleCreateBar = async () => {
+    setCreateErr('');
+    const nm = barName.trim();
+    const h = slugHandle(barHandle || nm);
+    if (nm.length < 2) {
+      setCreateErr('Digite o nome do bar.');
+      return;
+    }
+    if (h.length < 3) {
+      setCreateErr('Escolha um @ válido (mínimo 3 caracteres).');
+      return;
+    }
+    setCreating(true);
+    const ins = await writeBarSafe('insert', {
+      name: nm,
+      handle: h,
+      city: city.trim() || null,
+      lat: lat ? Number(lat) : null,
+      lon: lon ? Number(lon) : null,
+      kind,
+      logo_url: logoUrl.trim() || null,
+      banner_url: bannerUrl.trim() || null,
+      owner: userId,
+      shakers: [750, 500],
+    });
+    if (ins.error || !ins.data) {
+      setCreating(false);
+      setCreateErr(
+        ins.error?.code === '23505'
+          ? 'Esse @ já está em uso.'
+          : ins.error?.message || 'Erro ao criar bar.'
+      );
+      return;
+    }
+
+    const memberNameVal = memberName.trim() || profile.display_name || 'Dono';
+    const memRes = await sb.from('bar_members').insert({
+      bar_id: ins.data.id,
+      user_id: userId,
+      role: 'owner',
+      name: memberNameVal,
+    });
+    if (memRes.error && String(memRes.error.message || '').includes('bar_members_role_check')) {
+      await sb.from('bar_members').insert({
+        bar_id: ins.data.id,
+        user_id: userId,
+        role: 'dono',
+        name: memberNameVal,
+      });
+    }
+    localStorage.setItem('last_bar_' + userId, ins.data.id);
+    setCreating(false);
+    await onBarCreated(ins.data.id);
+  };
+
+  const handleRequestService = async () => {
+    setReqErr('');
+    setReqOk('');
+    const r = await sb.rpc('request_service_by_handle', {
+      p_handle: reqHandle,
+      p_password: reqPass,
+      p_role: reqRole,
+    });
+    if (r.error) {
+      setReqErr(r.error.message);
+      return;
+    }
+    setReqOk('Solicitação enviada com seu currículo!');
+    await onRefreshJobs();
+  };
+
+  return (
+    <div>
+      <div className="top">
+        <BrandMark />
+        <div className="row">
+          <PWAInstallButton variant="pill" />
+          <button type="button" className="lnk" onClick={() => void sb.auth.signOut()}>
+            Sair
+          </button>
+        </div>
+      </div>
+
+      <div className="w narrow">
+        {hasExistingBars && onBackToApp && (
+          <button type="button" className="b g sm mb-3" onClick={onBackToApp}>
+            ← Voltar ao meu bar
+          </button>
+        )}
+        <h1>Começar no Meu Bar</h1>
+        <p className="mu">
+          Crie seu bar, entre numa equipe, ou use só para <b>currículo e vagas</b>.
+        </p>
+
+        <div className="panel !border-[var(--ac)]">
+          <h2>Só quero emprego</h2>
+          <p className="mu">Sem criar bar agora.</p>
+          <button type="button" className="b full mt-2" onClick={onGoSeeker}>
+            Continuar sem criar bar
+          </button>
+        </div>
+
+        <div className="panel">
+          <h2>Criar novo bar</h2>
+          <label>Nome do bar</label>
+          <input
+            value={barName}
+            placeholder="Ex: Minha casa"
+            onChange={(e) => {
+              const v = e.target.value;
+              setBarName(v);
+              if (!manualHandle) setBarHandle(slugHandle(v));
+            }}
+          />
+          <label>@ do bar (único)</label>
+          <input
+            value={barHandle}
+            placeholder="Ex: minha_casa_7228"
+            onChange={(e) => {
+              setManualHandle(true);
+              setBarHandle(slugHandle(e.target.value));
+            }}
+          />
+
+          <LocationPicker
+            label="Localização do bar"
+            placeholder="Ex: Asa Norte, Brasília, DF"
+            value={city}
+            userCoords={userCoords}
+            showGeoButton
+            onDetectCoords={onDetectCoords}
+            onToast={onToast}
+            onChange={(val, newLat, newLon) => {
+              setCity(val);
+              if (newLat != null) setLat(String(newLat));
+              if (newLon != null) setLon(String(newLon));
+            }}
+          />
+
+          <label>Tipo</label>
+          <select value={kind} onChange={(e) => setKind(e.target.value)}>
+            <option value="home">Em casa / Amigos (sem preço)</option>
+            <option value="bar">Bar / Restaurante (com preços)</option>
+          </select>
+
+          <label>Seu nome na equipe</label>
+          <input
+            value={memberName}
+            onChange={(e) => setMemberName(e.target.value)}
+            placeholder="Ex: Davi"
+          />
+
+          <ImageUploader
+            label="Logo do bar (foto ou galeria)"
+            value={logoUrl}
+            folder="logos"
+            userId={userId}
+            onChange={setLogoUrl}
+            onToast={onToast}
+          />
+          <ImageUploader
+            label="Banner do bar (foto ou galeria)"
+            value={bannerUrl}
+            folder="banners"
+            userId={userId}
+            onChange={setBannerUrl}
+            onToast={onToast}
+          />
+
+          <button
+            type="button"
+            className="b full mt-3.5"
+            disabled={creating}
+            onClick={() => void handleCreateBar()}
+          >
+            {creating ? 'Criando...' : 'Criar bar'}
+          </button>
+          {createErr && <p className="err">{createErr}</p>}
+        </div>
+
+        <div className="panel">
+          <h2>Solicitar serviço por @ do bar + senha</h2>
+          <label>@ do bar</label>
+          <input
+            value={reqHandle}
+            onChange={(e) => setReqHandle(e.target.value)}
+            placeholder="Ex: @minha_casa_7228"
+          />
+          <label>Senha de serviço</label>
+          <input
+            value={reqPass}
+            onChange={(e) => setReqPass(e.target.value)}
+            placeholder="Senha gerada pelo dono ou gerente"
+          />
+          <label>Função</label>
+          <select value={reqRole} onChange={(e) => setReqRole(e.target.value)}>
+            <option value="barman">Barman</option>
+            <option value="garcom">Garçom</option>
+            <option value="cozinha">Cozinha</option>
+            <option value="caixa">Caixa</option>
+          </select>
+          <button
+            type="button"
+            className="b g full mt-3"
+            onClick={() => void handleRequestService()}
+          >
+            Enviar solicitação
+          </button>
+          {reqErr && <p className="err">{reqErr}</p>}
+          {reqOk && <p className="ok-txt">{reqOk}</p>}
+        </div>
+
+        <div className="panel">
+          <h2>Currículo & Vagas</h2>
+          <div className="row mt-2">
+            <button
+              type="button"
+              className="b g grow"
+              onClick={() => onOpenStandalone(false)}
+            >
+              Meu Currículo
+            </button>
+            <button
+              type="button"
+              className="b g grow"
+              onClick={() => onOpenStandalone(true)}
+            >
+              Mural de Vagas ({jobs.length})
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};

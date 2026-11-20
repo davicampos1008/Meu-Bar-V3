@@ -1,0 +1,10 @@
+{
+  "appId": "com.meubar.app",
+  "appName": "Meu Bar",
+  "webDir": "dist",
+  "bundledWebRuntime": false,
+  "android": {
+    "allowMixedContent": false,
+    "backgroundColor": "#120d0c"
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "Meu Bar",
+  "description": "Receitas, estoque, cardápio QR, pedidos em tempo real, equipe e vagas do seu bar.",
+  "requestFramePermissions": ["geolocation", "camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
