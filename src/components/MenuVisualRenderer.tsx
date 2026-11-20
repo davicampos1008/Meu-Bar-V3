@@ -24,6 +24,10 @@ export function buildMenuBackgroundStyle(
       return {
         background: `radial-gradient(circle at 18% 12%, ${ac}30 0%, transparent 45%), radial-gradient(circle at 86% 24%, ${c2} 0%, transparent 55%), linear-gradient(165deg, ${c2} 0%, ${c1} 72%)`,
       };
+    case 'sunset-glow':
+      return {
+        background: `radial-gradient(circle at 50% 100%, ${ac}35 0%, transparent 55%), linear-gradient(180deg, ${c1} 0%, ${c2} 58%, ${ac}22 100%)`,
+      };
     case 'chalkboard':
       return {
         backgroundColor: c1,
@@ -49,10 +53,29 @@ export function buildMenuBackgroundStyle(
       return {
         background: `radial-gradient(ellipse at 50% 10%, ${ac}24 0%, ${c2} 42%, ${c1} 85%)`,
       };
+    case 'carbon':
+      return {
+        backgroundColor: c1,
+        backgroundImage: `linear-gradient(27deg, ${c2}99 5px, transparent 5px), linear-gradient(207deg, ${c2}99 5px, transparent 5px), linear-gradient(27deg, ${ac}14 5px, transparent 5px), linear-gradient(207deg, ${ac}14 5px, transparent 5px)`,
+        backgroundSize: '18px 18px',
+        backgroundPosition: '0 2px, 9px 7px, 0 11px, 9px -2px',
+      };
     case 'diagonal':
       return {
         backgroundColor: c1,
         backgroundImage: `repeating-linear-gradient(135deg, ${c2}66 0px, ${c2}66 12px, transparent 12px, transparent 28px)`,
+      };
+    case 'chevron':
+      return {
+        backgroundColor: c1,
+        backgroundImage: `linear-gradient(135deg, ${c2}55 25%, transparent 25%), linear-gradient(225deg, ${c2}55 25%, transparent 25%), linear-gradient(45deg, ${ac}16 25%, transparent 25%), linear-gradient(315deg, ${ac}16 25%, transparent 25%)`,
+        backgroundPosition: '12px 0, 12px 0, 0 0, 0 0',
+        backgroundSize: '24px 24px',
+      };
+    case 'bamboo-lines':
+      return {
+        backgroundColor: c1,
+        backgroundImage: `repeating-linear-gradient(90deg, ${c2}66 0px, ${c2}66 2px, transparent 2px, transparent 22px), radial-gradient(circle at 50% 0%, ${ac}1f 0%, transparent 60%)`,
       };
     case 'grid':
       return {
@@ -65,6 +88,13 @@ export function buildMenuBackgroundStyle(
         backgroundColor: c1,
         backgroundImage: `radial-gradient(${ac}28 1.5px, transparent 1.5px)`,
         backgroundSize: '18px 18px',
+      };
+    case 'terrazzo':
+      return {
+        backgroundColor: c1,
+        backgroundImage: `radial-gradient(${ac}2b 2px, transparent 2px), radial-gradient(${c2}bb 2.5px, transparent 2.5px)`,
+        backgroundSize: '32px 32px, 24px 24px',
+        backgroundPosition: '0 0, 11px 14px',
       };
     case 'checker':
       return {
@@ -86,6 +116,7 @@ export function buildMenuBackgroundStyle(
 }
 
 export function getLogoSizePx(size?: MenuDesignConfig['logo_size']): number {
+  if (size === 'xs') return 38;
   if (size === 'sm') return 48;
   if (size === 'lg') return 88;
   if (size === 'xl') return 112;
@@ -125,6 +156,36 @@ export function getLogoShapeStyle(
         ...base,
         borderRadius: '26px 8px 26px 8px',
         border: `2px solid ${accent}`,
+      };
+    case 'hexagon':
+      return {
+        ...base,
+        clipPath: 'polygon(28% 2%, 72% 2%, 98% 28%, 98% 72%, 72% 98%, 28% 98%, 2% 72%, 2% 28%)',
+        border: `2px solid ${accent}`,
+        boxShadow: `0 0 18px ${accent}44`,
+      };
+    case 'arch':
+      return {
+        ...base,
+        borderRadius: '9999px 9999px 10px 10px',
+        border: `2px solid ${accent}`,
+      };
+    case 'pill':
+      return {
+        ...base,
+        borderRadius: '9999px',
+        border: `2px solid ${accent}`,
+        padding: '2px',
+        boxShadow: `0 0 0 2px ${accent}33`,
+      };
+    case 'polaroid':
+      return {
+        ...base,
+        borderRadius: '6px',
+        padding: '4px 4px 11px 4px',
+        background: '#fafaf9',
+        border: `1px solid ${accent}`,
+        boxShadow: '0 8px 22px rgba(0,0,0,0.45)',
       };
     case 'glow':
       return {
@@ -204,6 +265,21 @@ export const TopOrnamentView: React.FC<{ id?: string; accent: string }> = ({ id,
           <span>───</span>
         </div>
         <div className="h-[1px] w-full opacity-75" style={{ background: accent }} />
+      </div>
+    );
+  }
+
+  if (id === 'speakeasy-crest') {
+    return (
+      <div className="flex items-center justify-center gap-2 py-1.5" style={{ color: accent }}>
+        <span className="h-[1px] flex-1 opacity-55" style={{ background: accent }} />
+        <span
+          className="px-3 py-0.5 text-[10px] font-semibold tracking-[0.22em] uppercase border rounded-sm"
+          style={{ borderColor: accent }}
+        >
+          🍸 COQUETELARIA PRIVÊ
+        </span>
+        <span className="h-[1px] flex-1 opacity-55" style={{ background: accent }} />
       </div>
     );
   }
@@ -289,6 +365,38 @@ export const TopOrnamentView: React.FC<{ id?: string; accent: string }> = ({ id,
       <div className="flex items-center justify-center gap-2 py-1.5 text-sm" style={{ color: accent }}>
         <span className="h-[1px] flex-1 opacity-40" style={{ background: accent }} />
         <span>🌿 ✦ 🍋 ✦ 🌿</span>
+        <span className="h-[1px] flex-1 opacity-40" style={{ background: accent }} />
+      </div>
+    );
+  }
+
+  if (id === 'tropical-bar') {
+    return (
+      <div className="flex items-center justify-center gap-2.5 py-1.5 text-xs tracking-[0.18em] uppercase" style={{ color: accent }}>
+        <span>🌴</span>
+        <span className="h-[1px] flex-1 opacity-45" style={{ background: accent }} />
+        <span>SUNSET & DRINKS</span>
+        <span className="h-[1px] flex-1 opacity-45" style={{ background: accent }} />
+        <span>🍹</span>
+      </div>
+    );
+  }
+
+  if (id === 'rooftop-horizon') {
+    return (
+      <div className="flex items-center justify-center gap-2.5 py-1.5 text-xs tracking-[0.22em]" style={{ color: accent }}>
+        <span className="h-[1px] flex-1 opacity-45" style={{ background: accent }} />
+        <span>🌒 ✦ 🌕 ✦ 🌘</span>
+        <span className="h-[1px] flex-1 opacity-45" style={{ background: accent }} />
+      </div>
+    );
+  }
+
+  if (id === 'jazz-vinyl') {
+    return (
+      <div className="flex items-center justify-center gap-2 py-1.5 text-[11px] font-semibold tracking-[0.18em] uppercase" style={{ color: accent }}>
+        <span className="h-[1px] flex-1 opacity-40" style={{ background: accent }} />
+        <span>🎷 SOM & COQUETÉIS 🥃</span>
         <span className="h-[1px] flex-1 opacity-40" style={{ background: accent }} />
       </div>
     );
@@ -383,6 +491,29 @@ export const FooterOrnamentView: React.FC<{
           style={{ borderColor: accent, color: accent }}
         >
           🍸
+        </div>
+      )}
+      {id === 'cheers-badge' && (
+        <div className="inline-flex items-center gap-2 px-3.5 py-1 rounded-lg border mb-2 text-xs font-bold uppercase tracking-wider" style={{ borderColor: `${accent}88`, background: `${accent}18`, color: accent }}>
+          <span>🥂 Saúde · {barName}</span>
+        </div>
+      )}
+      {id === 'neon-underline' && (
+        <div
+          className="h-[2px] w-2/3 mx-auto mb-2.5 rounded-full"
+          style={{ background: accent, boxShadow: `0 0 12px ${accent}` }}
+        />
+      )}
+      {id === 'botanical-footer' && (
+        <div className="flex items-center justify-center gap-2 mb-2 text-xs" style={{ color: accent }}>
+          <span className="h-[1px] w-12 opacity-40" style={{ background: accent }} />
+          <span>🌿 ✦ 🍋 ✦ 🌿</span>
+          <span className="h-[1px] w-12 opacity-40" style={{ background: accent }} />
+        </div>
+      )}
+      {id === 'vinyl-spin' && (
+        <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full border mb-2 text-[11px] uppercase tracking-[0.16em]" style={{ borderColor: `${accent}66`, color: accent }}>
+          <span>💿 BOA MÚSICA & BONS DRINKS</span>
         </div>
       )}
       {txt && <p className="text-xs opacity-70">{txt}</p>}
@@ -495,6 +626,42 @@ export const SideDetailWrapper: React.FC<{
         paddingRight: '12px',
       };
       break;
+    case 'minimal-dots':
+      wrapperStyle = {
+        ...wrapperStyle,
+        borderLeft: `3px dotted ${accent}99`,
+        borderRight: `3px dotted ${accent}99`,
+        paddingLeft: '12px',
+        paddingRight: '12px',
+      };
+      break;
+    case 'bamboo-sides':
+      wrapperStyle = {
+        ...wrapperStyle,
+        borderLeft: `5px solid ${accent}aa`,
+        borderRight: `5px solid ${accent}aa`,
+        borderRadius: '14px',
+        padding: '10px 14px',
+      };
+      break;
+    case 'laser-edges':
+      wrapperStyle = {
+        ...wrapperStyle,
+        borderLeft: `2px solid ${accent}`,
+        borderRight: `2px solid ${accent}`,
+        boxShadow: `-6px 0 18px -6px ${accent}, 6px 0 18px -6px ${accent}`,
+        paddingLeft: '12px',
+        paddingRight: '12px',
+      };
+      break;
+    case 'editorial-frame':
+      wrapperStyle = {
+        ...wrapperStyle,
+        border: `1px solid ${accent}66`,
+        padding: '14px',
+        borderRadius: '4px',
+      };
+      break;
     default:
       break;
   }
@@ -549,6 +716,7 @@ export const SectionHeadingRibbon: React.FC<{
   surface: string;
   text: string;
 }> = ({ title, styleId, accent, surface, text }) => {
+  void surface;
   switch (styleId) {
     case 'ribbon-vintage':
       return (
@@ -600,6 +768,52 @@ export const SectionHeadingRibbon: React.FC<{
           <span className="h-[1px] flex-1 opacity-60" style={{ background: accent }} />
         </div>
       );
+    case 'editorial-center':
+      return (
+        <div className="my-2.5 flex items-center justify-center gap-3" style={{ color: accent }}>
+          <span className="h-[1px] w-8 opacity-55" style={{ background: accent }} />
+          <span className="text-xs font-serif italic font-semibold tracking-[0.16em] uppercase">
+            {title}
+          </span>
+          <span className="h-[1px] w-8 opacity-55" style={{ background: accent }} />
+        </div>
+      );
+    case 'boteco-chalk':
+      return (
+        <div className="my-2">
+          <span
+            className="inline-block text-sm font-bold pb-1 border-b-2 border-dashed tracking-wide"
+            style={{ color: accent, borderColor: accent }}
+          >
+            🍺 {title}
+          </span>
+        </div>
+      );
+    case 'minimal-bar':
+      return (
+        <div
+          className="my-2 pl-2.5 py-0.5 text-sm font-bold uppercase tracking-wider"
+          style={{ borderLeft: `4px solid ${accent}`, color: text }}
+        >
+          {title}
+        </div>
+      );
+    case 'tropical-leaf':
+      return (
+        <div className="my-2 flex items-center gap-2">
+          <span
+            className="px-3 py-0.5 rounded-full text-xs font-bold tracking-wide"
+            style={{
+              background: `${accent}24`,
+              color: accent,
+              border: `1px solid ${accent}66`,
+            }}
+          >
+            🌿 {title}
+          </span>
+          <span className="h-[1px] flex-1 opacity-35" style={{ background: accent }} />
+        </div>
+      );
     case 'clean':
     default:
       return (
@@ -611,7 +825,6 @@ export const SectionHeadingRibbon: React.FC<{
         </div>
       );
   }
-  void surface;
 };
 
 export const PriceTagBadge: React.FC<{
@@ -658,6 +871,82 @@ export const PriceTagBadge: React.FC<{
     );
   }
 
+  if (priceStyle === 'ribbon-tag') {
+    return (
+      <div className="text-right shrink-0">
+        {discounted && originalPrice != null && (
+          <div className="text-[10px] line-through opacity-60">{money(originalPrice)}</div>
+        )}
+        <span
+          className="inline-block px-2.5 py-0.5 text-xs font-bold whitespace-nowrap"
+          style={{
+            background: okColor || accent,
+            color: '#0e0c0a',
+            borderRadius: '2px 10px 2px 10px',
+          }}
+        >
+          {formatted}
+        </span>
+      </div>
+    );
+  }
+
+  if (priceStyle === 'dark-stamp') {
+    return (
+      <div className="text-right shrink-0">
+        {discounted && originalPrice != null && (
+          <div className="text-[10px] line-through opacity-60">{money(originalPrice)}</div>
+        )}
+        <span
+          className="inline-block px-2 py-0.5 rounded text-xs font-extrabold whitespace-nowrap border"
+          style={{
+            background: 'rgba(0,0,0,0.55)',
+            borderColor: `${accent}aa`,
+            color: okColor || accent,
+          }}
+        >
+          {formatted}
+        </span>
+      </div>
+    );
+  }
+
+  if (priceStyle === 'neon-glow') {
+    return (
+      <div className="text-right shrink-0">
+        {discounted && originalPrice != null && (
+          <div className="text-[10px] line-through opacity-60">{money(originalPrice)}</div>
+        )}
+        <span
+          className="inline-block px-2 py-0.5 rounded-md text-xs font-extrabold whitespace-nowrap border"
+          style={{
+            borderColor: okColor || accent,
+            color: okColor || accent,
+            boxShadow: `0 0 10px ${(okColor || accent)}66`,
+          }}
+        >
+          {formatted}
+        </span>
+      </div>
+    );
+  }
+
+  if (priceStyle === 'luxury-serif') {
+    return (
+      <div className="text-right shrink-0">
+        {discounted && originalPrice != null && (
+          <div className="text-[10px] line-through opacity-60">{money(originalPrice)}</div>
+        )}
+        <span
+          className="text-sm font-bold italic whitespace-nowrap font-serif tracking-wide"
+          style={{ color: accent || okColor }}
+        >
+          {formatted}
+        </span>
+      </div>
+    );
+  }
+
   if (priceStyle === 'dotted-badge') {
     return (
       <div className="text-right shrink-0">
@@ -679,7 +968,7 @@ export const PriceTagBadge: React.FC<{
       {discounted && originalPrice != null && (
         <div className="text-[10px] line-through opacity-60">{money(originalPrice)}</div>
       )}
-      <span className="tag pr" style={{ color: okColor }}>
+      <span className="pr text-sm font-bold whitespace-nowrap" style={{ color: okColor }}>
         {formatted}
       </span>
     </div>
@@ -716,14 +1005,63 @@ export const MenuDrinksCatalog: React.FC<{
   onSelectDrink,
 }) => {
   const mode = displayMode || 'grid-classic';
-  const cardExtraCls =
-    design.card_style === 'bordered'
-      ? '!border-2'
-      : design.card_style === 'elevated'
-      ? 'shadow-lg'
-      : design.card_style === 'minimal'
-      ? '!border-transparent !bg-transparent'
-      : '';
+
+  const getCardStyleObj = (isPolaroid: boolean): React.CSSProperties => {
+    const base: React.CSSProperties = {
+      background: surface,
+      borderColor: `${accent}2b`,
+      color: textColor,
+    };
+
+    switch (design.card_style) {
+      case 'glass':
+        return {
+          ...base,
+          background: `${surface}99`,
+          backdropFilter: 'blur(10px)',
+          border: `1px solid ${accent}44`,
+          boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.12), 0 8px 20px rgba(0,0,0,0.22)',
+        };
+      case 'bordered':
+        return {
+          ...base,
+          border: `2px solid ${accent}`,
+        };
+      case 'elevated':
+        return {
+          ...base,
+          border: `1px solid ${accent}33`,
+          boxShadow: '0 14px 30px rgba(0,0,0,0.46), 0 2px 6px rgba(0,0,0,0.28)',
+        };
+      case 'minimal':
+        return {
+          ...base,
+          background: isPolaroid ? surface : 'transparent',
+          border: '1px solid transparent',
+          boxShadow: 'none',
+        };
+      case 'neon':
+        return {
+          ...base,
+          border: `1.5px solid ${accent}`,
+          boxShadow: `0 0 15px ${accent}52, inset 0 0 10px ${accent}1a`,
+        };
+      case 'ticket':
+        return {
+          ...base,
+          border: `2px dashed ${accent}88`,
+          borderRadius: '10px',
+        };
+      case 'soft-pill':
+        return {
+          ...base,
+          border: `1px solid ${accent}44`,
+          borderRadius: '24px',
+        };
+      default:
+        return base;
+    }
+  };
 
   const effectivePriceStyle =
     mode === 'mode-gold-pills' && (!design.price_style || design.price_style === 'clean')
@@ -756,29 +1094,24 @@ export const MenuDrinksCatalog: React.FC<{
     const isHorizontalDotted = mode === 'mode-dotted-menu';
     const isGoldPills = mode === 'mode-gold-pills';
     const isMagazine = mode === 'mode-magazine';
+    const isBistro = mode === 'mode-bistro-cards';
+    const isSpotlight = mode === 'mode-spotlight-cards';
     const isPolaroid = mode === 'mode-polaroid';
+    const isWideRow = mode === 'mode-single' || mode === 'mode-list';
+    const isSmallBlocks = mode === 'mode-small-blocks';
 
-    const cardStyleObj: React.CSSProperties = {
-      background:
-        design.card_style === 'minimal'
-          ? 'transparent'
-          : isPolaroid
-          ? surface
-          : surface,
-      borderColor: design.card_style === 'bordered' ? accent : `${accent}2b`,
-      color: textColor,
-    };
+    const cardStyleObj = getCardStyleObj(isPolaroid);
 
     const content = (
       <>
         <RecipeTile recipe={r} />
 
         {isHorizontalDotted ? (
-          <div className="flex-1 min-w-0 pr-3 py-2">
+          <div className="flex-1 min-w-0 px-3 py-2">
             <div className="flex items-baseline gap-2">
-              <span className="font-semibold text-sm truncate">{r.name}</span>
+              <span className="font-semibold text-sm min-w-0 truncate">{r.name}</span>
               <span
-                className="flex-1 border-b border-dotted opacity-45"
+                className="flex-1 min-w-[10px] border-b border-dotted opacity-45"
                 style={{ borderColor: accent }}
               />
               <PriceTagBadge
@@ -797,9 +1130,9 @@ export const MenuDrinksCatalog: React.FC<{
             )}
           </div>
         ) : isGoldPills ? (
-          <div className="flex-1 min-w-0 p-2.5 flex items-center justify-between gap-2">
-            <div className="min-w-0">
-              <div className="font-bold text-sm truncate">{r.name}</div>
+          <div className="flex-1 min-w-0 p-2.5 flex items-center justify-between gap-2.5">
+            <div className="min-w-0 flex-1">
+              <div className="font-bold text-sm leading-snug break-words">{r.name}</div>
               {ingLine && <div className="text-[11px] opacity-70 truncate mt-0.5">{ingLine}</div>}
               {tg.length > 0 && <span className="pill-tag">{tg.join(' · ')}</span>}
             </div>
@@ -812,11 +1145,34 @@ export const MenuDrinksCatalog: React.FC<{
               okColor={okColor}
             />
           </div>
-        ) : isMagazine ? (
-          <div className="flex-1 min-w-0 p-3 flex flex-col justify-between gap-1.5">
-            <div className="flex items-start justify-between gap-2">
-              <div>
-                <div className="font-bold text-base leading-tight">{r.name}</div>
+        ) : isBistro ? (
+          <div className="flex-1 min-w-0 p-2.5 flex flex-col justify-between gap-1.5">
+            <div>
+              <div className="font-bold text-sm leading-snug break-words">{r.name}</div>
+              {ingLine && (
+                <div className="text-[11px] opacity-75 line-clamp-2 mt-0.5">{ingLine}</div>
+              )}
+            </div>
+            <div
+              className="flex items-center justify-between gap-2 pt-1.5 border-t"
+              style={{ borderColor: `${accent}26` }}
+            >
+              <span className="text-[11px] opacity-70 truncate">{r.category}</span>
+              <PriceTagBadge
+                price={finalPrice}
+                originalPrice={originalPrice}
+                discounted={discounted}
+                priceStyle={effectivePriceStyle}
+                accent={accent}
+                okColor={okColor}
+              />
+            </div>
+          </div>
+        ) : isMagazine || isSpotlight ? (
+          <div className="flex-1 min-w-0 p-3 flex flex-col justify-between gap-2">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0 flex-1">
+                <div className="font-bold text-base leading-snug break-words">{r.name}</div>
                 <span className="pill-tag">{r.category}</span>
               </div>
               <PriceTagBadge
@@ -834,12 +1190,10 @@ export const MenuDrinksCatalog: React.FC<{
               </div>
             )}
           </div>
-        ) : (
+        ) : isWideRow ? (
           <div className="t">
-            <div className="min-w-0">
-              <div className={`${isPolaroid ? 'font-serif text-sm' : ''} leading-tight`}>
-                {r.name}
-              </div>
+            <div className="min-w-0 flex-1">
+              <div className="font-semibold leading-snug break-words">{r.name}</div>
               {tg.length > 0 && <span className="pill-tag">{tg.join(' · ')}</span>}
             </div>
             <PriceTagBadge
@@ -851,6 +1205,38 @@ export const MenuDrinksCatalog: React.FC<{
               okColor={okColor}
             />
           </div>
+        ) : (
+          <div className="t">
+            <div className="min-w-0 w-full">
+              <div
+                className={`${isPolaroid ? 'font-serif text-sm' : ''} ${
+                  isSmallBlocks ? 'text-xs' : 'text-sm'
+                } font-semibold leading-snug break-words`}
+              >
+                {r.name}
+              </div>
+              {!isSmallBlocks && tg.length > 0 && (
+                <span className="pill-tag">{tg.join(' · ')}</span>
+              )}
+            </div>
+            <div
+              className={`flex items-center ${
+                isSmallBlocks ? 'justify-start' : 'justify-between'
+              } gap-2 w-full mt-auto pt-1`}
+            >
+              {!isSmallBlocks && (
+                <span className="text-[10px] opacity-60 truncate">{r.category}</span>
+              )}
+              <PriceTagBadge
+                price={finalPrice}
+                originalPrice={originalPrice}
+                discounted={discounted}
+                priceStyle={effectivePriceStyle}
+                accent={accent}
+                okColor={okColor}
+              />
+            </div>
+          </div>
         )}
       </>
     );
@@ -860,7 +1246,7 @@ export const MenuDrinksCatalog: React.FC<{
         <button
           key={r.id}
           type="button"
-          className={`card ${cardExtraCls}`}
+          className="card"
           style={cardStyleObj}
           onClick={() => onSelectDrink(r)}
         >
@@ -870,7 +1256,7 @@ export const MenuDrinksCatalog: React.FC<{
     }
 
     return (
-      <div key={r.id} className={`card !cursor-default ${cardExtraCls}`} style={cardStyleObj}>
+      <div key={r.id} className="card !cursor-default" style={cardStyleObj}>
         {content}
       </div>
     );
@@ -910,7 +1296,20 @@ export const MenuDrinksCatalog: React.FC<{
     );
   }
 
-  return <div className={`menu-items ${mode} mt-2.5`}>{recipes.map(renderSingleCard)}</div>;
+  return (
+    <div className="mt-2">
+      {design.section_style && design.section_style !== 'clean' && (
+        <SectionHeadingRibbon
+          title="Carta de Drinks"
+          styleId={design.section_style}
+          accent={accent}
+          surface={surface}
+          text={textColor}
+        />
+      )}
+      <div className={`menu-items ${mode} mt-2`}>{recipes.map(renderSingleCard)}</div>
+    </div>
+  );
 };
 
 export const MenuPromoBanner: React.FC<{
@@ -953,6 +1352,49 @@ export const MenuPromoBanner: React.FC<{
   );
 };
 
+function getCrestBaseContainerStyle(baseId: string | undefined, accent: string): React.CSSProperties {
+  switch (baseId) {
+    case 'square':
+      return { borderRadius: '6px', border: `2px solid ${accent}` };
+    case 'rounded':
+      return { borderRadius: '16px', border: `2px solid ${accent}` };
+    case 'ring':
+      return {
+        borderRadius: '9999px',
+        border: `3px double ${accent}`,
+        boxShadow: `0 0 14px ${accent}55`,
+      };
+    case 'shield':
+      return {
+        borderRadius: '12px 12px 28px 28px',
+        border: `2px solid ${accent}`,
+        boxShadow: `0 4px 14px ${accent}40`,
+      };
+    case 'starburst':
+      return {
+        borderRadius: '18px 4px 18px 4px',
+        border: `2px solid ${accent}`,
+        boxShadow: `0 0 16px ${accent}55`,
+      };
+    case 'crown':
+      return {
+        borderRadius: '9999px',
+        border: `2px solid ${accent}`,
+        boxShadow: `0 -4px 14px ${accent}44`,
+      };
+    case 'ribbon':
+      return {
+        borderRadius: '12px',
+        border: `2px solid ${accent}`,
+      };
+    case 'none':
+      return { border: 'none' };
+    case 'circle':
+    default:
+      return { borderRadius: '9999px', border: `2px solid ${accent}` };
+  }
+}
+
 export const MenuHeaderCard: React.FC<{
   bar: Partial<Bar>;
   design: MenuDesignConfig;
@@ -976,10 +1418,10 @@ export const MenuHeaderCard: React.FC<{
     right: 'right',
   };
 
-  const be = CREST_BASES.find((x) => x.id === (bar.crest_base || 'circle'))?.emoji || '';
+  const baseId = bar.crest_base || 'circle';
+  const be = CREST_BASES.find((x) => x.id === baseId)?.emoji || '';
   const ie = CREST_ICONS.find((x) => x.id === (bar.crest_icon || 'glass'))?.emoji || '🍸';
   const oe = CREST_ORNAMENTS.find((x) => x.id === (bar.crest_ornament || 'none'))?.emoji || '';
-  const crestSymbol = `${oe ? oe + ' ' : ''}${ie}${be ? ' ' + be : ''}`;
 
   const logoPx = getLogoSizePx(design.logo_size);
   const offsetX = design.logo_offset_x || 0;
@@ -1018,6 +1460,8 @@ export const MenuHeaderCard: React.FC<{
     overflow: 'hidden',
   };
 
+  const crestBaseBox = getCrestBaseContainerStyle(baseId, accent);
+
   return (
     <div className={`crest-frame ${borderCls !== 'crest-border-none' ? borderCls : ''}`} style={frameStyle}>
       {hasBanner && (
@@ -1051,6 +1495,14 @@ export const MenuHeaderCard: React.FC<{
               justifyContent: 'center',
             }}
           >
+            {baseId === 'crown' && (
+              <span
+                className="pointer-events-none absolute -top-3.5 left-1/2 -translate-x-1/2 text-sm z-[3]"
+                aria-hidden
+              >
+                👑
+              </span>
+            )}
             {bar.logo_url ? (
               <img
                 key={bar.logo_url}
@@ -1075,11 +1527,30 @@ export const MenuHeaderCard: React.FC<{
                   alignItems: 'center',
                   justifyContent: 'center',
                   fontSize: logoPx >= 80 ? '2rem' : '1.45rem',
-                  ...getLogoShapeStyle(design.logo_shape, accent),
+                  ...crestBaseBox,
+                  ...(design.logo_shape && design.logo_shape !== 'rounded'
+                    ? getLogoShapeStyle(design.logo_shape, accent)
+                    : {}),
                 }}
               >
-                {crestSymbol}
+                <span>{ie}</span>
               </div>
+            )}
+
+            {/* Emblema / Ornamento do Brasão visível mesmo com logo própria */}
+            {(oe || (bar.logo_url && (ie || baseId !== 'none'))) && (
+              <span
+                className="pointer-events-none absolute -bottom-1.5 -right-2 px-1.5 py-0.5 rounded-full text-[11px] font-bold shadow-md flex items-center gap-0.5 z-[3]"
+                style={{
+                  background: surface,
+                  border: `1.5px solid ${accent}`,
+                  color: text,
+                }}
+              >
+                {oe && <span>{oe}</span>}
+                {bar.logo_url && <span>{ie}</span>}
+                {!bar.logo_url && be && <span>{be}</span>}
+              </span>
             )}
           </div>
         </div>

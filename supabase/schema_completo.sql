@@ -348,6 +348,9 @@ select json_build_object(
               and (
                 lower(unaccent(trim(bi.name))) = lower(unaccent(trim(i->>'n')))
                 or lower(unaccent(trim(bi.name))) like lower(unaccent(trim(i->>'n'))) || ' %'
+                or lower(unaccent(trim(bi.name))) like lower(unaccent(trim(i->>'n'))) || '-%'
+                or lower(unaccent(trim(bi.name))) like lower(unaccent(trim(i->>'n'))) || '/%'
+                or lower(unaccent(trim(bi.name))) like lower(unaccent(trim(i->>'n'))) || '(%'
               )
           )
       )

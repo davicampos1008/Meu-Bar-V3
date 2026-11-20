@@ -86,7 +86,7 @@ export const StoreStudioView: React.FC<{
   onToast,
 }) => {
   const [studioTab, setStudioTab] = useState<StudioTab>(initialTab || 'menu');
-  const [mobilePreviewOpen, setMobilePreviewOpen] = useState(true);
+  const [previewOpen, setPreviewOpen] = useState(true);
 
   useEffect(() => {
     if (initialTab) setStudioTab(initialTab);
@@ -126,6 +126,16 @@ export const StoreStudioView: React.FC<{
   const [canvaOpen, setCanvaOpen] = useState(false);
   const [selectedBlock, setSelectedBlock] = useState<MenuBlockId>('header');
   const [draggedBlock, setDraggedBlock] = useState<MenuBlockId | null>(null);
+
+  useEffect(() => {
+    if (!canvaOpen) return;
+    const onBackCloseCanva = (ev: Event) => {
+      ev.preventDefault();
+      setCanvaOpen(false);
+    };
+    window.addEventListener('meubar:back-intercept', onBackCloseCanva);
+    return () => window.removeEventListener('meubar:back-intercept', onBackCloseCanva);
+  }, [canvaOpen]);
 
   // --- Aba 3: Promoções ---
   const [promotions, setPromotions] = useState<MenuPromotion[]>(() => getBarPromotions(bar));
@@ -356,6 +366,7 @@ export const StoreStudioView: React.FC<{
         lon: lon ? Number(lon) : null,
         logo_url: logoUrl.trim() || null,
         banner_url: bannerUrl.trim() || null,
+        name_font: font,
         color_bg: colorBg,
         color_surface: colorSurface,
         color_accent: colorAccent,
@@ -677,9 +688,21 @@ export const StoreStudioView: React.FC<{
         return (
           <div>
             {usingSampleDrinks && (
-              <div className="rounded-lg px-2.5 py-1.5 text-[11px] opacity-80 mt-1 border border-dashed" style={{ borderColor: `${colorAccent}55` }}>
-                Prévia de exemplo — para aparecer aos clientes, adicione ingredientes no estoque
-                {hasPricing ? ' e defina o preço na Precificação.' : '.'}
+              <div className="alert-box !mt-1 !mb-2 text-[11px]">
+                <b>⚠️ Prévia ilustrativa (0 drinks ativos no link público agora)</b>
+                <p className="mu mt-0.5 !text-[11px]">
+                  No cardápio real do QR/link, só aparecem drinks com ingredientes em <b>Estoque</b>
+                  {hasPricing ? ' e preço salvo em Precificação.' : '.'}
+                </p>
+                {hasPricing && onGoPrices && (
+                  <button
+                    type="button"
+                    className="b sm mt-1.5"
+                    onClick={onGoPrices}
+                  >
+                    Verificar Precificação e Estoque
+                  </button>
+                )}
               </div>
             )}
             <MenuDrinksCatalog
@@ -764,10 +787,10 @@ export const StoreStudioView: React.FC<{
         <div className="row">
           <button
             type="button"
-            className="b g sm lg:hidden"
-            onClick={() => setMobilePreviewOpen((v) => !v)}
+            className="b g sm"
+            onClick={() => setPreviewOpen((v) => !v)}
           >
-            {mobilePreviewOpen ? '🙈 Ocultar prévia' : '👁️ Ver prévia'}
+            {previewOpen ? '🙈 Ocultar prévia' : '👁️ Mostrar prévia'}
           </button>
           <button type="button" className="b sm" onClick={() => setCanvaOpen(true)}>
             🖌️ Modo Canva
@@ -816,8 +839,14 @@ export const StoreStudioView: React.FC<{
         </button>
       </div>
 
-      {/* Layout responsivo: controles à esquerda, prévia fixa à direita no desktop e visível no topo no mobile */}
-      <div className="lg:grid lg:grid-cols-[1fr_370px] lg:gap-5 lg:items-start mt-2">
+      {/* Layout responsivo: controles à esquerda, prévia fixa à direita no desktop quando visível */}
+      <div
+        className={
+          previewOpen
+            ? 'lg:grid lg:grid-cols-[1fr_370px] lg:gap-5 lg:items-start mt-2'
+            : 'mt-2'
+        }
+      >
         {/* Coluna de Controles */}
         <div className="min-w-0">
           {/* ================= ABA 1: VISUAL DA LOJA (NO APP) ================= */}
@@ -831,6 +860,15 @@ export const StoreStudioView: React.FC<{
 
                 <label>Nome da loja</label>
                 <input value={name} onChange={(e) => setName(e.target.value)} />
+
+                <label>Fonte do nome da loja ({NAME_FONTS.length} opções)</label>
+                <select value={font} onChange={(e) => setFont(e.target.value)}>
+                  {NAME_FONTS.map((f) => (
+                    <option key={f.id} value={f.id}>
+                      {f.label}
+                    </option>
+                  ))}
+                </select>
 
                 <label>@ único da loja (handle)</label>
                 <input
@@ -1598,35 +1636,33 @@ export const StoreStudioView: React.FC<{
         </div>
 
         {/* Coluna Direita Fixa (Desktop) / Painel Visível (Mobile): Prévia em Tempo Real */}
-        <div
-          className={`${
-            mobilePreviewOpen ? 'block' : 'hidden lg:block'
-          } lg:sticky lg:top-[76px]`}
-        >
-          <div className="panel">
-            <div className="row sp mb-2.5">
-              <div>
-                <h2 className="!m-0">Prévia em tempo real</h2>
-                <span className="tag">
-                  {realClientDrinks.length > 0
-                    ? `${realClientDrinks.length} drink(s) ativos no cardápio`
-                    : 'Modo exemplo (adicione estoque + preço)'}
-                </span>
+        {previewOpen && (
+          <div className="lg:sticky lg:top-[76px]">
+            <div className="panel">
+              <div className="row sp mb-2.5">
+                <div>
+                  <h2 className="!m-0">Prévia em tempo real</h2>
+                  <span className="tag">
+                    {realClientDrinks.length > 0
+                      ? `${realClientDrinks.length} drink(s) ativos no cardápio`
+                      : 'Modo exemplo (adicione estoque + preço)'}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  className="b sm"
+                  disabled={saving}
+                  onClick={() =>
+                    void (studioTab === 'store' ? handleSaveStoreVisual() : handleSaveCardapio())
+                  }
+                >
+                  {saving ? 'Salvando…' : 'Salvar'}
+                </button>
               </div>
-              <button
-                type="button"
-                className="b sm"
-                disabled={saving}
-                onClick={() =>
-                  void (studioTab === 'store' ? handleSaveStoreVisual() : handleSaveCardapio())
-                }
-              >
-                {saving ? 'Salvando…' : 'Salvar'}
-              </button>
+              {renderLiveMenuPreview(false)}
             </div>
-            {renderLiveMenuPreview(false)}
           </div>
-        </div>
+        )}
       </div>
 
       {/* ================= MODO CANVA INTERATIVO (TEMPO REAL + ARRASTAR) ================= */}
@@ -1682,6 +1718,36 @@ export const StoreStudioView: React.FC<{
               {selectedBlock === 'header' && (
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                   <div>
+                    <label className="!mt-0">Fonte do nome</label>
+                    <select value={font} onChange={(e) => setFont(e.target.value)}>
+                      {NAME_FONTS.map((f) => (
+                        <option key={f.id} value={f.id}>
+                          {f.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="!mt-0">Alinhamento nome</label>
+                    <select value={namePos} onChange={(e) => setNamePos(e.target.value)}>
+                      {POS_OPTIONS.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="!mt-0">Moldura cabeçalho</label>
+                    <select value={borderStyle} onChange={(e) => setBorderStyle(e.target.value)}>
+                      {BORDER_STYLES.map((br) => (
+                        <option key={br.id} value={br.id}>
+                          {br.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
                     <label className="!mt-0">Posição da logo</label>
                     <select value={logoPos} onChange={(e) => setLogoPos(e.target.value)}>
                       {POS_OPTIONS.map((p) => (
@@ -1705,19 +1771,6 @@ export const StoreStudioView: React.FC<{
                     </select>
                   </div>
                   <div>
-                    <label className="!mt-0">Enfeite do topo</label>
-                    <select
-                      value={design.top_ornament || 'none'}
-                      onChange={(e) => setDesign({ ...design, top_ornament: e.target.value })}
-                    >
-                      {TOP_ORNAMENTS.map((o) => (
-                        <option key={o.id} value={o.id}>
-                          {o.label}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
                     <label className="!mt-0">Tamanho logo</label>
                     <select
                       value={design.logo_size || 'md'}
@@ -1731,6 +1784,50 @@ export const StoreStudioView: React.FC<{
                       {LOGO_SIZES.map((sz) => (
                         <option key={sz.id} value={sz.id}>
                           {sz.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="!mt-0">Base do emblema</label>
+                    <select value={crestBase} onChange={(e) => setCrestBase(e.target.value)}>
+                      {CREST_BASES.map((x) => (
+                        <option key={x.id} value={x.id}>
+                          {x.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="!mt-0">Ícone do emblema</label>
+                    <select value={crestIcon} onChange={(e) => setCrestIcon(e.target.value)}>
+                      {CREST_ICONS.map((x) => (
+                        <option key={x.id} value={x.id}>
+                          {x.emoji} {x.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="!mt-0">Ornamento emblema</label>
+                    <select value={crestOrn} onChange={(e) => setCrestOrn(e.target.value)}>
+                      {CREST_ORNAMENTS.map((x) => (
+                        <option key={x.id} value={x.id}>
+                          {x.emoji ? `${x.emoji} ` : ''}
+                          {x.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="!mt-0">Enfeite do topo</label>
+                    <select
+                      value={design.top_ornament || 'none'}
+                      onChange={(e) => setDesign({ ...design, top_ornament: e.target.value })}
+                    >
+                      {TOP_ORNAMENTS.map((o) => (
+                        <option key={o.id} value={o.id}>
+                          {o.label}
                         </option>
                       ))}
                     </select>

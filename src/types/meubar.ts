@@ -9,7 +9,7 @@ export type MenuBlockId = 'header' | 'promo' | 'filters' | 'drinks' | 'footer';
 export interface MenuDesignConfig {
   bg_pattern?: string;
   bg_color_2?: string;
-  logo_size?: 'sm' | 'md' | 'lg' | 'xl';
+  logo_size?: 'xs' | 'sm' | 'md' | 'lg' | 'xl';
   logo_shape?: string;
   logo_offset_x?: number;
   logo_offset_y?: number;
@@ -19,7 +19,7 @@ export interface MenuDesignConfig {
   side_detail?: string;
   section_style?: string;
   price_style?: string;
-  card_style?: 'glass' | 'bordered' | 'minimal' | 'elevated';
+  card_style?: 'glass' | 'bordered' | 'minimal' | 'elevated' | 'neon' | 'ticket' | 'soft-pill';
   block_order?: MenuBlockId[];
 }
 

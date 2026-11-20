@@ -188,7 +188,15 @@ export function getMissingIngredientsForRecipe(recipe: Recipe, items: BarItem[])
     const raw = (ing?.n || '').trim();
     const req = norm(raw);
     if (!req || isFreeIngredient(req)) continue;
-    const matched = haveList.some((h) => h === req || h.startsWith(req + ' '));
+    const matched = haveList.some(
+      (h) =>
+        h === req ||
+        h.startsWith(req + ' ') ||
+        h.startsWith(req + '-') ||
+        h.startsWith(req + '/') ||
+        h.startsWith(req + '(') ||
+        h.startsWith(req + ' (')
+    );
     if (!matched && !missing.includes(raw)) {
       missing.push(raw);
     }

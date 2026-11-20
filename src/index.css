@@ -433,9 +433,11 @@ label {
   font-weight: 600;
   font-size: .95rem;
   display: flex;
+  flex-direction: column;
   justify-content: space-between;
-  align-items: baseline;
+  align-items: stretch;
   gap: 8px;
+  flex: 1;
 }
 
 .tag {
@@ -682,29 +684,52 @@ label {
   font-weight: 600;
 }
 
-/* Modos de exibição da área central de drinks (todos com imagem) */
+/* Modos de exibição da área central de drinks (todos com imagem e zero sobreposição) */
 .menu-items.mode-single {
   grid-template-columns: 1fr;
 }
 
+.menu-items.mode-single .card .t {
+  flex-direction: row;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
 .menu-items.mode-small-blocks {
   grid-template-columns: repeat(3, 1fr);
-  gap: 10px;
+  gap: 9px;
+}
+
+.menu-items.mode-small-blocks .card .t {
+  padding: 8px 9px;
+  font-size: .82rem;
+  gap: 5px;
 }
 
 .menu-items.mode-list,
 .menu-items.mode-dotted-menu,
 .menu-items.mode-gold-pills,
-.menu-items.mode-magazine {
+.menu-items.mode-magazine,
+.menu-items.mode-bistro-cards,
+.menu-items.mode-spotlight-cards {
   grid-template-columns: 1fr;
   gap: 10px;
 }
 
 .menu-items.mode-list .card,
 .menu-items.mode-dotted-menu .card,
-.menu-items.mode-gold-pills .card {
+.menu-items.mode-gold-pills .card,
+.menu-items.mode-bistro-cards .card {
   flex-direction: row;
   align-items: center;
+}
+
+.menu-items.mode-list .card .t {
+  flex-direction: row;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
 }
 
 .menu-items.mode-list .im,
@@ -717,6 +742,15 @@ label {
   margin: 8px 0 8px 8px;
 }
 
+.menu-items.mode-bistro-cards .im {
+  width: 88px;
+  height: 88px;
+  aspect-ratio: 1 / 1;
+  flex: none;
+  border-radius: 14px;
+  margin: 10px 0 10px 10px;
+}
+
 .menu-items.mode-gold-pills .im {
   width: 84px;
   height: 84px;
@@ -726,13 +760,17 @@ label {
   margin: 8px 0 8px 10px;
 }
 
+.menu-items.mode-spotlight-cards .im {
+  aspect-ratio: 16 / 9;
+}
+
 .menu-items.mode-polaroid {
   grid-template-columns: repeat(2, 1fr);
   gap: 14px;
 }
 
 .menu-items.mode-polaroid .card {
-  padding: 8px 8px 2px;
+  padding: 8px 8px 4px;
   border-radius: 10px;
   box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35);
 }
@@ -760,7 +798,7 @@ label {
 
 .menu-items.mode-columns {
   grid-template-columns: repeat(2, 1fr);
-  gap: 16px;
+  gap: 12px;
 }
 
 @media (min-width: 760px) {
@@ -819,7 +857,30 @@ label {
 
 .crest-border-emblem {
   border: 2px solid var(--ac);
-  border-radius: 24px 8px 24px 8px;
+  border-radius: 26px 8px 26px 8px;
+}
+
+.crest-border-neon {
+  border: 2px solid var(--ac);
+  box-shadow: 0 0 18px color-mix(in srgb, var(--ac) 55%, transparent), inset 0 0 14px color-mix(in srgb, var(--ac) 20%, transparent);
+}
+
+.crest-border-royal {
+  border: 3px ridge var(--ac);
+  outline: 1px solid color-mix(in srgb, var(--ac) 45%, transparent);
+  outline-offset: 4px;
+}
+
+.crest-border-clean-glow {
+  border: 1px solid color-mix(in srgb, var(--ac) 55%, transparent);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, .45);
+}
+
+.crest-border-minimal-line {
+  border: 0;
+  border-top: 3px solid var(--ac);
+  border-bottom: 3px solid var(--ac);
+  border-radius: 4px;
 }
 
 /* Sugestões de localização ordenadas por distância */
@@ -857,9 +918,22 @@ label {
 
 /* Fontes escolhíveis para o nome da loja */
 .store-font-serif { font-family: 'Fraunces', Georgia, serif; }
+.store-font-playfair { font-family: 'Playfair Display', Georgia, serif; }
+.store-font-cinzel { font-family: 'Cinzel', Georgia, serif; letter-spacing: .05em; }
+.store-font-cormorant { font-family: 'Cormorant Garamond', Georgia, serif; font-style: italic; }
 .store-font-sans { font-family: 'DM Sans', system-ui, sans-serif; }
-.store-font-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .03em; }
-.store-font-display { font-family: 'Trebuchet MS', 'Segoe UI', sans-serif; letter-spacing: .04em; text-transform: uppercase; }
+.store-font-grotesk { font-family: 'Space Grotesk', system-ui, sans-serif; letter-spacing: -.01em; }
+.store-font-syne { font-family: 'Syne', system-ui, sans-serif; letter-spacing: -.02em; }
+.store-font-bebas { font-family: 'Bebas Neue', Impact, sans-serif; letter-spacing: .07em; text-transform: uppercase; }
+.store-font-oswald { font-family: 'Oswald', sans-serif; letter-spacing: .04em; text-transform: uppercase; }
+.store-font-anton { font-family: 'Anton', Impact, sans-serif; letter-spacing: .04em; text-transform: uppercase; }
+.store-font-righteous { font-family: 'Righteous', cursive, sans-serif; letter-spacing: .03em; }
+.store-font-pacifico { font-family: 'Pacifico', cursive; font-weight: 400; }
+.store-font-lobster { font-family: 'Lobster', cursive; font-weight: 400; }
+.store-font-dancing { font-family: 'Dancing Script', cursive; font-weight: 700; }
+.store-font-vibes { font-family: 'Great Vibes', cursive; font-weight: 400; letter-spacing: .02em; }
+.store-font-mono { font-family: 'JetBrains Mono', ui-monospace, monospace; letter-spacing: .03em; }
+.store-font-display { font-family: 'Bebas Neue', 'Oswald', 'Trebuchet MS', sans-serif; letter-spacing: .06em; text-transform: uppercase; }
 
 .bar-switcher-pill {
   background: rgba(255, 255, 255, 0.06);

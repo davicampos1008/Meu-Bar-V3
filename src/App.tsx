@@ -164,7 +164,7 @@ export default function App() {
     if (!r3.error && r3.data) {
       const prMap: Record<string, number> = {};
       (r3.data as { recipe_id: string; price: number }[]).forEach((x) => {
-        prMap[x.recipe_id] = x.price;
+        prMap[x.recipe_id] = Number(x.price);
       });
       setPrices((prev) =>
         JSON.stringify(prev) === JSON.stringify(prMap) ? prev : prMap
@@ -235,7 +235,7 @@ export default function App() {
     setRecipes((r2.data as Recipe[]) || []);
     const prMap: Record<string, number> = {};
     ((r3.data as { recipe_id: string; price: number }[]) || []).forEach((x) => {
-      prMap[x.recipe_id] = x.price;
+      prMap[x.recipe_id] = Number(x.price);
     });
     setPrices(prMap);
     setMembers((r5.data as BarMember[]) || []);
@@ -389,6 +389,192 @@ export default function App() {
     };
   }, [isMenuRoute, activeBar?.id, isManager, user?.id]);
 
+  // Proteção do botão Voltar do Android (Capacitor APK + PWA/WebView)
+  const navStateRef = useRef({
+    user,
+    standaloneModal,
+    createDrinkMode,
+    showShakers,
+    showQr,
+    makeDrinkRecipe,
+    showSwitchBar,
+    screenMode,
+    activeBar,
+    seekerTab,
+    tab,
+  });
+  navStateRef.current = {
+    user,
+    standaloneModal,
+    createDrinkMode,
+    showShakers,
+    showQr,
+    makeDrinkRecipe,
+    showSwitchBar,
+    screenMode,
+    activeBar,
+    seekerTab,
+    tab,
+  };
+  const lastBackExitRef = useRef(0);
+  const lastBackTriggerRef = useRef(0);
+  const exitingAppRef = useRef(false);
+
+  useEffect(() => {
+    if (isMenuRoute) return;
+
+    try {
+      if (!window.history.state || !window.history.state.meubarGuard) {
+        window.history.pushState({ meubarGuard: true }, '');
+      }
+    } catch {
+      // ignore history errors
+    }
+
+    const handleAndroidBack = (fromPopState: boolean) => {
+      if (exitingAppRef.current) return;
+      const now = Date.now();
+      if (now - lastBackTriggerRef.current < 80) return;
+      lastBackTriggerRef.current = now;
+
+      const keepGuard = () => {
+        if (!fromPopState) return;
+        try {
+          window.history.pushState({ meubarGuard: true }, '');
+        } catch {
+          // ignore
+        }
+      };
+
+      // 1. Overlays internos (ex: Modo Canva)
+      const ev = new CustomEvent('meubar:back-intercept', { cancelable: true });
+      if (!window.dispatchEvent(ev)) {
+        keepGuard();
+        return;
+      }
+
+      const st = navStateRef.current;
+
+      // 2. Modais abertos
+      if (st.standaloneModal) {
+        setStandaloneModal(null);
+        keepGuard();
+        return;
+      }
+      if (st.createDrinkMode !== null) {
+        setCreateDrinkMode(null);
+        keepGuard();
+        return;
+      }
+      if (st.showShakers) {
+        setShowShakers(false);
+        keepGuard();
+        return;
+      }
+      if (st.showQr) {
+        setShowQr(false);
+        keepGuard();
+        return;
+      }
+      if (st.makeDrinkRecipe) {
+        setMakeDrinkRecipe(null);
+        keepGuard();
+        return;
+      }
+      if (st.showSwitchBar) {
+        setShowSwitchBar(false);
+        keepGuard();
+        return;
+      }
+
+      // 3. Telas secundárias -> volta até a página inicial
+      if (st.user) {
+        if (st.screenMode === 'onboarding') {
+          if (st.activeBar) {
+            applyBarTheme(st.activeBar);
+            setScreenMode('bar');
+          } else {
+            setScreenMode('seeker');
+          }
+          keepGuard();
+          return;
+        }
+        if (st.screenMode === 'seeker' && st.seekerTab !== 'careers') {
+          setSeekerTab('careers');
+          keepGuard();
+          return;
+        }
+        if (st.screenMode === 'bar') {
+          if (['cashier', 'prices', 'studio', 'careers'].includes(st.tab)) {
+            setTab('more');
+            keepGuard();
+            return;
+          }
+          if (st.tab !== 'recipes') {
+            setTab('recipes');
+            keepGuard();
+            return;
+          }
+        }
+      }
+
+      // 4. Já está na página inicial: exige duplo clique para sair
+      if (now - lastBackExitRef.current < 2200) {
+        exitingAppRef.current = true;
+        const capApp = (
+          window as unknown as {
+            Capacitor?: { Plugins?: { App?: { exitApp?: () => void } } };
+          }
+        ).Capacitor?.Plugins?.App;
+        if (capApp?.exitApp) {
+          capApp.exitApp();
+        } else {
+          window.history.back();
+        }
+        return;
+      }
+
+      lastBackExitRef.current = now;
+      showToast('Pressione voltar novamente para sair');
+      keepGuard();
+    };
+
+    const onPopState = () => handleAndroidBack(true);
+    window.addEventListener('popstate', onPopState);
+
+    let capRemove: (() => void) | null = null;
+    const capApp = (
+      window as unknown as {
+        Capacitor?: {
+          Plugins?: {
+            App?: {
+              addListener?: (
+                ev: string,
+                cb: () => void
+              ) => Promise<{ remove: () => void }> | { remove: () => void };
+            };
+          };
+        };
+      }
+    ).Capacitor?.Plugins?.App;
+
+    if (capApp?.addListener) {
+      const handle = capApp.addListener('backButton', () => handleAndroidBack(false));
+      if (handle && typeof (handle as Promise<{ remove: () => void }>).then === 'function') {
+        void (handle as Promise<{ remove: () => void }>).then((l) => {
+          capRemove = () => l.remove();
+        });
+      } else if (handle && typeof (handle as { remove: () => void }).remove === 'function') {
+        capRemove = () => (handle as { remove: () => void }).remove();
+      }
+    }
+
+    return () => {
+      window.removeEventListener('popstate', onPopState);
+      if (capRemove) capRemove();
+    };
+  }, [isMenuRoute]);
+
   if (isMenuRoute) {
     return (
       <>
@@ -432,6 +618,7 @@ export default function App() {
     return (
       <>
         <OfflineIndicator />
+        {toastMsg && <div className="toast">{toastMsg}</div>}
         <LoginScreen />
       </>
     );
@@ -841,6 +1028,12 @@ export default function App() {
           {showQr && (
             <QrModal
               bar={activeBar}
+              items={items}
+              recipes={recipes}
+              prices={prices}
+              onItemsChange={setItems}
+              onGoPrices={() => setTab('prices')}
+              onGoStock={() => setTab('stock')}
               onBarUpdated={(updated) => setActiveBar(updated)}
               onClose={() => setShowQr(false)}
               onToast={showToast}

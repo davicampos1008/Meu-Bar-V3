@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { allIngredientNames, CATS, ROLE_LABELS } from '../lib/catalog';
+import { allIngredientNames, CAT, CATS, ROLE_LABELS } from '../lib/catalog';
 import { broadcastMenuUpdate, sb, writeBarSafe } from '../lib/supabase';
 import {
   applyBarTheme,
@@ -10,6 +10,7 @@ import {
   getBarMenuDesign,
   getBarPromotions,
   getMenuPresets,
+  getMissingIngredientsForRecipe,
   makeDrink,
   menuUrl,
   money,
@@ -278,9 +279,8 @@ export const MakeDrinkModal: React.FC<{
   const [err, setErr] = useState('');
   const [sending, setSending] = useState(false);
 
-  const canMake = makeDrink(recipe, items);
-  const stockSet = new Set(items.filter((i) => i.in_stock).map((i) => norm(i.name)));
-  const free: Record<string, number> = { gelo: 1, agua: 1, 'agua gelada': 1 };
+  const missingSet = new Set(getMissingIngredientsForRecipe(recipe, items).map((x) => norm(x)));
+  const canMake = missingSet.size === 0;
 
   // Clientes ativos únicos (sem duplicados)
   const activeClientMap = new Map<string, string>();
@@ -403,7 +403,7 @@ export const MakeDrinkModal: React.FC<{
 
         <h2>Ingredientes</h2>
         {(recipe.ingredients || []).map((i, idx) => {
-          const ok = free[norm(i.n)] || stockSet.has(norm(i.n));
+          const ok = !missingSet.has(norm(i.n));
           return (
             <div
               key={`${i.n}-${idx}`}
@@ -552,12 +552,78 @@ export const MakeDrinkModal: React.FC<{
   );
 };
 
+const GET_MENU_SQL_SNIPPET = `create or replace function get_menu(p_bar uuid) returns json language sql security definer set search_path=public,extensions as $$
+select json_build_object(
+  'bar', json_build_object(
+    'id', b.id, 'name', b.name, 'kind', b.kind, 'open', b.accepting_orders,
+    'slogan', b.slogan, 'city', b.city, 'logo_url', b.logo_url, 'banner_url', b.banner_url,
+    'name_font', b.name_font, 'crest_border', b.crest_border, 'crest_base', b.crest_base,
+    'crest_icon', b.crest_icon, 'crest_ornament', b.crest_ornament,
+    'logo_pos', b.logo_pos, 'name_pos', b.name_pos, 'menu_display_mode', b.menu_display_mode,
+    'color_bg', b.color_bg, 'color_surface', b.color_surface, 'color_accent', b.color_accent,
+    'color_ok', b.color_ok, 'color_text', b.color_text, 'menu_design', b.menu_design,
+    'menu_promotions', b.menu_promotions, 'active_promotion_id', b.active_promotion_id,
+    'menu_presets', b.menu_presets, 'active_menu_preset', b.active_menu_preset
+  ),
+  'active_clients', coalesce((
+    select json_agg(distinct cname order by cname) from (
+      select trim(coalesce(nullif(o.client_name, ''), o.customer_name, '')) as cname
+      from orders o where o.bar_id = b.id and (o.status <> 'done' or o.paid = false)
+    ) t where t.cname <> ''
+  ), '[]'::json),
+  'items', coalesce((
+    select json_agg(json_build_object(
+      'id', r.id, 'name', r.name, 'category', r.category, 'image_url', r.image_url,
+      'price', p.price, 'ingredients', r.ingredients, 'description', r.description,
+      'story', r.story, 'tags', r.tags
+    ) order by r.name)
+    from recipes r
+    left join bar_prices p on p.bar_id = b.id and p.recipe_id = r.id
+    where (r.is_public is not false or r.owner = b.owner or p.price is not null)
+      and (lower(coalesce(b.kind, '')) in ('home', 'casa') or p.price is not null)
+      and not exists (
+        select 1 from jsonb_array_elements(coalesce(r.ingredients, '[]'::jsonb)) i
+        where trim(coalesce(i->>'n', '')) <> ''
+          and lower(unaccent(trim(i->>'n'))) not in ('gelo', 'agua', 'agua gelada', 'agua filtrada', 'agua mineral')
+          and lower(unaccent(trim(i->>'n'))) not like 'gelo %'
+          and not exists (
+            select 1 from bar_items bi where bi.bar_id = b.id and bi.in_stock
+              and (
+                lower(unaccent(trim(bi.name))) = lower(unaccent(trim(i->>'n')))
+                or lower(unaccent(trim(bi.name))) like lower(unaccent(trim(i->>'n'))) || ' %'
+                or lower(unaccent(trim(bi.name))) like lower(unaccent(trim(i->>'n'))) || '-%'
+                or lower(unaccent(trim(bi.name))) like lower(unaccent(trim(i->>'n'))) || '/%'
+                or lower(unaccent(trim(bi.name))) like lower(unaccent(trim(i->>'n'))) || '(%'
+              )
+          )
+      )
+  ), '[]'::json)
+) from bars b where b.id = p_bar $$;
+grant execute on function get_menu(uuid) to anon, authenticated;`;
+
 export const QrModal: React.FC<{
   bar: Bar;
+  items?: BarItem[];
+  recipes?: Recipe[];
+  prices?: Record<string, number>;
+  onItemsChange?: (items: BarItem[]) => void;
+  onGoPrices?: () => void;
+  onGoStock?: () => void;
   onBarUpdated: (bar: Bar) => void;
   onClose: () => void;
   onToast: (msg: string) => void;
-}> = ({ bar, onBarUpdated, onClose, onToast }) => {
+}> = ({
+  bar,
+  items = [],
+  recipes = [],
+  prices = {},
+  onItemsChange,
+  onGoPrices,
+  onGoStock,
+  onBarUpdated,
+  onClose,
+  onToast,
+}) => {
   const presets = getMenuPresets(bar);
   const promos = getBarPromotions(bar);
   const [designId, setDesignId] = useState(bar.active_menu_preset || '');
@@ -565,10 +631,46 @@ export const QrModal: React.FC<{
   const [mesaSel, setMesaSel] = useState('');
   const [customMesa, setCustomMesa] = useState('');
   const [qrSrc, setQrSrc] = useState('');
+  const [checkingMenu, setCheckingMenu] = useState(true);
+  const [serverItems, setServerItems] = useState<{ id: string; name: string }[] | null>(null);
+  const [addingStock, setAddingStock] = useState(false);
 
   const tableVal = mesaSel === 'custom' ? customMesa.trim() : mesaSel;
   const targetUrl = menuUrl(bar.id, tableVal);
   const label = tableVal ? `${bar.name} · ${tableVal}` : bar.name;
+
+  const isHome = bar.kind === 'home' || bar.kind === 'casa';
+  const makeable = recipes.filter((r) => makeDrink(r, items));
+  const readyForMenu = isHome ? makeable : makeable.filter((r) => prices[r.id] != null);
+  const pricedMissingStock = isHome
+    ? []
+    : recipes.filter((r) => !makeDrink(r, items) && prices[r.id] != null);
+  const unpricedAvailable = isHome ? [] : makeable.filter((r) => prices[r.id] == null);
+  const pricedCount = recipes.filter((r) => prices[r.id] != null).length;
+  const stockedCount = items.filter((i) => i.in_stock).length;
+  const missingNamesForPriced = Array.from(
+    new Set(pricedMissingStock.flatMap((r) => getMissingIngredientsForRecipe(r, items)))
+  );
+
+  const checkLiveServerMenu = async () => {
+    setCheckingMenu(true);
+    try {
+      const res = await sb.rpc('get_menu', { p_bar: bar.id });
+      const data = res.data as { items?: { id: string; name: string }[] } | null;
+      if (!res.error && data && Array.isArray(data.items)) {
+        setServerItems(data.items);
+      } else {
+        setServerItems(null);
+      }
+    } catch {
+      setServerItems(null);
+    }
+    setCheckingMenu(false);
+  };
+
+  useEffect(() => {
+    void checkLiveServerMenu();
+  }, [bar.id, items.length, pricedCount]);
 
   useEffect(() => {
     try {
@@ -577,6 +679,61 @@ export const QrModal: React.FC<{
       setQrSrc('');
     }
   }, [targetUrl]);
+
+  const handleAddMissingFromQr = async () => {
+    if (!missingNamesForPriced.length || !onItemsChange) return;
+    setAddingStock(true);
+    let nextItems = [...items];
+    const cats = Object.keys(CAT);
+
+    for (const rawName of missingNamesForPriced) {
+      const targetNorm = norm(rawName);
+      const existingOut = nextItems.find((it) => norm(it.name) === targetNorm && !it.in_stock);
+      if (existingOut) {
+        const up = await sb
+          .from('bar_items')
+          .update({ in_stock: true })
+          .eq('id', existingOut.id)
+          .select()
+          .single();
+        if (!up.error && up.data) {
+          nextItems = nextItems.map((it) => (it.id === existingOut.id ? (up.data as BarItem) : it));
+        }
+        continue;
+      }
+      const alreadyIn = nextItems.some(
+        (it) => it.in_stock && (norm(it.name) === targetNorm || norm(it.name).startsWith(targetNorm + ' '))
+      );
+      if (alreadyIn) continue;
+
+      const inferredCat =
+        cats.find((c) => (CAT[c] || []).some((s) => norm(String(s).split('|')[0]) === targetNorm)) ||
+        null;
+
+      let ins = await sb
+        .from('bar_items')
+        .insert({ bar_id: bar.id, name: rawName, in_stock: true, category: inferredCat, unit_cost: 0 })
+        .select()
+        .single();
+      if (ins.error) {
+        ins = await sb
+          .from('bar_items')
+          .insert({ bar_id: bar.id, name: rawName, in_stock: true })
+          .select()
+          .single();
+      }
+      if (!ins.error && ins.data) {
+        nextItems.push(ins.data as BarItem);
+      }
+    }
+
+    setAddingStock(false);
+    nextItems.sort((a, b) => a.name.localeCompare(b.name));
+    onItemsChange(nextItems);
+    void broadcastMenuUpdate(bar.id);
+    await checkLiveServerMenu();
+    onToast('Ingredientes adicionados ao estoque!');
+  };
 
   const handleDesignChange = async (id: string) => {
     setDesignId(id);
@@ -669,7 +826,114 @@ export const QrModal: React.FC<{
           atualizam automaticamente sem perder pedidos salvos.
         </p>
 
-        <div className="row">
+        {!checkingMenu && serverItems !== null && serverItems.length > 0 && (
+          <div className="panel mt-2.5 !border-[var(--ok)]">
+            <p className="ok-txt !mt-0">
+              ✓ <b>{serverItems.length} drink(s) ativo(s)</b> aparecendo no cardápio QR agora:{' '}
+              {serverItems
+                .slice(0, 4)
+                .map((x) => x.name)
+                .join(', ')}
+              {serverItems.length > 4 ? ` e +${serverItems.length - 4}` : ''}.
+            </p>
+          </div>
+        )}
+
+        {!checkingMenu && (serverItems === null || serverItems.length === 0) && (
+          <div className="alert-box mt-2.5">
+            {readyForMenu.length > 0 ? (
+              <>
+                <b>⚠️ {readyForMenu.length} drink(s) pronto(s) no app, mas o servidor retornou 0!</b>
+                <p className="mu mt-1">
+                  No app está tudo certo ({readyForMenu.slice(0, 3).map((r) => r.name).join(', ')}),
+                  mas a função <code>get_menu</code> do Supabase ainda precisa ser atualizada para
+                  liberar esses drinks no link público/QR.
+                </p>
+                <div className="row mt-2 flex-wrap">
+                  <button
+                    type="button"
+                    className="b sm"
+                    onClick={() => {
+                      void navigator.clipboard?.writeText(GET_MENU_SQL_SNIPPET);
+                      onToast('SQL do get_menu copiado! Cole no SQL Editor do Supabase e clique Run.');
+                    }}
+                  >
+                    Copiar SQL do get_menu
+                  </button>
+                  <button
+                    type="button"
+                    className="b g sm"
+                    onClick={() => void checkLiveServerMenu()}
+                  >
+                    Reverificar
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <b>⚠️ Este cardápio ainda abrirá sem drinks para o cliente</b>
+                <p className="mu mt-1">
+                  Estoque ativo: <b>{stockedCount}</b> item(ns) · Drinks possíveis:{' '}
+                  <b>{makeable.length}</b> · Precificados: <b>{pricedCount}</b>.
+                </p>
+                {pricedMissingStock.length > 0 && (
+                  <p className="mu mt-1">
+                    Você já precificou <b>{pricedMissingStock.map((d) => d.name).slice(0, 3).join(', ')}</b>
+                    {pricedMissingStock.length > 3 ? '…' : ''}, mas ainda falta no Estoque:{' '}
+                    <b>{missingNamesForPriced.join(', ')}</b>.
+                  </p>
+                )}
+                {unpricedAvailable.length > 0 && (
+                  <p className="mu mt-1">
+                    Você já tem estoque para{' '}
+                    <b>{unpricedAvailable.map((d) => d.name).slice(0, 3).join(', ')}</b>
+                    {unpricedAvailable.length > 3 ? '…' : ''}, mas falta definir o preço.
+                  </p>
+                )}
+                <div className="row mt-2 flex-wrap">
+                  {missingNamesForPriced.length > 0 && onItemsChange && (
+                    <button
+                      type="button"
+                      className="b sm ok"
+                      disabled={addingStock}
+                      onClick={() => void handleAddMissingFromQr()}
+                    >
+                      {addingStock
+                        ? 'Adicionando...'
+                        : `+ Colocar faltantes no Estoque (${missingNamesForPriced.slice(0, 2).join(', ')})`}
+                    </button>
+                  )}
+                  {!isHome && onGoPrices && (
+                    <button
+                      type="button"
+                      className="b sm"
+                      onClick={() => {
+                        onClose();
+                        onGoPrices();
+                      }}
+                    >
+                      Ir para Precificação
+                    </button>
+                  )}
+                  {onGoStock && (
+                    <button
+                      type="button"
+                      className="b g sm"
+                      onClick={() => {
+                        onClose();
+                        onGoStock();
+                      }}
+                    >
+                      Ir para Estoque
+                    </button>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        <div className="row mt-3">
           <div className="grow">
             <label>Layout ativo do cardápio</label>
             <select value={designId} onChange={(e) => void handleDesignChange(e.target.value)}>

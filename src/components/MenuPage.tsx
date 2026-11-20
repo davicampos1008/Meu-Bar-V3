@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { ALL_TAGS, CATS } from '../lib/catalog';
 import { sb } from '../lib/supabase';
 import {
@@ -306,6 +306,124 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
     return () => clearInterval(id);
   }, [bar, mine]);
 
+  const menuNavRef = useRef({
+    readyAlert,
+    selectedRecipe,
+    showOrders,
+    showTags,
+  });
+  menuNavRef.current = {
+    readyAlert,
+    selectedRecipe,
+    showOrders,
+    showTags,
+  };
+  const lastBackExitRef = useRef(0);
+  const lastBackTriggerRef = useRef(0);
+  const exitingRef = useRef(false);
+
+  useEffect(() => {
+    try {
+      if (!window.history.state || !window.history.state.meubarMenuGuard) {
+        window.history.pushState({ meubarMenuGuard: true }, '');
+      }
+    } catch {
+      // ignore
+    }
+
+    const handleMenuBack = (fromPopState: boolean) => {
+      if (exitingRef.current) return;
+      const now = Date.now();
+      if (now - lastBackTriggerRef.current < 80) return;
+      lastBackTriggerRef.current = now;
+
+      const keepGuard = () => {
+        if (!fromPopState) return;
+        try {
+          window.history.pushState({ meubarMenuGuard: true }, '');
+        } catch {
+          // ignore
+        }
+      };
+
+      const st = menuNavRef.current;
+      if (st.readyAlert) {
+        setReadyAlert(null);
+        keepGuard();
+        return;
+      }
+      if (st.selectedRecipe) {
+        setSelectedRecipe(null);
+        keepGuard();
+        return;
+      }
+      if (st.showOrders) {
+        setShowOrders(false);
+        keepGuard();
+        return;
+      }
+      if (st.showTags) {
+        setShowTags(false);
+        keepGuard();
+        return;
+      }
+
+      if (now - lastBackExitRef.current < 2200) {
+        exitingRef.current = true;
+        const capApp = (
+          window as unknown as {
+            Capacitor?: { Plugins?: { App?: { exitApp?: () => void } } };
+          }
+        ).Capacitor?.Plugins?.App;
+        if (capApp?.exitApp) {
+          capApp.exitApp();
+        } else {
+          window.history.back();
+        }
+        return;
+      }
+
+      lastBackExitRef.current = now;
+      showToast('Pressione voltar novamente para sair');
+      keepGuard();
+    };
+
+    const onPopState = () => handleMenuBack(true);
+    window.addEventListener('popstate', onPopState);
+
+    let capRemove: (() => void) | null = null;
+    const capApp = (
+      window as unknown as {
+        Capacitor?: {
+          Plugins?: {
+            App?: {
+              addListener?: (
+                ev: string,
+                cb: () => void
+              ) => Promise<{ remove: () => void }> | { remove: () => void };
+            };
+          };
+        };
+      }
+    ).Capacitor?.Plugins?.App;
+
+    if (capApp?.addListener) {
+      const handle = capApp.addListener('backButton', () => handleMenuBack(false));
+      if (handle && typeof (handle as Promise<{ remove: () => void }>).then === 'function') {
+        void (handle as Promise<{ remove: () => void }>).then((l) => {
+          capRemove = () => l.remove();
+        });
+      } else if (handle && typeof (handle as { remove: () => void }).remove === 'function') {
+        capRemove = () => (handle as { remove: () => void }).remove();
+      }
+    }
+
+    return () => {
+      window.removeEventListener('popstate', onPopState);
+      if (capRemove) capRemove();
+    };
+  }, []);
+
   if (loading) {
     return (
       <div className="gate">
@@ -376,6 +494,7 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
 
     return (
       <div className="gate">
+        {toastMsg && <div className="toast">{toastMsg}</div>}
         <BrandMark bar={bar} big />
         <p className="mu mt-6">Bem-vindo ao</p>
         <h1>{bar.name}</h1>
