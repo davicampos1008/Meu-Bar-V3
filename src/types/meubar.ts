@@ -94,6 +94,7 @@ export interface Bar {
   color_ok?: string | null;
   color_text?: string | null;
   base_cost?: number | null;
+  table_names?: string[] | null;
   created_at?: string;
 }
 
@@ -153,9 +154,22 @@ export interface Order {
   price?: number | null;
   unit_price?: number | null;
   table_label?: string | null;
+  table_tab_id?: string | null;
   status: 'pending' | 'ready' | 'done';
   paid?: boolean;
   created_at?: string;
+}
+
+export interface TableTab {
+  id: string;
+  bar_id: string;
+  table_label: string;
+  code: string;
+  opened_by: string;
+  members: string[];
+  status: 'open' | 'closed';
+  created_at?: string;
+  closed_at?: string | null;
 }
 
 export interface BarMember {
@@ -237,4 +251,5 @@ export interface ClientOrderLocal {
   status: string;
   d: string;
   ack?: boolean;
+  tableTabId?: string;
 }

@@ -44,6 +44,7 @@ export async function writeBarSafe(
     'color_ok',
     'color_text',
     'base_cost',
+    'table_names',
     'shakers',
   ];
 

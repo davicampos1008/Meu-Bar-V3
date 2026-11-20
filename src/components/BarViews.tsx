@@ -17,7 +17,7 @@ import {
   recipeTags,
   suggestedPrice,
 } from '../lib/utils';
-import type { Bar, BarItem, Order, Recipe } from '../types/meubar';
+import type { Bar, BarItem, Order, Recipe, TableTab } from '../types/meubar';
 import { PWAInstallButton } from './PWAControls';
 import { RecipeTile } from './SharedUI';
 export { StoreStudioView } from './MenuStudio';
@@ -232,6 +232,8 @@ export const StockView: React.FC<{
   const [variant, setVariant] = useState('');
   const [cost, setCost] = useState('');
   const [err, setErr] = useState('');
+  const [showShopping, setShowShopping] = useState(false);
+  const [quickAddingIng, setQuickAddingIng] = useState<string | null>(null);
   const [editingItem, setEditingItem] = useState<BarItem | null>(null);
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null);
 
@@ -240,6 +242,28 @@ export const StockView: React.FC<{
   const [edSize, setEdSize] = useState('');
   const [edCost, setEdCost] = useState('');
   const [edErr, setEdErr] = useState('');
+
+  // Calcula quais ingredientes faltantes liberam mais receitas imediatamente (falta só 1 item)
+  const unlockMap = new Map<string, { label: string; recipes: string[] }>();
+  const nearTwoList: { recipe: string; missing: string[] }[] = [];
+  recipes.forEach((r) => {
+    const miss = getMissingIngredientsForRecipe(r, items);
+    if (miss.length === 1) {
+      const rawIng = miss[0];
+      const key = norm(rawIng);
+      const cur = unlockMap.get(key);
+      if (cur) {
+        if (!cur.recipes.includes(r.name)) cur.recipes.push(r.name);
+      } else {
+        unlockMap.set(key, { label: rawIng, recipes: [r.name] });
+      }
+    } else if (miss.length === 2) {
+      nearTwoList.push({ recipe: r.name, missing: miss });
+    }
+  });
+  const unlockSuggestions = Array.from(unlockMap.values()).sort(
+    (a, b) => b.recipes.length - a.recipes.length || a.label.localeCompare(b.label)
+  );
 
   const allCatalogEntries = cats.flatMap((c) =>
     (CAT[c] || []).map((s) => ({
@@ -318,6 +342,7 @@ export const StockView: React.FC<{
   };
 
   const handleToggle = async (it: BarItem) => {
+    const prevAvailableCount = recipes.filter((r) => makeDrink(r, items)).length;
     const r = await sb
       .from('bar_items')
       .update({ in_stock: !it.in_stock })
@@ -325,12 +350,27 @@ export const StockView: React.FC<{
       .select()
       .single();
     if (!r.error && r.data) {
-      const next = items.map((x) => (x.id === it.id ? (r.data as BarItem) : x));
+      const updatedItem = r.data as BarItem;
+      const next = items.map((x) => (x.id === it.id ? updatedItem : x));
       onItemsChange(next);
       void broadcastMenuUpdate(bar.id);
-      const nextUnpriced = getUnpricedAvailableDrinks(recipes, next, prices, bar);
-      if (hasPricing && nextUnpriced.length > unpricedAvailable.length) {
-        onToast(`⚠️ ${nextUnpriced.length} drink(s) disponível(is) sem preço na Precificação.`);
+      const nextAvailableCount = recipes.filter((rec) => makeDrink(rec, next)).length;
+      if (!updatedItem.in_stock) {
+        const removedCount = Math.max(0, prevAvailableCount - nextAvailableCount);
+        onToast(
+          removedCount > 0
+            ? `${it.name} marcado como indisponível — ${removedCount} drink(s) saíram dos catálogos.`
+            : `${it.name} marcado como indisponível.`
+        );
+      } else {
+        const nextUnpriced = getUnpricedAvailableDrinks(recipes, next, prices, bar);
+        if (hasPricing && nextUnpriced.length > unpricedAvailable.length) {
+          onToast(`⚠️ ${nextUnpriced.length} drink(s) disponível(is) sem preço na Precificação.`);
+        } else if (nextAvailableCount > prevAvailableCount) {
+          onToast(
+            `${it.name} disponível! +${nextAvailableCount - prevAvailableCount} receita(s) liberada(s).`
+          );
+        }
       }
     }
   };
@@ -381,18 +421,134 @@ export const StockView: React.FC<{
     onToast('Item atualizado');
   };
 
+  const handleQuickAddIngredient = async (rawName: string) => {
+    const targetNorm = norm(rawName);
+    setQuickAddingIng(targetNorm);
+    const existingOut = items.find((it) => norm(it.name) === targetNorm && !it.in_stock);
+    let nextItems = [...items];
+
+    if (existingOut) {
+      const up = await sb
+        .from('bar_items')
+        .update({ in_stock: true })
+        .eq('id', existingOut.id)
+        .select()
+        .single();
+      if (!up.error && up.data) {
+        nextItems = nextItems.map((it) => (it.id === existingOut.id ? (up.data as BarItem) : it));
+      }
+    } else {
+      const inferredCat =
+        cats.find((c) => (CAT[c] || []).some((s) => norm(String(s).split('|')[0]) === targetNorm)) ||
+        null;
+      let ins = await sb
+        .from('bar_items')
+        .insert({ bar_id: bar.id, name: rawName, in_stock: true, category: inferredCat, unit_cost: 0 })
+        .select()
+        .single();
+      if (ins.error) {
+        ins = await sb
+          .from('bar_items')
+          .insert({ bar_id: bar.id, name: rawName, in_stock: true })
+          .select()
+          .single();
+      }
+      if (!ins.error && ins.data) {
+        nextItems.push(ins.data as BarItem);
+      }
+    }
+
+    setQuickAddingIng(null);
+    nextItems.sort((a, b) => a.name.localeCompare(b.name));
+    onItemsChange(nextItems);
+    void broadcastMenuUpdate(bar.id);
+    const nextUnpriced = getUnpricedAvailableDrinks(recipes, nextItems, prices, bar);
+    if (hasPricing && nextUnpriced.length > unpricedAvailable.length) {
+      const gained = nextUnpriced.length - unpricedAvailable.length;
+      onToast(`${rawName} adicionado! ⚠️ +${gained} drink(s) liberado(s) aguardam preço.`);
+    } else {
+      onToast(`${rawName} adicionado ao estoque e receitas liberadas!`);
+    }
+  };
+
   return (
     <div>
-      <div className="row sp">
+      <div className="row sp flex-wrap gap-2">
         <h1>Estoque</h1>
-        {canEditMenu && hasPricing && (
-          <button type="button" className="b sm" onClick={onGoPrices}>
-            Precificação
-            {unpricedAvailable.length > 0 && ` (${unpricedAvailable.length})`}
+        <div className="row">
+          <button
+            type="button"
+            className={`b sm ${showShopping ? '' : 'g'}`}
+            onClick={() => setShowShopping((v) => !v)}
+            title="Ver quais ingredientes comprar para liberar novas receitas"
+          >
+            💡 O que comprar{unlockSuggestions.length > 0 ? ` (${unlockSuggestions.length})` : ''}
           </button>
-        )}
+          {canEditMenu && hasPricing && (
+            <button type="button" className="b sm" onClick={onGoPrices}>
+              Precificação
+              {unpricedAvailable.length > 0 && ` (${unpricedAvailable.length})`}
+            </button>
+          )}
+        </div>
       </div>
       <p className="mu">Pesquise o nome direto ou filtre por categoria. Sempre selecione da lista ou cadastre novo.</p>
+
+      {showShopping && (
+        <div className="panel mt-3 !border-[var(--ac)]">
+          <div className="row sp">
+            <div>
+              <h3 className="!m-0">💡 O que comprar para liberar receitas</h3>
+              <p className="mu mt-0.5 text-[0.78rem]">
+                Itens que faltam sozinhos para desbloquear novos drinks imediatamente no seu bar.
+              </p>
+            </div>
+            <button
+              type="button"
+              className="b g sm"
+              onClick={() => setShowShopping(false)}
+            >
+              Fechar
+            </button>
+          </div>
+          {unlockSuggestions.length > 0 ? (
+            <div className="list mt-2.5">
+              {unlockSuggestions.map((sug) => {
+                const isAdding = quickAddingIng === norm(sug.label);
+                return (
+                  <div key={sug.label} className="!items-start">
+                    <div className="flex-1 min-w-[180px]">
+                      <b>{sug.label}</b>{' '}
+                      <span className="chip st1 !py-0.5 !px-2 !text-[0.72rem]">
+                        +{sug.recipes.length} {sug.recipes.length === 1 ? 'receita' : 'receitas'}
+                      </span>
+                      <br />
+                      <span className="mu text-[0.78rem]">
+                        Libera: {sug.recipes.slice(0, 6).join(', ')}
+                        {sug.recipes.length > 6 ? ` e +${sug.recipes.length - 6}` : ''}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      className="b sm ok"
+                      disabled={isAdding}
+                      onClick={() => void handleQuickAddIngredient(sug.label)}
+                    >
+                      {isAdding ? 'Salvando…' : '+ Já tenho / Comprar'}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <p className="mu mt-2">
+              {nearTwoList.length > 0
+                ? `Nenhum drink está a apenas 1 ingrediente. ${nearTwoList.length} receita(s) precisam de 2 itens (ex: ${nearTwoList[0].recipe}: ${nearTwoList[0].missing.join(' + ')}).`
+                : 'Você já tem ingredientes para todas as receitas cadastradas ou falta montar sua base no estoque!'}
+            </p>
+          )}
+        </div>
+      )}
 
       {hasPricing && unpricedAvailable.length > 0 && (
         <div className="alert-box row sp mt-3">
@@ -846,23 +1002,27 @@ export const QueueView: React.FC<{
 export const CashierView: React.FC<{
   bar: Bar;
   orders: Order[];
+  tableTabs?: TableTab[];
   recipes: Recipe[];
   prices: Record<string, number>;
   hasPricing: boolean;
   settledIds: Set<string>;
   onSettled: (ids: string[]) => void;
   onRefreshOrders: () => Promise<void>;
+  onRefreshTableTabs?: () => Promise<void>;
   onBackMore: () => void;
   onToast: (msg: string) => void;
 }> = ({
   bar,
   orders,
+  tableTabs = [],
   recipes,
   prices,
   hasPricing,
   settledIds,
   onSettled,
   onRefreshOrders,
+  onRefreshTableTabs,
   onBackMore,
   onToast,
 }) => {
@@ -871,10 +1031,16 @@ export const CashierView: React.FC<{
 
   const recipeNameById = new Map(recipes.map((r) => [r.id, r.name]));
   const openOrders = orders.filter((o) => !o.paid && !settledIds.has(o.id));
+  const openTabsById = new Map(tableTabs.map((t) => [t.id, t]));
+  const openTabsByLabel = new Map(tableTabs.map((t) => [norm(t.table_label), t]));
 
   interface CustomerTab {
     key: string;
     name: string;
+    isTable: boolean;
+    tableTabId?: string;
+    tableCode?: string;
+    members: string[];
     total: number;
     ids: string[];
     lines: string[];
@@ -883,9 +1049,28 @@ export const CashierView: React.FC<{
   const grouped: Record<string, CustomerTab> = {};
   let grandTotal = 0;
 
+  // Primeiro garante que comandas de mesa abertas via QR apareçam mesmo sem pedidos ainda
+  tableTabs.forEach((t) => {
+    const key = `tab:${t.id}`;
+    grouped[key] = {
+      key,
+      name: t.table_label,
+      isTable: true,
+      tableTabId: t.id,
+      tableCode: t.code,
+      members: Array.isArray(t.members) ? t.members : [t.opened_by],
+      total: 0,
+      ids: [],
+      lines: [],
+    };
+  });
+
   openOrders.forEach((o) => {
     const rawName = (o.client_name || o.customer_name || 'Cliente').trim();
-    const key = norm(rawName) || 'cliente';
+    const matchedTab =
+      (o.table_tab_id && openTabsById.get(o.table_tab_id)) ||
+      (o.table_label ? openTabsByLabel.get(norm(o.table_label)) : undefined);
+
     const rName = o.recipe_name || recipeNameById.get(o.recipe_id) || 'Drink';
     const unit =
       o.price != null
@@ -898,28 +1083,82 @@ export const CashierView: React.FC<{
     const line = (Number(o.qty) || 1) * unit;
     grandTotal += line;
 
-    if (!grouped[key]) grouped[key] = { key, name: rawName, total: 0, ids: [], lines: [] };
+    if (matchedTab) {
+      const key = `tab:${matchedTab.id}`;
+      if (!grouped[key]) {
+        grouped[key] = {
+          key,
+          name: matchedTab.table_label,
+          isTable: true,
+          tableTabId: matchedTab.id,
+          tableCode: matchedTab.code,
+          members: Array.isArray(matchedTab.members) ? matchedTab.members : [],
+          total: 0,
+          ids: [],
+          lines: [],
+        };
+      }
+      if (rawName && !grouped[key].members.some((m) => norm(m) === norm(rawName))) {
+        grouped[key].members.push(rawName);
+      }
+      grouped[key].total += line;
+      grouped[key].ids.push(o.id);
+      grouped[key].lines.push(
+        `${o.qty || 1}× ${rName} — ${rawName}${unit ? ` (${money(line)})` : ''}`
+      );
+      return;
+    }
+
+    const key = `client:${norm(rawName) || 'cliente'}`;
+    if (!grouped[key]) {
+      grouped[key] = {
+        key,
+        name: rawName,
+        isTable: false,
+        members: [rawName],
+        total: 0,
+        ids: [],
+        lines: [],
+      };
+    }
     grouped[key].total += line;
     grouped[key].ids.push(o.id);
     grouped[key].lines.push(`${o.qty || 1}× ${rName}${unit ? ` (${money(line)})` : ''}`);
   });
 
-  const allCustomers = Object.values(grouped);
+  const allCustomers = Object.values(grouped).sort((a, b) => {
+    if (a.isTable !== b.isTable) return a.isTable ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
   const searchNorm = norm(clientSearch);
   const customers = allCustomers.filter((c) => {
     if (clientFilter && c.key !== clientFilter) return false;
-    if (searchNorm && !c.key.includes(searchNorm)) return false;
+    if (searchNorm) {
+      const matchName = norm(c.name).includes(searchNorm);
+      const matchMembers = c.members.some((m) => norm(m).includes(searchNorm));
+      const matchCode = c.tableCode && c.tableCode.includes(searchNorm);
+      if (!matchName && !matchMembers && !matchCode) return false;
+    }
     return true;
   });
 
   const handleSettle = async (c: CustomerTab) => {
-    onSettled(c.ids);
-    const r = await sb.from('orders').update({ paid: true, status: 'done' }).in('id', c.ids);
-    if (r.error) {
-      await sb.from('orders').update({ status: 'done' }).in('id', c.ids);
+    if (c.ids.length > 0) {
+      onSettled(c.ids);
+      const r = await sb.from('orders').update({ paid: true, status: 'done' }).in('id', c.ids);
+      if (r.error) {
+        await sb.from('orders').update({ status: 'done' }).in('id', c.ids);
+      }
+    }
+    if (c.tableTabId) {
+      await sb
+        .from('table_tabs')
+        .update({ status: 'closed', closed_at: new Date().toISOString() })
+        .eq('id', c.tableTabId);
+      if (onRefreshTableTabs) await onRefreshTableTabs();
     }
     if (clientFilter === c.key) setClientFilter('');
-    onToast(`Comanda de ${c.name} fechada!`);
+    onToast(c.isTable ? `Comanda da ${c.name} fechada! Mesa liberada.` : `Comanda de ${c.name} fechada!`);
     await onRefreshOrders();
   };
 
@@ -935,7 +1174,7 @@ export const CashierView: React.FC<{
       </p>
       <div className="pay">
         <div className="row sp">
-          <span>Total em aberto ({allCustomers.length} cliente(s) ativo(s))</span>
+          <span>Total em aberto ({allCustomers.length} comanda(s) ativa(s))</span>
           <span className="tt">{money(grandTotal)}</span>
         </div>
       </div>
@@ -943,7 +1182,7 @@ export const CashierView: React.FC<{
       {allCustomers.length > 0 && (
         <div className="panel mt-3">
           <div className="row sp">
-            <h3 className="!m-0">Filtro de clientes ativos</h3>
+            <h3 className="!m-0">Filtro de clientes / mesas ativas</h3>
             {(clientFilter || clientSearch) && (
               <button
                 type="button"
@@ -960,7 +1199,7 @@ export const CashierView: React.FC<{
           <input
             value={clientSearch}
             onChange={(e) => setClientSearch(e.target.value)}
-            placeholder="Buscar cliente ativo…"
+            placeholder="Buscar mesa, código ou pessoa…"
             className="mt-2"
           />
           <div className="chips !flex-wrap !overflow-visible mt-2">
@@ -976,7 +1215,7 @@ export const CashierView: React.FC<{
                 className={`chip ${clientFilter === c.key ? 'on' : ''}`}
                 onClick={() => setClientFilter(clientFilter === c.key ? '' : c.key)}
               >
-                {c.name}
+                {c.isTable ? `🪑 ${c.name}` : c.name}
               </span>
             ))}
           </div>
@@ -987,30 +1226,50 @@ export const CashierView: React.FC<{
         {customers.length > 0 ? (
           customers.map((c) => (
             <div key={c.key} className="!items-start">
-              <div className="flex-1">
-                <b>{c.name}</b>
+              <div className="flex-1 min-w-[180px]">
+                <b>{c.isTable ? `🪑 ${c.name}` : c.name}</b>
+                {c.tableCode && (
+                  <>
+                    {' '}
+                    <span className="chip st1 !py-0.5 !px-2 !text-[0.72rem]">
+                      Cód: {c.tableCode}
+                    </span>
+                  </>
+                )}
                 {hasPricing && (
                   <>
                     {' · '}
                     <span className="pr">{money(c.total)}</span>
                   </>
                 )}
-                <br />
-                <span className="tag">{c.lines.join(', ')}</span>
+                {c.isTable && c.members.length > 0 && (
+                  <div className="mu text-[0.78rem] mt-0.5">
+                    Na mesa: <b>{c.members.join(', ')}</b>
+                  </div>
+                )}
+                <div className="mt-1">
+                  {c.lines.length > 0 ? (
+                    <span className="tag">{c.lines.join(' · ')}</span>
+                  ) : (
+                    <span className="mu text-[0.78rem]">
+                      Comanda aberta via QR da mesa (nenhum pedido feito ainda)
+                    </span>
+                  )}
+                </div>
               </div>
               <button
                 type="button"
                 className="b sm ok"
                 onClick={() => void handleSettle(c)}
               >
-                Receber / Fechar
+                {c.isTable ? (c.ids.length > 0 ? 'Receber / Fechar mesa' : 'Fechar mesa') : 'Receber / Fechar'}
               </button>
             </div>
           ))
         ) : (
           <p className="mu">
             {allCustomers.length > 0
-              ? 'Nenhum cliente ativo encontrado com esse filtro.'
+              ? 'Nenhuma comanda encontrada com esse filtro.'
               : 'Nenhuma comanda pendente no caixa agora.'}
           </p>
         )}
@@ -1044,7 +1303,7 @@ export const PricesView: React.FC<{
 }) => {
   const [pCat, setPCat] = useState('Todas');
   const [pFilter, setPFilter] = useState<'all' | 'missing' | 'priced'>('all');
-  const [pOnlyNow, setPOnlyNow] = useState(false);
+  const [pQuery, setPQuery] = useState('');
   const [markup, setMarkup] = useState(2.8);
   const [baseCost, setBaseCost] = useState(String(bar.base_cost || 0));
   const [drafts, setDrafts] = useState<Record<string, string>>(() => {
@@ -1073,17 +1332,23 @@ export const PricesView: React.FC<{
     });
   }, [prices]);
 
-  const makeableCount = recipes.filter((r) => makeDrink(r, items)).length;
-  const readyForMenu = recipes.filter((r) => makeDrink(r, items) && prices[r.id] != null);
+  // Trava: só entram na precificação receitas com TODOS os ingredientes em estoque (in_stock = true)
+  const availableRecipes = recipes.filter((r) => makeDrink(r, items));
+  const makeableCount = availableRecipes.length;
+  const readyForMenu = availableRecipes.filter((r) => prices[r.id] != null);
   const pricedMissingStock = recipes.filter((r) => !makeDrink(r, items) && prices[r.id] != null);
-  const missingTotal = recipes.filter((r) => prices[r.id] == null).length;
   const pricedTotal = recipes.filter((r) => prices[r.id] != null).length;
-  const unpricedAvailable = recipes.filter((r) => makeDrink(r, items) && prices[r.id] == null);
-  const filtered = recipes.filter((r) => {
+  const unpricedAvailable = availableRecipes.filter((r) => prices[r.id] == null);
+
+  const scopedMissingCount = unpricedAvailable.length;
+  const scopedPricedCount = readyForMenu.length;
+
+  const qNorm = norm(pQuery);
+  const filtered = availableRecipes.filter((r) => {
     if (pCat !== 'Todas' && r.category !== pCat) return false;
-    if (pOnlyNow && !makeDrink(r, items)) return false;
-    if (pFilter === 'missing') return prices[r.id] == null;
-    if (pFilter === 'priced') return prices[r.id] != null;
+    if (pFilter === 'missing' && prices[r.id] != null) return false;
+    if (pFilter === 'priced' && prices[r.id] == null) return false;
+    if (qNorm && !norm(r.name).includes(qNorm)) return false;
     return true;
   });
 
@@ -1158,9 +1423,10 @@ export const PricesView: React.FC<{
 
   const saveSinglePrice = async (r: Recipe, rawInput: string) => {
     const raw = rawInput.trim().replace(',', '.');
-    setSavingId(r.id);
+    const canMakeNow = makeDrink(r, items);
 
     if (raw === '') {
+      setSavingId(r.id);
       if (prices[r.id] != null) {
         const del = await sb
           .from('bar_prices')
@@ -1190,6 +1456,15 @@ export const PricesView: React.FC<{
       return;
     }
 
+    if (!canMakeNow) {
+      const missingIngs = getMissingIngredientsForRecipe(r, items);
+      const errTxt = `Bloqueado: "${r.name}" não está disponível no estoque (falta: ${missingIngs.join(', ')}).`;
+      setMsg(errTxt);
+      onToast('🔒 Item indisponível no estoque não pode ser precificado.');
+      return;
+    }
+
+    setSavingId(r.id);
     const parsed = Number(raw);
     if (Number.isNaN(parsed) || !Number.isFinite(parsed) || parsed < 0) {
       setSavingId(null);
@@ -1216,28 +1491,25 @@ export const PricesView: React.FC<{
     setDrafts((prev) => ({ ...prev, [r.id]: String(num) }));
     onPricesUpdated({ ...prices, [r.id]: num });
     void broadcastMenuUpdate(bar.id);
-
-    const missingIngs = getMissingIngredientsForRecipe(r, items);
-    if (missingIngs.length > 0) {
-      setMsg(
-        `${r.name} salvo (${money(num)}) em Com preço! Para aparecer no cardápio, falta no estoque: ${missingIngs.join(', ')}.`
-      );
-      onToast(`${r.name} salvo! Falta ${missingIngs[0]} no estoque.`);
-    } else {
-      setMsg(`${r.name} salvo (${money(num)}) — já está ativo no cardápio!`);
-      onToast(`${r.name} salvo e ativo no cardápio!`);
-    }
+    setMsg(`${r.name} salvo (${money(num)}) — já está ativo no cardápio!`);
+    onToast(`${r.name} salvo e ativo no cardápio!`);
   };
 
   const handleApplyMissing = () => {
     const next = { ...drafts };
-    recipes.forEach((r) => {
+    let filled = 0;
+    availableRecipes.forEach((r) => {
       if (prices[r.id] == null && (!next[r.id] || next[r.id].trim() === '')) {
         next[r.id] = String(suggestedPrice(r, items, bar, markup));
+        filled++;
       }
     });
     setDrafts(next);
-    onToast('Preços sugeridos preenchidos! Clique em Salvar todos para aplicar.');
+    if (filled > 0) {
+      onToast(`Preços sugeridos para ${filled} receita(s) disponível(is)! Clique em Salvar todos.`);
+    } else {
+      onToast('Todas as receitas disponíveis já possuem preço ou rascunho.');
+    }
   };
 
   const handleResetAllPrices = async () => {
@@ -1253,18 +1525,26 @@ export const PricesView: React.FC<{
     onPricesUpdated({});
     setPFilter('missing');
     void broadcastMenuUpdate(bar.id);
-    setMsg('Todos os preços foram zerados e todos os itens foram movidos para Sem preço.');
+    setMsg('Todos os preços foram zerados e todos os itens disponíveis foram movidos para Sem preço.');
     onToast('Preços zerados!');
   };
 
   const handleSavePrices = async () => {
+    const recipeById = new Map(recipes.map((r) => [r.id, r]));
     const rows: { bar_id: string; recipe_id: string; price: number }[] = [];
     const nextPrices: Record<string, number> = {};
     const toDelete: string[] = [];
+    let skippedUnavailable = 0;
 
     Object.keys(drafts).forEach((rid) => {
+      const rec = recipeById.get(rid);
       const raw = (drafts[rid] || '').trim().replace(',', '.');
       if (raw !== '') {
+        if (rec && !makeDrink(rec, items)) {
+          skippedUnavailable++;
+          if (prices[rid] != null) nextPrices[rid] = prices[rid];
+          return;
+        }
         const parsed = Number(raw);
         if (!Number.isNaN(parsed) && Number.isFinite(parsed)) {
           const num = Math.max(0, Math.round(parsed * 100) / 100);
@@ -1297,7 +1577,13 @@ export const PricesView: React.FC<{
 
     onPricesUpdated(nextPrices);
     void broadcastMenuUpdate(bar.id);
-    setMsg('Preços salvos e cardápio atualizado nos clientes!');
+    if (skippedUnavailable > 0) {
+      setMsg(
+        `Preços salvos! ${skippedUnavailable} item(ns) indisponível(is) no estoque foram bloqueados.`
+      );
+    } else {
+      setMsg('Preços salvos e cardápio atualizado nos clientes!');
+    }
     onToast('Preços atualizados!');
   };
 
@@ -1327,16 +1613,33 @@ export const PricesView: React.FC<{
         <div className="alert-box mt-2">
           <b>⚠️ Nenhum drink aparecendo no cardápio agora</b>
           <p className="mu mt-1">
-            Um drink só vai para o cardápio quando tem <b>todos os ingredientes em Estoque</b> e{' '}
-            <b>preço salvo</b> aqui.
+            {makeableCount === 0
+              ? 'Adicione ingredientes no Estoque para liberar receitas e definir seus preços aqui.'
+              : 'Defina os preços das receitas disponíveis abaixo para liberá-las no cardápio.'}
           </p>
+          {makeableCount === 0 && onGoStock && (
+            <div className="mt-2">
+              <button type="button" className="b sm" onClick={onGoStock}>
+                🍾 Ir para Estoque
+              </button>
+            </div>
+          )}
         </div>
       )}
+
+      <div className="panel !border-[var(--ok)]/40 mt-2">
+        <b className="text-sm">
+          🔒 Trava ativa: exibindo e liberando preço apenas para receitas disponíveis ({makeableCount})
+        </b>
+        <p className="mu !m-0 mt-0.5 !text-xs">
+          Se algum ingrediente acabar e for marcado como em falta no Estoque, todos os drinks que usam esse item saem automaticamente daqui e dos catálogos.
+        </p>
+      </div>
 
       {pricedMissingStock.length > 0 && (
         <div className="alert-box mt-2">
           <b>
-            📦 {pricedMissingStock.length} drink(s) precificado(s) aguardando ingrediente no Estoque:
+            📦 {pricedMissingStock.length} drink(s) saíram dos catálogos porque faltou ingrediente no Estoque:
           </b>
           <p className="mu mt-1">
             {pricedMissingStock
@@ -1354,7 +1657,7 @@ export const PricesView: React.FC<{
               >
                 {addingStock
                   ? 'Adicionando...'
-                  : `+ Colocar faltantes no Estoque (${allMissingForPriced.slice(0, 3).join(', ')}${allMissingForPriced.length > 3 ? '…' : ''})`}
+                  : `+ Repor faltantes no Estoque (${allMissingForPriced.slice(0, 3).join(', ')}${allMissingForPriced.length > 3 ? '…' : ''})`}
               </button>
             )}
             {onGoStock && (
@@ -1381,10 +1684,7 @@ export const PricesView: React.FC<{
           <button
             type="button"
             className="b sm"
-            onClick={() => {
-              setPFilter('missing');
-              setPOnlyNow(true);
-            }}
+            onClick={() => setPFilter('missing')}
           >
             Precificar agora
           </button>
@@ -1425,21 +1725,12 @@ export const PricesView: React.FC<{
         </div>
         <div className="row mt-3 flex-wrap">
           <button type="button" className="b sm" onClick={handleApplyMissing}>
-            Sugerir para sem preço
-          </button>
-          <button
-            type="button"
-            className={`b sm ${pOnlyNow ? '' : 'g'}`}
-            onClick={() => setPOnlyNow((s) => !s)}
-          >
-            {pOnlyNow
-              ? `Mostrando: Só os que faço (${makeableCount})`
-              : `Só os que faço (${makeableCount})`}
+            Sugerir para disponíveis sem preço
           </button>
           <button
             type="button"
             className="b sm ok"
-            disabled={savingAll}
+            disabled={savingAll || makeableCount === 0}
             onClick={() => void handleSavePrices()}
           >
             {savingAll ? 'Salvando...' : 'Salvar todos'}
@@ -1476,6 +1767,14 @@ export const PricesView: React.FC<{
         </div>
       </div>
 
+      <input
+        type="search"
+        value={pQuery}
+        onChange={(e) => setPQuery(e.target.value)}
+        placeholder="Buscar drink disponível para precificar..."
+        className="mt-2"
+      />
+
       <div className="chips">
         {(['all', 'missing', 'priced'] as const).map((f) => (
           <span
@@ -1484,10 +1783,10 @@ export const PricesView: React.FC<{
             onClick={() => setPFilter(f)}
           >
             {f === 'all'
-              ? `Todos (${recipes.length})`
+              ? `Disponíveis (${availableRecipes.length})`
               : f === 'missing'
-              ? `Sem preço (${missingTotal})`
-              : `Com preço (${pricedTotal})`}
+              ? `Sem preço (${scopedMissingCount})`
+              : `Com preço (${scopedPricedCount})`}
           </span>
         ))}
       </div>
@@ -1511,8 +1810,6 @@ export const PricesView: React.FC<{
           filtered.map((r) => {
             const cur = drafts[r.id];
             const isUnpriced = prices[r.id] == null;
-            const missingIngs = getMissingIngredientsForRecipe(r, items);
-            const canMakeNow = missingIngs.length === 0;
             const cost = estimateRecipeCost(r, items, bar);
             const sug = suggestedPrice(r, items, bar, markup);
             const isSaving = savingId === r.id;
@@ -1523,35 +1820,17 @@ export const PricesView: React.FC<{
                   {isUnpriced ? (
                     <>
                       <span className="badge-warn">Sem preço</span>
-                      {canMakeNow && (
-                        <span className="tag !text-[var(--ok)] ml-1.5">✓ Estoque OK</span>
-                      )}
+                      <span className="tag !text-[var(--ok)] ml-1.5">✓ Estoque OK</span>
                     </>
-                  ) : canMakeNow ? (
+                  ) : (
                     <span className="tag !text-[var(--ok)] ml-1.5">
                       ✓ No cardápio: {money(prices[r.id])}
-                    </span>
-                  ) : (
-                    <span className="badge-warn">
-                      Salvo {money(prices[r.id])} · Falta no estoque: {missingIngs.join(', ')}
                     </span>
                   )}
                   <br />
                   <span className="tag">
                     Custo base: {money(cost)} · Sugerido: <b>{money(sug)}</b>
                   </span>
-                  {!isUnpriced && !canMakeNow && (
-                    <div className="mt-1">
-                      <button
-                        type="button"
-                        className="b sm g"
-                        disabled={addingStock}
-                        onClick={() => void addMissingToStock(missingIngs)}
-                      >
-                        + Colocar {missingIngs.join(', ')} no estoque
-                      </button>
-                    </div>
-                  )}
                 </div>
                 <div className="row flex-wrap">
                   <input
@@ -1594,11 +1873,13 @@ export const PricesView: React.FC<{
           })
         ) : (
           <p className="mu">
-            {pFilter === 'missing'
-              ? 'Nenhum drink sem preço nesta categoria.'
+            {makeableCount === 0
+              ? 'Nenhuma receita disponível para fazer agora. Adicione ingredientes com status OK no Estoque para liberar a precificação.'
+              : pFilter === 'missing'
+              ? 'Nenhum drink disponível sem preço nesta categoria.'
               : pFilter === 'priced'
-              ? 'Nenhum drink com preço definido ainda.'
-              : 'Nenhum drink encontrado.'}
+              ? 'Nenhum drink disponível com preço definido ainda.'
+              : 'Nenhum drink disponível encontrado.'}
           </p>
         )}
       </div>
@@ -1606,10 +1887,10 @@ export const PricesView: React.FC<{
       <button
         type="button"
         className="b full mt-3.5"
-        disabled={savingAll}
+        disabled={savingAll || makeableCount === 0}
         onClick={() => void handleSavePrices()}
       >
-        {savingAll ? 'Salvando todos...' : 'Salvar todos os preços'}
+        {savingAll ? 'Salvando todos...' : 'Salvar todos os preços disponíveis'}
       </button>
     </div>
   );

@@ -548,9 +548,24 @@ export const TeamSection: React.FC<{
     setRequests((r.data as ServiceRequest[]) || []);
   };
 
+  const loadTeamMembers = async () => {
+    const r = await sb.from('bar_members').select('*').eq('bar_id', bar.id);
+    if (!r.error && r.data) {
+      const next = r.data as BarMember[];
+      onMembersUpdated(next);
+    }
+  };
+
   useEffect(() => {
     void loadPasswords();
     void loadRequests();
+    const poll = setInterval(() => {
+      if (document.hidden) return;
+      void loadPasswords();
+      void loadRequests();
+      void loadTeamMembers();
+    }, 5000);
+    return () => clearInterval(poll);
   }, [bar.id]);
 
   const handleCreatePassword = async () => {

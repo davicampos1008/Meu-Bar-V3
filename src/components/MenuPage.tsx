@@ -37,10 +37,32 @@ interface MenuItem extends Recipe {
   price?: number | null;
 }
 
+interface TableSession {
+  tabId: string;
+  code: string;
+  name: string;
+  table: string;
+  openedBy: string;
+  members: string[];
+  d: string;
+}
+
+interface TableServerState {
+  open: boolean;
+  tab_id?: string;
+  table_label?: string;
+  opened_by?: string;
+  members?: string[];
+}
+
 export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
   barId,
   mesa,
 }) => {
+  const cleanMesa = (mesa || '').trim();
+  const isTableQr = Boolean(cleanMesa);
+  const tableStorageKey = `table_tab_${barId}_${norm(cleanMesa)}`;
+
   const [loading, setLoading] = useState(true);
   const [errTitle, setErrTitle] = useState('');
   const [errMsg, setErrMsg] = useState('');
@@ -50,8 +72,11 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
   const [activeClients, setActiveClients] = useState<string[]>([]);
   const [name, setName] = useState('');
   const [gateInput, setGateInput] = useState('');
+  const [codeInput, setCodeInput] = useState('');
   const [gateErr, setGateErr] = useState('');
   const [checkingName, setCheckingName] = useState(false);
+  const [tableState, setTableState] = useState<TableServerState | null>(null);
+  const [tableSession, setTableSession] = useState<TableSession | null>(null);
   const [cat, setCat] = useState('Todas');
   const [query, setQuery] = useState('');
   const [tags, setTags] = useState<Set<string>>(new Set());
@@ -68,6 +93,9 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
   const [orderErr, setOrderErr] = useState('');
   const [sending, setSending] = useState(false);
 
+  const tableSessionRef = useRef<TableSession | null>(null);
+  tableSessionRef.current = tableSession;
+
   const showToast = (msg: string) => {
     setToastMsg(msg);
     setTimeout(() => setToastMsg((prev) => (prev === msg ? '' : prev)), 2400);
@@ -79,6 +107,91 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
       localStorage.setItem('mine' + barId, JSON.stringify(next));
     } catch {
       // ignore storage errors
+    }
+  };
+
+  const saveTableSession = (sess: TableSession | null) => {
+    setTableSession(sess);
+    try {
+      if (sess) {
+        localStorage.setItem(tableStorageKey, JSON.stringify(sess));
+      } else {
+        localStorage.removeItem(tableStorageKey);
+      }
+    } catch {
+      // ignore storage errors
+    }
+  };
+
+  const syncTableTab = async (silent = false) => {
+    if (!isTableQr || !barId) return;
+
+    let currentSess = tableSessionRef.current;
+    if (!silent && !currentSess) {
+      try {
+        const raw = localStorage.getItem(tableStorageKey);
+        if (raw) {
+          const parsed = JSON.parse(raw) as TableSession;
+          if (parsed && parsed.tabId && parsed.code && parsed.d === today()) {
+            currentSess = parsed;
+          } else {
+            localStorage.removeItem(tableStorageKey);
+          }
+        }
+      } catch {
+        // ignore parse errors
+      }
+    }
+
+    if (currentSess) {
+      const vr = await sb.rpc('verify_table_tab_member', {
+        p_tab_id: currentSess.tabId,
+        p_code: currentSess.code,
+      });
+      if (!vr.error && vr.data) {
+        const vd = vr.data as {
+          valid?: boolean;
+          status?: string;
+          members?: string[];
+          opened_by?: string;
+        };
+        if (vd.valid) {
+          const updated: TableSession = {
+            ...currentSess,
+            openedBy: vd.opened_by || currentSess.openedBy,
+            members: Array.isArray(vd.members) ? vd.members : currentSess.members,
+          };
+          if (JSON.stringify(updated) !== JSON.stringify(tableSessionRef.current)) {
+            saveTableSession(updated);
+          }
+          setName((prev) => prev || updated.name);
+        } else {
+          // A comanda da mesa foi fechada no caixa -> libera para a próxima pessoa
+          saveTableSession(null);
+          setName('');
+          setCodeInput('');
+          setMine((prev) => {
+            const cleaned = prev.filter((o) => o.tableTabId !== currentSess?.tabId);
+            try {
+              localStorage.setItem('mine' + barId, JSON.stringify(cleaned));
+            } catch {
+              // ignore
+            }
+            return cleaned;
+          });
+          if (silent) {
+            showToast(`Comanda da ${cleanMesa} encerrada no caixa.`);
+          }
+        }
+      }
+    }
+
+    const st = await sb.rpc('get_table_tab_state', {
+      p_bar: barId,
+      p_table: cleanMesa,
+    });
+    if (!st.error && st.data) {
+      setTableState(st.data as TableServerState);
     }
   };
 
@@ -187,9 +300,11 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
       document.title = data.bar.name;
 
       if (!silent) {
-        const nm = localStorage.getItem('nm');
-        if (nm && localStorage.getItem('nmd') === today()) {
-          setName(nm);
+        if (!isTableQr) {
+          const nm = localStorage.getItem('nm');
+          if (nm && localStorage.getItem('nmd') === today()) {
+            setName(nm);
+          }
         }
         try {
           const stored = JSON.parse(localStorage.getItem('mine' + barId) || '[]') as ClientOrderLocal[];
@@ -197,6 +312,10 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
         } catch {
           setMine([]);
         }
+      }
+
+      if (isTableQr) {
+        await syncTableTab(silent);
       }
     } catch (e) {
       if (!silent) {
@@ -255,9 +374,16 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
           void loadMenu(true);
         }
       )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'table_tabs', filter: 'bar_id=eq.' + barId },
+        () => {
+          if (isTableQr) void syncTableTab(true);
+        }
+      )
       .subscribe();
 
-    // Checagem silenciosa a cada 5 segundos para conferir novos drinks disponíveis
+    // Checagem silenciosa a cada 5 segundos para conferir novos drinks disponíveis e estado da mesa
     const syncInterval = setInterval(() => {
       void loadMenu(true);
     }, 5000);
@@ -267,7 +393,7 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
       void sb.removeChannel(ch);
       applyBarTheme(null);
     };
-  }, [barId]);
+  }, [barId, cleanMesa]);
 
   useEffect(() => {
     if (!bar) return;
@@ -449,7 +575,174 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
   const totalCount = mine.reduce((s, o) => s + o.qty, 0);
   const totalPay = mine.reduce((s, o) => s + o.qty * (o.price || 0), 0);
 
-  if (!name) {
+  if (isTableQr && (!name || !tableSession)) {
+    const enterTableMenu = async () => {
+      const n = gateInput.trim();
+      if (n.length < 2) {
+        setGateErr('Digite seu nome (pelo menos 2 letras).');
+        return;
+      }
+      if (tableState?.open && !codeInput.trim()) {
+        setGateErr('Esta mesa já tem comanda aberta. Digite o código de 4 dígitos da mesa.');
+        return;
+      }
+
+      setCheckingName(true);
+      setGateErr('');
+
+      const res = await sb.rpc('open_or_join_table_tab', {
+        p_bar: barId,
+        p_table: cleanMesa,
+        p_name: n,
+        p_code: codeInput.trim() || null,
+      });
+
+      setCheckingName(false);
+
+      if (res.error) {
+        const msg = String(res.error.message || '');
+        if (msg.includes('open_or_join_table_tab') || msg.includes('does not exist')) {
+          setGateErr(
+            'A função de comanda automática por mesa ainda precisa ser atualizada no SQL do Supabase (schema_completo.sql).'
+          );
+        } else {
+          setGateErr(msg);
+        }
+        return;
+      }
+
+      const d = res.data as {
+        ok?: boolean;
+        is_new?: boolean;
+        needs_code?: boolean;
+        tab_id?: string;
+        table_label?: string;
+        code?: string;
+        opened_by?: string;
+        members?: string[];
+        error?: string;
+      } | null;
+
+      if (!d || !d.ok || !d.tab_id || !d.code) {
+        if (d?.needs_code) {
+          setTableState({
+            open: true,
+            tab_id: d.tab_id,
+            table_label: cleanMesa,
+            opened_by: d.opened_by,
+          });
+        }
+        setGateErr(d?.error || 'Não foi possível abrir ou entrar na comanda da mesa.');
+        return;
+      }
+
+      const sess: TableSession = {
+        tabId: d.tab_id,
+        code: d.code,
+        name: n,
+        table: d.table_label || cleanMesa,
+        openedBy: d.opened_by || n,
+        members: Array.isArray(d.members) ? d.members : [n],
+        d: today(),
+      };
+      saveTableSession(sess);
+      setTableState({
+        open: true,
+        tab_id: d.tab_id,
+        table_label: sess.table,
+        opened_by: sess.openedBy,
+        members: sess.members,
+      });
+      setName(n);
+      setGateErr('');
+      showToast(
+        d.is_new
+          ? `Comanda da ${sess.table} aberta! Código: ${sess.code}`
+          : `Você entrou na comanda da ${sess.table}!`
+      );
+    };
+
+    const isOpenTable = Boolean(tableState?.open);
+
+    return (
+      <div className="gate">
+        {toastMsg && <div className="toast">{toastMsg}</div>}
+        <BrandMark bar={bar} big />
+        <p className="mu mt-6">Bem-vindo ao</p>
+        <h1>{bar.name}</h1>
+        <p className="tag mt-1">🪑 {cleanMesa}</p>
+
+        {isOpenTable ? (
+          <div className="alert-box mt-3 text-left max-w-[380px] w-full">
+            <b>🔒 Comanda já aberta nesta mesa</b>
+            <p className="mu mt-1">
+              Aberta por <b>{tableState?.opened_by || 'outro cliente'}</b>. Para evitar comandas
+              duplicadas, peça o código de 4 dígitos exibido no cardápio da mesa e informe seu nome
+              abaixo.
+            </p>
+            {Array.isArray(tableState?.members) && tableState.members.length > 0 && (
+              <p className="mu mt-1 text-[0.78rem]">
+                Na comanda: {tableState.members.join(', ')}
+              </p>
+            )}
+          </div>
+        ) : (
+          <p className="mu my-2.5 mb-4 max-w-[380px]">
+            Ao entrar pelo QR da mesa, sua comanda é aberta automaticamente para evitar duplicidade e
+            gera um código para seus amigos entrarem na mesma mesa.
+          </p>
+        )}
+
+        <input
+          value={gateInput}
+          onChange={(e) => {
+            setGateInput(e.target.value);
+            if (gateErr) setGateErr('');
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !isOpenTable) void enterTableMenu();
+          }}
+          placeholder="Seu nome (ex: João Silva)"
+          maxLength={40}
+          autoComplete="given-name"
+          autoFocus
+        />
+
+        {isOpenTable && (
+          <input
+            value={codeInput}
+            onChange={(e) => {
+              setCodeInput(e.target.value.replace(/\s+/g, ''));
+              if (gateErr) setGateErr('');
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') void enterTableMenu();
+            }}
+            placeholder="Código da mesa (4 dígitos)"
+            inputMode="numeric"
+            maxLength={8}
+            className="mt-2 text-center tracking-widest font-bold"
+          />
+        )}
+
+        <button
+          type="button"
+          className="b mt-2"
+          disabled={checkingName}
+          onClick={() => void enterTableMenu()}
+        >
+          {checkingName
+            ? 'Verificando…'
+            : isOpenTable
+            ? 'Entrar na comanda da mesa'
+            : 'Abrir comanda da mesa'}
+        </button>
+        {gateErr && <p className="err">{gateErr}</p>}
+      </div>
+    );
+  }
+
+  if (!isTableQr && !name) {
     const enterMenu = async () => {
       const n = gateInput.trim();
       if (n.length < 2) {
@@ -481,7 +774,7 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
       const duplicate = serverActive.find((x) => norm(x) === norm(n));
       if (duplicate && !isMyExistingTab) {
         setGateErr(
-          `Já existe um cliente ativo com o nome "${duplicate}" agora. Use nome + sobrenome ou mesa (ex: ${n} Silva).`
+          `Já existe um cliente ativo com o nome "${duplicate}" agora. Use nome + sobrenome (ex: ${n} Silva).`
         );
         return;
       }
@@ -498,9 +791,9 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
         <BrandMark bar={bar} big />
         <p className="mu mt-6">Bem-vindo ao</p>
         <h1>{bar.name}</h1>
-        {mesa && <p className="tag mt-1">🪑 {mesa}</p>}
         <p className="mu my-2.5 mb-5.5">
-          Para fazer seu pedido, diga como devemos te chamar.
+          Você pode olhar o cardápio livremente; sua comanda abre apenas quando fizer seu primeiro
+          pedido.
         </p>
         <input
           value={gateInput}
@@ -569,21 +862,41 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
   const handlePlaceOrder = async (recipe: MenuItem, orderQty: number, orderNote: string) => {
     setSending(true);
     setOrderErr('');
-    const finalNote = mesa
+    const finalNote = cleanMesa
       ? orderNote.trim()
-        ? `${mesa} · ${orderNote.trim()}`
-        : mesa
+        ? `${cleanMesa} · ${orderNote.trim()}`
+        : cleanMesa
       : orderNote.trim();
 
-    const res = await sb.rpc('place_order', {
+    let res = await sb.rpc('place_order', {
       p_bar: barId,
       p_name: name,
       p_recipe: recipe.id,
       p_qty: orderQty,
       p_note: finalNote,
+      p_table: cleanMesa || null,
+      p_tab_id: tableSession?.tabId || null,
     });
+
+    if (res.error && String(res.error.message || '').includes('place_order')) {
+      res = await sb.rpc('place_order', {
+        p_bar: barId,
+        p_name: name,
+        p_recipe: recipe.id,
+        p_qty: orderQty,
+        p_note: finalNote,
+      });
+    }
+
     setSending(false);
     if (res.error) {
+      if (String(res.error.message || '').includes('já foi fechada')) {
+        saveTableSession(null);
+        setName('');
+        setSelectedRecipe(null);
+        showToast('A comanda desta mesa foi fechada no caixa.');
+        return;
+      }
       setOrderErr(res.error.message);
       return;
     }
@@ -599,6 +912,7 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
         price: finalPrice ?? recipe.price,
         status: 'pending',
         d: today(),
+        tableTabId: tableSession?.tabId,
       },
     ];
     saveMine(next);
@@ -782,7 +1096,11 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
             type="button"
             className="lnk"
             onClick={() => {
-              localStorage.removeItem('nm');
+              if (isTableQr) {
+                saveTableSession(null);
+              } else {
+                localStorage.removeItem('nm');
+              }
               setName('');
             }}
           >
@@ -792,6 +1110,37 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
       </div>
 
       <div className="w">
+        {isTableQr && tableSession && (
+          <div className="panel mb-3 !border-[var(--ac)]">
+            <div className="row sp flex-wrap gap-2">
+              <div>
+                <b className="text-[0.98rem]">
+                  🪑 {tableSession.table} · Comanda aberta
+                </b>
+                <p className="mu mt-0.5 text-[0.78rem]">
+                  Código para quem entrar nesta mesa:{' '}
+                  <b className="text-[var(--ac)] text-[1.05rem] tracking-widest">
+                    {tableSession.code}
+                  </b>
+                </p>
+                <p className="mu mt-0.5 text-[0.75rem]">
+                  Na comanda: <b>{tableSession.members.join(', ')}</b> (seu nome vai nos seus
+                  drinks para facilitar a entrega).
+                </p>
+              </div>
+              <button
+                type="button"
+                className="b g sm"
+                onClick={() => {
+                  void navigator.clipboard?.writeText(tableSession.code);
+                  showToast(`Código ${tableSession.code} copiado!`);
+                }}
+              >
+                Copiar código
+              </button>
+            </div>
+          </div>
+        )}
         <SideDetailWrapper sideDetail={design.side_detail} accent={accent}>
           {blockOrder.map((blockId) => {
             const node = renderSection(blockId);

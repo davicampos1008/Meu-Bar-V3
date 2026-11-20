@@ -17,7 +17,7 @@ import {
   norm,
   parseShakers,
 } from '../lib/utils';
-import type { Bar, BarEntry, BarItem, Order, Recipe, UserCoords } from '../types/meubar';
+import type { Bar, BarEntry, BarItem, Order, Recipe, TableTab, UserCoords } from '../types/meubar';
 import { ImageUploader, LocationPicker, RecipeTile } from './SharedUI';
 
 export const SwitchBarModal: React.FC<{
@@ -268,12 +268,24 @@ export const MakeDrinkModal: React.FC<{
   items: BarItem[];
   prices: Record<string, number>;
   orders?: Order[];
+  tableTabs?: TableTab[];
   onClose: () => void;
   onOrderCreated: () => Promise<void>;
   onToast: (msg: string) => void;
-}> = ({ recipe, bar, items, prices, orders = [], onClose, onOrderCreated, onToast }) => {
+}> = ({
+  recipe,
+  bar,
+  items,
+  prices,
+  orders = [],
+  tableTabs = [],
+  onClose,
+  onOrderCreated,
+  onToast,
+}) => {
   const [who, setWho] = useState('');
   const [confirmedExistingKey, setConfirmedExistingKey] = useState('');
+  const [selectedTableTabId, setSelectedTableTabId] = useState('');
   const [note, setNote] = useState('');
   const [qty, setQty] = useState(1);
   const [err, setErr] = useState('');
@@ -307,6 +319,8 @@ export const MakeDrinkModal: React.FC<{
         .filter(Boolean)
     : [];
 
+  const selectedTableTab = tableTabs.find((t) => t.id === selectedTableTabId) || null;
+
   const handleMakeNow = async () => {
     setErr('');
     const client = who.trim();
@@ -314,7 +328,7 @@ export const MakeDrinkModal: React.FC<{
       setErr('Informe o nome ou a comanda.');
       return;
     }
-    if (needsConfirmSameClient && matchedActive) {
+    if (!selectedTableTab && needsConfirmSameClient && matchedActive) {
       setErr(
         `Já existe um cliente ativo chamado "${matchedActive}". Toque em "Mesma comanda" ou diferencie o nome (ex: ${client} 2).`
       );
@@ -325,20 +339,28 @@ export const MakeDrinkModal: React.FC<{
     const payload: Record<string, unknown> = {
       bar_id: bar.id,
       recipe_id: recipe.id,
-      client_name: matchedActive || client,
-      customer_name: matchedActive || client,
+      client_name: selectedTableTab ? client : matchedActive || client,
+      customer_name: selectedTableTab ? client : matchedActive || client,
       qty,
-      note: note.trim() || null,
+      note: selectedTableTab
+        ? note.trim()
+          ? `${selectedTableTab.table_label} · ${note.trim()}`
+          : selectedTableTab.table_label
+        : note.trim() || null,
       price,
       unit_price: price,
       status: 'pending',
       recipe_name: recipe.name,
+      ...(selectedTableTab
+        ? { table_label: selectedTableTab.table_label, table_tab_id: selectedTableTab.id }
+        : {}),
     };
     let ins = await sb.from('orders').insert(payload).select().single();
     if (ins.error) {
       delete payload.customer_name;
       delete payload.recipe_name;
       delete payload.unit_price;
+      delete payload.table_tab_id;
       ins = await sb.from('orders').insert(payload).select().single();
     }
     setSending(false);
@@ -346,7 +368,9 @@ export const MakeDrinkModal: React.FC<{
       setErr(ins.error.message);
       return;
     }
-    onToast(`Na fila: ${qty}× ${recipe.name} → ${matchedActive || client}`);
+    onToast(
+      `Na fila: ${qty}× ${recipe.name} → ${selectedTableTab ? `${client} (${selectedTableTab.table_label})` : matchedActive || client}`
+    );
     await onOrderCreated();
     onClose();
   };
@@ -480,7 +504,31 @@ export const MakeDrinkModal: React.FC<{
             placeholder="Ex: Mesa 3 · Ana · Comanda 12"
             maxLength={40}
           />
-          {activeClients.length > 0 && (
+          {tableTabs.length > 0 && (
+            <div className="mt-2">
+              <span className="mu text-[0.76rem]">Mesas com comanda aberta agora:</span>
+              <div className="chips !flex-wrap !overflow-visible mt-1">
+                {tableTabs.map((t) => (
+                  <span
+                    key={t.id}
+                    className={`chip ${selectedTableTabId === t.id ? 'on' : ''}`}
+                    onClick={() => {
+                      if (selectedTableTabId === t.id) {
+                        setSelectedTableTabId('');
+                      } else {
+                        setSelectedTableTabId(t.id);
+                        if (!who.trim()) setWho(t.opened_by || t.table_label);
+                        setErr('');
+                      }
+                    }}
+                  >
+                    🪑 {t.table_label} (Cód: {t.code})
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+          {activeClients.length > 0 && !selectedTableTab && (
             <div className="mt-2">
               <span className="mu text-[0.76rem]">Clientes ativos agora (toque para adicionar na comanda):</span>
               <div className="chips !flex-wrap !overflow-visible mt-1">
@@ -500,7 +548,7 @@ export const MakeDrinkModal: React.FC<{
               </div>
             </div>
           )}
-          {needsConfirmSameClient && matchedActive && (
+          {!selectedTableTab && needsConfirmSameClient && matchedActive && (
             <div className="alert-box row sp mt-2">
               <div className="flex-1 min-w-[180px]">
                 <b>⚠️ Cliente ativo com esse nome</b>
@@ -628,6 +676,22 @@ export const QrModal: React.FC<{
   const promos = getBarPromotions(bar);
   const [designId, setDesignId] = useState(bar.active_menu_preset || '');
   const [promoId, setPromoId] = useState(() => getActivePromotion(bar)?.id || '');
+  const defaultTables = ['Mesa 1', 'Mesa 2', 'Mesa 3', 'Mesa 4', 'Mesa 5', 'Mesa 6', 'Mesa 7', 'Mesa 8', 'Mesa 9', 'Mesa 10', 'Mesa 12', 'Mesa 15', 'Mesa 20'];
+  const getInitialTables = (): string[] => {
+    const rawBar = Array.isArray(bar.table_names) ? bar.table_names.map((x) => String(x).trim()).filter(Boolean) : [];
+    let rawLocal: string[] = [];
+    try {
+      const stored = JSON.parse(localStorage.getItem('bar_tables_' + bar.id) || '[]');
+      if (Array.isArray(stored)) rawLocal = stored.map((x) => String(x).trim()).filter(Boolean);
+    } catch {
+      // ignore
+    }
+    const merged = rawBar.length ? rawBar : rawLocal.length ? rawLocal : defaultTables;
+    return Array.from(new Set(merged));
+  };
+
+  const [tablesList, setTablesList] = useState<string[]>(getInitialTables);
+  const [newTableInput, setNewTableInput] = useState('');
   const [mesaSel, setMesaSel] = useState('');
   const [customMesa, setCustomMesa] = useState('');
   const [qrSrc, setQrSrc] = useState('');
@@ -638,6 +702,49 @@ export const QrModal: React.FC<{
   const tableVal = mesaSel === 'custom' ? customMesa.trim() : mesaSel;
   const targetUrl = menuUrl(bar.id, tableVal);
   const label = tableVal ? `${bar.name} · ${tableVal}` : bar.name;
+
+  const persistTablesList = async (next: string[]) => {
+    setTablesList(next);
+    try {
+      localStorage.setItem('bar_tables_' + bar.id, JSON.stringify(next));
+    } catch {
+      // ignore
+    }
+    const r = await writeBarSafe('update', { table_names: next }, bar.id);
+    if (!r.error && r.data) {
+      onBarUpdated({ ...r.data, table_names: next });
+    } else {
+      onBarUpdated({ ...bar, table_names: next });
+    }
+  };
+
+  const handleAddTable = async (nameToAdd?: string) => {
+    const raw = (nameToAdd ?? newTableInput).trim();
+    if (!raw) return;
+    const normalized = /^\d+$/.test(raw) ? `Mesa ${raw}` : raw;
+    if (tablesList.some((t) => norm(t) === norm(normalized))) {
+      setMesaSel(tablesList.find((t) => norm(t) === norm(normalized)) || normalized);
+      setNewTableInput('');
+      onToast(`${normalized} já está na lista!`);
+      return;
+    }
+    const next = [...tablesList, normalized];
+    setNewTableInput('');
+    setMesaSel(normalized);
+    await persistTablesList(next);
+    onToast(`${normalized} adicionada!`);
+  };
+
+  const handleAddNextNumericTable = async () => {
+    const nums = tablesList
+      .map((t) => {
+        const m = t.match(/^mesa\s+(\d+)$/i);
+        return m ? parseInt(m[1], 10) : 0;
+      })
+      .filter((n) => n > 0);
+    const nextNum = nums.length ? Math.max(...nums) + 1 : 1;
+    await handleAddTable(`Mesa ${nextNum}`);
+  };
 
   const isHome = bar.kind === 'home' || bar.kind === 'casa';
   const makeable = recipes.filter((r) => makeDrink(r, items));
@@ -960,29 +1067,94 @@ export const QrModal: React.FC<{
 
         <div className="row mt-3">
           <div className="grow">
-            <label>Mesa (opcional)</label>
+            <label>Tipo de QR / Mesa</label>
             <select value={mesaSel} onChange={(e) => setMesaSel(e.target.value)}>
-              <option value="">Cardápio geral</option>
-              {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20].map((n) => (
-                <option key={n} value={`Mesa ${n}`}>
-                  Mesa {n}
+              <option value="">📱 Cardápio geral (QR comum)</option>
+              {tablesList.map((tName) => (
+                <option key={tName} value={tName}>
+                  🪑 {tName}
                 </option>
               ))}
-              <option value="custom">Mesa personalizada...</option>
+              <option value="custom">✏️ Digitar mesa avulsa…</option>
             </select>
           </div>
         </div>
 
+        <div className="panel mt-2.5">
+          <div className="row sp">
+            <b className="text-[0.86rem]">🪑 Gerenciar mesas ({tablesList.length})</b>
+            <button
+              type="button"
+              className="b g sm"
+              onClick={() => void handleAddNextNumericTable()}
+            >
+              + Próxima mesa
+            </button>
+          </div>
+          <div className="row mt-2">
+            <input
+              value={newTableInput}
+              onChange={(e) => setNewTableInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') void handleAddTable();
+              }}
+              placeholder="Nova mesa (ex: 11, Varanda 2, VIP 1)"
+              className="flex-1"
+            />
+            <button
+              type="button"
+              className="b sm"
+              onClick={() => void handleAddTable()}
+            >
+              + Adicionar
+            </button>
+          </div>
+          {mesaSel && mesaSel !== 'custom' && tablesList.includes(mesaSel) && tablesList.length > 1 && (
+            <div className="row sp mt-2">
+              <span className="mu text-[0.76rem]">
+                QR selecionado: <b>{mesaSel}</b>
+              </span>
+              <button
+                type="button"
+                className="b g sm"
+                onClick={async () => {
+                  const next = tablesList.filter((t) => t !== mesaSel);
+                  setMesaSel('');
+                  await persistTablesList(next);
+                  onToast(`${mesaSel} removida`);
+                }}
+              >
+                Remover {mesaSel}
+              </button>
+            </div>
+          )}
+        </div>
+
         {mesaSel === 'custom' && (
           <div>
-            <label>Nome/número da mesa</label>
+            <label>Nome/número da mesa avulsa</label>
             <input
               value={customMesa}
               onChange={(e) => setCustomMesa(e.target.value)}
-              placeholder="Ex: Mesa 14 / Varanda 2"
+              placeholder="Ex: Mesa 24 / Deck"
             />
           </div>
         )}
+
+        <div className="panel mt-2.5">
+          {tableVal ? (
+            <p className="mu text-[0.8rem]">
+              🪑 <b>QR de Mesa ({tableVal}):</b> ao ler o QR, a comanda da mesa já abre
+              automaticamente com um código de 4 dígitos. Quem entrar depois na mesma mesa precisa
+              digitar esse código + seu próprio nome.
+            </p>
+          ) : (
+            <p className="mu text-[0.8rem]">
+              📱 <b>QR Comum (Cardápio geral):</b> o cliente vê o cardápio e a comanda só é aberta
+              quando ele enviar um pedido.
+            </p>
+          )}
+        </div>
 
         <div className="text-center">
           <div className="qr-box">

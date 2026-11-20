@@ -26,8 +26,9 @@ import {
 } from './components/Modals';
 import { OfflineIndicator, PWAInstallButton } from './components/PWAControls';
 import { BrandMark } from './components/SharedUI';
+import { EXTENDED_RECIPES } from './lib/recipesSeed';
 import { broadcastMenuUpdate, sb } from './lib/supabase';
-import { applyBarTheme, beep, getUnpricedAvailableDrinks } from './lib/utils';
+import { applyBarTheme, beep, getUnpricedAvailableDrinks, norm } from './lib/utils';
 import type {
   Bar,
   BarEntry,
@@ -39,6 +40,7 @@ import type {
   Recipe,
   ServiceRequest,
   StaffProfile,
+  TableTab,
   UserCoords,
 } from './types/meubar';
 
@@ -66,6 +68,7 @@ export default function App() {
   const [recipes, setRecipes] = useState<Recipe[]>([]);
   const [prices, setPrices] = useState<Record<string, number>>({});
   const [orders, setOrders] = useState<Order[]>([]);
+  const [tableTabs, setTableTabs] = useState<TableTab[]>([]);
   const [settledIds, setSettledIds] = useState<Set<string>>(new Set());
   const [members, setMembers] = useState<BarMember[]>([]);
 
@@ -89,6 +92,72 @@ export default function App() {
   const subRef = useRef<RealtimeChannel | null>(null);
   const activeBarIdRef = useRef<string | null>(null);
   const userIdRef = useRef<string | null>(null);
+  const seedingRecipesRef = useRef(false);
+
+  const dedupeRecipes = (list: Recipe[]): Recipe[] => {
+    const seen = new Map<string, Recipe>();
+    for (const r of list) {
+      const k = norm(r.name);
+      if (!k) continue;
+      const prev = seen.get(k);
+      if (!prev || (!prev.image_url && r.image_url)) {
+        seen.set(k, r);
+      }
+    }
+    return Array.from(seen.values()).sort((a, b) => a.name.localeCompare(b.name));
+  };
+
+  const ensureExtendedRecipesSeeded = async (
+    currentRecipes: Recipe[],
+    uid: string
+  ): Promise<Recipe[]> => {
+    const cleanCurrent = dedupeRecipes(currentRecipes);
+    if (seedingRecipesRef.current) return cleanCurrent;
+
+    const existingNames = new Set(cleanCurrent.map((r) => norm(r.name)));
+    const missing = EXTENDED_RECIPES.filter((sr) => !existingNames.has(norm(sr.name)));
+    if (missing.length === 0) return cleanCurrent;
+
+    seedingRecipesRef.current = true;
+    const inserted: Recipe[] = [];
+    try {
+      const CHUNK = 30;
+      for (let i = 0; i < missing.length; i += CHUNK) {
+        const slice = missing.slice(i, i + CHUNK);
+        const buildRows = (ownerId: string | null) =>
+          slice.map((sr) => ({
+            owner: ownerId,
+            name: sr.name,
+            category: sr.category,
+            ingredients: sr.ingredients,
+            steps: sr.steps,
+            instructions: sr.steps,
+            description: sr.description,
+            story: sr.story,
+            glass: sr.glass,
+            technique: sr.technique,
+            garnish: sr.garnish,
+            shaken: sr.shaken,
+            tags: sr.tags,
+            author_nick: 'Meu Bar',
+            is_public: true,
+            verified: true,
+          }));
+
+        let res = await sb.from('recipes').insert(buildRows(null)).select('*');
+        if (res.error) {
+          res = await sb.from('recipes').insert(buildRows(uid)).select('*');
+        }
+        if (!res.error && res.data) {
+          inserted.push(...(res.data as Recipe[]));
+        }
+      }
+    } finally {
+      seedingRecipesRef.current = false;
+    }
+
+    return inserted.length > 0 ? dedupeRecipes([...cleanCurrent, ...inserted]) : cleanCurrent;
+  };
 
   const showToast = (t: string) => {
     setToastMsg(t);
@@ -142,13 +211,40 @@ export default function App() {
     }
   };
 
-  const silentSyncBarData = async (barId: string) => {
-    const [r1, r2, r3] = await Promise.all([
+  const refreshTableTabs = async (barId = activeBarIdRef.current) => {
+    if (!barId) return;
+    const r = await sb
+      .from('table_tabs')
+      .select('*')
+      .eq('bar_id', barId)
+      .eq('status', 'open')
+      .order('created_at');
+    if (!r.error && r.data) {
+      const nextTabs = r.data as TableTab[];
+      setTableTabs((prev) =>
+        JSON.stringify(prev) === JSON.stringify(nextTabs) ? prev : nextTabs
+      );
+    }
+  };
+
+  const silentSyncBarData = async (barId: string, uid?: string, mgr?: boolean) => {
+    if (typeof document !== 'undefined' && document.hidden) return;
+    const [r0, r1, r2, r3, r4] = await Promise.all([
+      sb.from('bars').select('*').eq('id', barId).maybeSingle(),
       sb.from('bar_items').select('*').eq('bar_id', barId).order('name'),
       sb.from('recipes').select('*').order('name'),
       sb.from('bar_prices').select('recipe_id, price').eq('bar_id', barId),
+      sb.from('bar_members').select('*').eq('bar_id', barId),
     ]);
 
+    if (!r0.error && r0.data) {
+      const nextBar = r0.data as Bar;
+      setActiveBar((prev) => {
+        if (prev && JSON.stringify(prev) === JSON.stringify(nextBar)) return prev;
+        applyBarTheme(nextBar);
+        return nextBar;
+      });
+    }
     if (!r1.error && r1.data) {
       const nextItems = r1.data as BarItem[];
       setItems((prev) =>
@@ -156,7 +252,7 @@ export default function App() {
       );
     }
     if (!r2.error && r2.data) {
-      const nextRecipes = r2.data as Recipe[];
+      const nextRecipes = dedupeRecipes(r2.data as Recipe[]);
       setRecipes((prev) =>
         JSON.stringify(prev) === JSON.stringify(nextRecipes) ? prev : nextRecipes
       );
@@ -170,8 +266,17 @@ export default function App() {
         JSON.stringify(prev) === JSON.stringify(prMap) ? prev : prMap
       );
     }
+    if (!r4.error && r4.data) {
+      const nextMem = r4.data as BarMember[];
+      setMembers((prev) =>
+        JSON.stringify(prev) === JSON.stringify(nextMem) ? prev : nextMem
+      );
+    }
 
-    await refreshOrders(barId);
+    await Promise.all([refreshOrders(barId), refreshTableTabs(barId)]);
+    if (uid) {
+      await loadJobsAndRequests(uid, barId, Boolean(mgr));
+    }
   };
 
   const loadJobsAndRequests = async (
@@ -232,7 +337,13 @@ export default function App() {
     ]);
 
     setItems((r1.data as BarItem[]) || []);
-    setRecipes((r2.data as Recipe[]) || []);
+    const initialRecipes = dedupeRecipes((r2.data as Recipe[]) || []);
+    setRecipes(initialRecipes);
+    void ensureExtendedRecipesSeeded(initialRecipes, uid).then((seeded) => {
+      setRecipes((prev) =>
+        JSON.stringify(prev) === JSON.stringify(seeded) ? prev : seeded
+      );
+    });
     const prMap: Record<string, number> = {};
     ((r3.data as { recipe_id: string; price: number }[]) || []).forEach((x) => {
       prMap[x.recipe_id] = Number(x.price);
@@ -240,7 +351,7 @@ export default function App() {
     setPrices(prMap);
     setMembers((r5.data as BarMember[]) || []);
 
-    await refreshOrders(bar.id);
+    await Promise.all([refreshOrders(bar.id), refreshTableTabs(bar.id)]);
     const mgr = barRole === 'owner' || barRole === 'dono' || barRole === 'gerente';
     await loadJobsAndRequests(uid, bar.id, mgr);
     setTab('recipes');
@@ -351,7 +462,14 @@ export default function App() {
   }, [isMenuRoute]);
 
   useEffect(() => {
-    if (isMenuRoute || !activeBar) return;
+    if (isMenuRoute || !user) return;
+    if (!activeBar || screenMode === 'seeker') {
+      const seekerPoll = setInterval(() => {
+        if (document.hidden) return;
+        void loadJobsAndRequests(user.id, null, false);
+      }, 5000);
+      return () => clearInterval(seekerPoll);
+    }
     if (subRef.current) void sb.removeChannel(subRef.current);
 
     const ch = sb
@@ -371,23 +489,38 @@ export default function App() {
       )
       .on(
         'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'table_tabs',
+          filter: 'bar_id=eq.' + activeBar.id,
+        },
+        () => {
+          void refreshTableTabs(activeBar.id);
+        }
+      )
+      .on(
+        'postgres_changes',
         { event: '*', schema: 'public', table: 'job_posts' },
         () => {
-          if (user) void loadJobsAndRequests(user.id, activeBar.id, isManager);
+          void loadJobsAndRequests(user.id, activeBar.id, isManager);
         }
       )
       .subscribe();
 
     subRef.current = ch;
-    // Checagem silenciosa de 5 em 5 segundos para novos drinks disponíveis, estoque, preços e pedidos
-    const poll = setInterval(() => void silentSyncBarData(activeBar.id), 5000);
+    // Checagem silenciosa de 5 em 5 segundos para todas as telas do bar
+    const poll = setInterval(
+      () => void silentSyncBarData(activeBar.id, user.id, isManager),
+      5000
+    );
 
     return () => {
       clearInterval(poll);
       void sb.removeChannel(ch);
       subRef.current = null;
     };
-  }, [isMenuRoute, activeBar?.id, isManager, user?.id]);
+  }, [isMenuRoute, activeBar?.id, isManager, user?.id, screenMode]);
 
   // Proteção do botão Voltar do Android (Capacitor APK + PWA/WebView)
   const navStateRef = useRef({
@@ -843,6 +976,7 @@ export default function App() {
               <CashierView
                 bar={activeBar}
                 orders={orders}
+                tableTabs={tableTabs}
                 recipes={recipes}
                 prices={prices}
                 hasPricing={hasPricing}
@@ -853,6 +987,7 @@ export default function App() {
                   setSettledIds(next);
                 }}
                 onRefreshOrders={() => refreshOrders(activeBar.id)}
+                onRefreshTableTabs={() => refreshTableTabs(activeBar.id)}
                 onBackMore={() => setTab('more')}
                 onToast={showToast}
               />
@@ -1019,6 +1154,7 @@ export default function App() {
               items={items}
               prices={prices}
               orders={orders}
+              tableTabs={tableTabs}
               onClose={() => setMakeDrinkRecipe(null)}
               onOrderCreated={() => refreshOrders(activeBar.id)}
               onToast={showToast}
