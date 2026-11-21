@@ -1,5 +1,10 @@
 import { createClient } from '@supabase/supabase-js';
 import type { Bar } from '../types/meubar';
+import {
+  sanitizeStorageSegment,
+  validateImageUpload,
+  validatePdfUpload,
+} from './security';
 
 const FALLBACK_URL = 'https://ikyxhwyqbknwjugwdlfp.supabase.co';
 const FALLBACK_KEY = 'sb_publishable_bs4eqPwTL4LEMi2ZiB-ROA_eTVoX1ll';
@@ -192,13 +197,26 @@ export async function uploadMediaFile(
   folder: string,
   userId?: string
 ): Promise<{ url?: string; error?: string }> {
+  const check = validateImageUpload(file);
+  if (!check.ok) {
+    return { error: check.error };
+  }
   const prepared = await compressImageFile(file);
   const ext =
     prepared.type === 'image/jpeg'
       ? 'jpg'
-      : file.name.split('.').pop()?.replace(/[^a-zA-Z0-9]/g, '') || 'jpg';
-  const path = `${userId || 'anon'}/${folder}/${Date.now()}-${Math.random().toString(36).slice(2, 7)}.${ext}`;
-  const up = await sb.storage.from(MEDIA_BUCKET).upload(path, prepared, { upsert: true });
+      : prepared.type === 'image/png'
+      ? 'png'
+      : prepared.type === 'image/webp'
+      ? 'webp'
+      : 'jpg';
+  const safeUser = sanitizeStorageSegment(userId || 'anon', 'anon');
+  const safeFolder = sanitizeStorageSegment(folder, 'media');
+  const path = `${safeUser}/${safeFolder}/${Date.now()}-${Math.random().toString(36).slice(2, 7)}.${ext}`;
+  const up = await sb.storage.from(MEDIA_BUCKET).upload(path, prepared, {
+    upsert: true,
+    contentType: prepared.type || 'image/jpeg',
+  });
   if (up.error) {
     return { error: up.error.message };
   }
@@ -211,8 +229,17 @@ export async function uploadPdfFile(
   folder: string,
   userId?: string
 ): Promise<{ url?: string; error?: string }> {
-  const path = `${userId || 'anon'}/${folder}/${Date.now()}-curriculo.pdf`;
-  const up = await sb.storage.from(MEDIA_BUCKET).upload(path, file, { upsert: true });
+  const check = await validatePdfUpload(file);
+  if (!check.ok) {
+    return { error: check.error };
+  }
+  const safeUser = sanitizeStorageSegment(userId || 'anon', 'anon');
+  const safeFolder = sanitizeStorageSegment(folder, 'docs');
+  const path = `${safeUser}/${safeFolder}/${Date.now()}-curriculo.pdf`;
+  const up = await sb.storage.from(MEDIA_BUCKET).upload(path, file, {
+    upsert: true,
+    contentType: 'application/pdf',
+  });
   if (up.error) {
     return { error: up.error.message };
   }

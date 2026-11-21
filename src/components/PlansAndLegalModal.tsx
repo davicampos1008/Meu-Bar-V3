@@ -5,6 +5,7 @@ import {
   sanitizeHttpUrl,
   type BarPlanStatus,
 } from '../lib/saas';
+import { safeExternalUrl } from '../lib/security';
 import { money } from '../lib/utils';
 import type { Bar, PlatformSaaSConfig } from '../types/meubar';
 import { PWAInstallButton } from './PWAControls';
@@ -220,9 +221,9 @@ export const PlansView: React.FC<{
         </div>
 
         <div className="mt-4 flex flex-wrap gap-2">
-          {primaryUpgradeHref ? (
+          {safeExternalUrl(primaryUpgradeHref) ? (
             <a
-              href={primaryUpgradeHref}
+              href={safeExternalUrl(primaryUpgradeHref)}
               target="_blank"
               rel="noopener noreferrer"
               className="b full text-center no-underline"
@@ -236,9 +237,9 @@ export const PlansView: React.FC<{
               Copiar pedido de ativação do Plano Pro
             </button>
           )}
-          {waLink && checkoutUrl && (
+          {safeExternalUrl(waLink) && checkoutUrl && (
             <a
-              href={waLink}
+              href={safeExternalUrl(waLink)}
               target="_blank"
               rel="noopener noreferrer"
               className="b g full text-center no-underline"

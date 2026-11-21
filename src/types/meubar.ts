@@ -307,6 +307,22 @@ export interface WaiterClaim {
   claimed_at: string;
 }
 
+export type WaiterOperationMode = 'hybrid' | 'fixed' | 'open_queue';
+
+export interface WaiterZone {
+  id: string;
+  name: string;
+  waiter_name: string;
+  table_labels: string[];
+}
+
+export interface WaiterModeConfig {
+  mode: WaiterOperationMode;
+  auto_assign_on_first_order: boolean;
+  waiter_commission_pct: number;
+  zones: WaiterZone[];
+}
+
 export type DeliveryPaymentOption = 'maquininha_credito' | 'maquininha_debito' | 'pix_entrega' | 'dinheiro';
 
 export interface DeliveryCourier {
@@ -317,15 +333,25 @@ export interface DeliveryCourier {
   active: boolean;
 }
 
+export interface DeliveryZone {
+  id: string;
+  name: string;
+  fee: number;
+  eta_minutes?: string;
+}
+
 export interface DeliveryConfig {
   enabled: boolean;
   allow_pickup: boolean;
   delivery_fee: number;
+  free_delivery_above?: number;
   min_order_value: number;
   eta_minutes: string;
+  schedule_text?: string;
   areas_note?: string;
   whatsapp_phone?: string;
   payment_methods: DeliveryPaymentOption[];
+  zones?: DeliveryZone[];
 }
 
 export type DeliveryStage = 'received' | 'preparing' | 'ready_for_courier' | 'out_for_delivery' | 'delivered' | 'cancelled';
@@ -360,6 +386,7 @@ export interface BarOperationalData {
   happy_hours?: HappyHourRule[];
   loyalty?: LoyaltyConfig;
   loyalty_customers?: LoyaltyCustomerRecord[];
+  waiter_config?: WaiterModeConfig;
   table_waiters?: Record<string, TableWaiterAssignment>;
   order_claims?: Record<string, WaiterClaim>;
   call_claims?: Record<string, WaiterClaim>;

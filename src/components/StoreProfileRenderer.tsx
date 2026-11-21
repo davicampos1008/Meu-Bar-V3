@@ -1,4 +1,5 @@
 import React from 'react';
+import { safeExternalUrl } from '../lib/security';
 import { externalMapUrl, getStoreProfileConfig } from '../lib/utils';
 import type { Bar, JobPost, StoreProfileConfig } from '../types/meubar';
 import {
@@ -329,22 +330,26 @@ export const StoreProfileRenderer: React.FC<StoreProfileRendererProps> = ({
                 </div>
               )}
 
-              {cleanSite && (
-                <div className="rounded-xl p-3" style={cardStyle}>
-                  <div className="text-[10px] uppercase tracking-wider opacity-70 mb-0.5">
-                    🌐 Site / Links
+              {(() => {
+                const safeSite = safeExternalUrl(cleanSite);
+                if (!safeSite) return null;
+                return (
+                  <div className="rounded-xl p-3" style={cardStyle}>
+                    <div className="text-[10px] uppercase tracking-wider opacity-70 mb-0.5">
+                      🌐 Site / Links
+                    </div>
+                    <a
+                      href={safeSite}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-xs sm:text-sm font-semibold underline break-all"
+                      style={{ color: accent }}
+                    >
+                      {cleanSite}
+                    </a>
                   </div>
-                  <a
-                    href={cleanSite.startsWith('http') ? cleanSite : `https://${cleanSite}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-xs sm:text-sm font-semibold underline break-all"
-                    style={{ color: accent }}
-                  >
-                    {cleanSite}
-                  </a>
-                </div>
-              )}
+                );
+              })()}
             </div>
           )}
 

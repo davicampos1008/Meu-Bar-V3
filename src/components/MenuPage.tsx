@@ -22,6 +22,7 @@ import {
   loadPartnerAds,
   loadPlatformConfig,
 } from '../lib/saas';
+import { checkActionCooldown } from '../lib/security';
 import { sb } from '../lib/supabase';
 import {
   applyBarTheme,
@@ -215,6 +216,7 @@ export const MenuPage: React.FC<{
     }
   });
   const [dlvComplement, setDlvComplement] = useState('');
+  const [selectedDeliveryZoneId, setSelectedDeliveryZoneId] = useState('');
   const [dlvPayment, setDlvPayment] = useState<DeliveryPaymentOption>('maquininha_credito');
   const [dlvChangeFor, setDlvChangeFor] = useState('');
   const [dlvErr, setDlvErr] = useState('');
@@ -768,11 +770,25 @@ export const MenuPage: React.FC<{
   const isDeliveryMode = !isTableQr && customerMode === 'delivery';
   const totalCount = mine.reduce((s, o) => s + o.qty, 0);
   const totalPay = mine.reduce((s, o) => s + o.qty * (o.price || 0), 0);
+  const deliveryZones = deliveryCfg.zones || [];
+  const activeDeliveryZone =
+    deliveryZones.find((z) => z.id === selectedDeliveryZoneId) ||
+    deliveryZones.find((z) => norm(z.name) === norm(dlvNeighborhood)) ||
+    null;
   const deliveryCartCount = deliveryCart.reduce((s, it) => s + it.qty, 0);
   const deliveryCartSubtotal =
     Math.round(deliveryCart.reduce((s, it) => s + it.qty * it.unitPrice, 0) * 100) / 100;
+  const baseDeliveryFee = activeDeliveryZone
+    ? Math.max(0, Number(activeDeliveryZone.fee || 0))
+    : Math.max(0, Number(deliveryCfg.delivery_fee || 0));
+  const freeDeliveryThreshold = Math.max(0, Number(deliveryCfg.free_delivery_above || 0));
+  const isFreeDeliveryUnlocked =
+    deliveryFulfillment === 'delivery' &&
+    freeDeliveryThreshold > 0 &&
+    deliveryCartSubtotal >= freeDeliveryThreshold;
   const deliveryFeeApplied =
-    deliveryFulfillment === 'pickup' ? 0 : Math.max(0, Number(deliveryCfg.delivery_fee || 0));
+    deliveryFulfillment === 'pickup' || isFreeDeliveryUnlocked ? 0 : baseDeliveryFee;
+  const deliveryEtaApplied = activeDeliveryZone?.eta || deliveryCfg.eta_minutes;
   const deliveryCartTotal = Math.round((deliveryCartSubtotal + deliveryFeeApplied) * 100) / 100;
 
   if (isTableQr && (!name || !tableSession)) {
@@ -1116,6 +1132,11 @@ export const MenuPage: React.FC<{
   });
 
   const handlePlaceOrder = async (recipe: MenuItem, orderQty: number, orderNote: string) => {
+    const cd = checkActionCooldown(`place_order_${barId}`, 2000);
+    if (!cd.ok) {
+      setOrderErr('Aguarde um instante antes de enviar outro pedido.');
+      return;
+    }
     setSending(true);
     setOrderErr('');
     const priceInfo = getItemFinalPrice(recipe);
@@ -1201,6 +1222,11 @@ export const MenuPage: React.FC<{
   const handleSubmitDeliveryCheckout = async (e: React.FormEvent) => {
     e.preventDefault();
     setDlvErr('');
+    const cd = checkActionCooldown(`dlv_checkout_${barId}`, 4500);
+    if (!cd.ok) {
+      setDlvErr('Aguarde alguns segundos antes de enviar um novo pedido.');
+      return;
+    }
     if (!deliveryCfg.enabled) {
       setDlvErr('O delivery deste estabelecimento está pausado no momento.');
       return;
@@ -1703,10 +1729,19 @@ export const MenuPage: React.FC<{
                 <p className="mu text-xs !mt-0.5 !mb-0">
                   {deliveryCfg.enabled ? (
                     <>
-                      Taxa: <b>{money(deliveryCfg.delivery_fee)}</b> · Mínimo:{' '}
-                      <b>{money(deliveryCfg.min_order_value)}</b> · Prazo:{' '}
-                      <b>{deliveryCfg.eta_minutes}</b>
+                      Taxa:{' '}
+                      <b>
+                        {deliveryZones.length > 0
+                          ? `a partir de ${money(Math.min(...deliveryZones.map((z) => z.fee)))}`
+                          : money(deliveryCfg.delivery_fee)}
+                      </b>{' '}
+                      · Mínimo: <b>{money(deliveryCfg.min_order_value)}</b> · Prazo:{' '}
+                      <b>{deliveryEtaApplied}</b>
                       {deliveryCfg.allow_pickup ? ' · Retirada grátis' : ''}
+                      {freeDeliveryThreshold > 0
+                        ? ` · Frete grátis acima de ${money(freeDeliveryThreshold)}`
+                        : ''}
+                      {deliveryCfg.schedule_text ? ` · 🕒 ${deliveryCfg.schedule_text}` : ''}
                     </>
                   ) : (
                     'Delivery pausado no momento pelo estabelecimento.'
@@ -2237,7 +2272,7 @@ export const MenuPage: React.FC<{
                       className={`b sm ${deliveryFulfillment === 'delivery' ? '' : 'g'}`}
                       onClick={() => setDeliveryFulfillment('delivery')}
                     >
-                      🛵 Entrega ({money(deliveryCfg.delivery_fee)})
+                      🛵 Entrega ({isFreeDeliveryUnlocked ? 'Grátis' : money(baseDeliveryFee)})
                     </button>
                     <button
                       type="button"
@@ -2246,6 +2281,22 @@ export const MenuPage: React.FC<{
                     >
                       🛍️ Retirar no Balcão (Grátis)
                     </button>
+                  </div>
+                )}
+
+                {deliveryFulfillment === 'delivery' && freeDeliveryThreshold > 0 && (
+                  <div
+                    className={`rounded-xl px-3 py-2 text-xs font-semibold border ${
+                      isFreeDeliveryUnlocked
+                        ? 'bg-emerald-500/15 border-emerald-400/40 text-emerald-200'
+                        : 'bg-amber-500/10 border-amber-400/35 text-amber-200'
+                    }`}
+                  >
+                    {isFreeDeliveryUnlocked
+                      ? '🎉 Frete Grátis aplicado automaticamente neste pedido!'
+                      : `🚚 Faltam ${money(
+                          Math.max(0, freeDeliveryThreshold - deliveryCartSubtotal)
+                        )} em itens para ganhar Frete Grátis!`}
                   </div>
                 )}
 
@@ -2281,6 +2332,30 @@ export const MenuPage: React.FC<{
                     <div className="text-xs font-bold uppercase tracking-wider text-[var(--ac)]">
                       2. Endereço de entrega
                     </div>
+                    {deliveryZones.length > 0 && (
+                      <div>
+                        <label className="!mt-0">Região / Bairro (calcula taxa e prazo)</label>
+                        <select
+                          value={activeDeliveryZone?.id || ''}
+                          onChange={(e) => {
+                            const id = e.target.value;
+                            setSelectedDeliveryZoneId(id);
+                            const found = deliveryZones.find((z) => z.id === id);
+                            if (found) setDlvNeighborhood(found.name);
+                          }}
+                        >
+                          <option value="">
+                            Outro bairro (taxa padrão {money(deliveryCfg.delivery_fee)})
+                          </option>
+                          {deliveryZones.map((z) => (
+                            <option key={z.id} value={z.id}>
+                              {z.name} — {money(z.fee)}
+                              {z.eta ? ` (${z.eta})` : ''}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
                     <div className="grid grid-cols-3 gap-2">
                       <div className="col-span-2">
                         <label className="!mt-0">Rua / Avenida</label>

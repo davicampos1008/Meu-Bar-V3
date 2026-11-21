@@ -9,25 +9,35 @@ import {
 } from '../lib/bluetoothPrinter';
 import { getDefaultUnitForIngredient, getUnitMeta } from '../lib/catalog';
 import {
+  broadcastBarOpsSync,
   canRoleDo,
   DEFAULT_MODIFIERS,
   DEFAULT_ROLE_PERMISSIONS,
   downloadCsv,
   getBarOpsData,
+  getDeliveryConfig,
+  getEffectiveTableOwner,
   getLoyaltyConfig,
+  getWaiterConfig,
+  isDeliveryOrder,
   isHappyHourActiveNow,
   logBarAudit,
+  parseDeliveryOrderMeta,
   saveBarOpsData,
+  tableOwnerKey,
+  WAITER_MODE_META,
   WEEKDAY_SHORT,
 } from '../lib/opsUtils';
-import { filterRecipesForBar, money } from '../lib/utils';
+import { filterRecipesForBar, money, norm, today } from '../lib/utils';
 import type {
   Bar,
   BarItem,
+  BarMember,
   CashSaleRecord,
   HappyHourRule,
   LoyaltyConfig,
   LoyaltyCustomerRecord,
+  Order,
   OrderModifierOption,
   PaymentMethod,
   PermissionKey,
@@ -35,10 +45,15 @@ import type {
   ReservationEntry,
   StockLossRecord,
   SupplierEntry,
+  TableTab,
+  WaiterModeConfig,
+  WaiterOperationMode,
+  WaiterZone,
 } from '../types/meubar';
 
 export type ManagementSubTab =
   | 'dashboard'
+  | 'garcons'
   | 'compras'
   | 'happyhour'
   | 'fidelidade'
@@ -71,7 +86,13 @@ export const ManagementProView: React.FC<{
   actorName: string;
   items: BarItem[];
   recipes?: Recipe[];
+  orders?: Order[];
+  members?: BarMember[];
+  prices?: Record<string, number>;
+  tableTabs?: TableTab[];
   initialSubTab?: ManagementSubTab;
+  onOpenDelivery?: () => void;
+  onOpenWaiterStation?: () => void;
   onBarUpdated: (bar: Bar) => void;
   onBackMore: () => void;
   onToast: (msg: string) => void;
@@ -81,7 +102,13 @@ export const ManagementProView: React.FC<{
   actorName,
   items,
   recipes = [],
+  orders = [],
+  members = [],
+  prices = {},
+  tableTabs = [],
   initialSubTab = 'dashboard',
+  onOpenDelivery,
+  onOpenWaiterStation,
   onBarUpdated,
   onBackMore,
   onToast,
@@ -95,8 +122,208 @@ export const ManagementProView: React.FC<{
   }, [initialSubTab]);
 
   const ops = useMemo(() => getBarOpsData(bar), [bar]);
+  const deliveryCfg = useMemo(() => getDeliveryConfig(bar), [bar]);
+  const currentWaiterCfg = useMemo(() => getWaiterConfig(bar), [bar]);
+  const [waiterCfg, setWaiterCfg] = useState<WaiterModeConfig>(currentWaiterCfg);
+  const [newZoneTitle, setNewZoneTitle] = useState('');
+  const [newZoneWaiter, setNewZoneWaiter] = useState('');
+  const [newZoneTables, setNewZoneTables] = useState<string[]>([]);
+  const [savingWaiterCfg, setSavingWaiterCfg] = useState(false);
+
+  useEffect(() => {
+    setWaiterCfg(currentWaiterCfg);
+  }, [currentWaiterCfg]);
+
   const isManager =
     role === 'owner' || role === 'dono' || role === 'gerente';
+
+  const allBarTables = useMemo(() => {
+    const base =
+      Array.isArray(bar.table_names) && bar.table_names.length > 0
+        ? bar.table_names
+        : Array.from({ length: 10 }, (_, i) => `Mesa ${i + 1}`);
+    const extra = tableTabs.map((t) => t.table_label).filter(Boolean);
+    return Array.from(new Set([...base, ...extra]));
+  }, [bar.table_names, tableTabs]);
+
+  const waiterStaffOptions = useMemo(() => {
+    const names = new Set<string>();
+    members.forEach((m) => {
+      if (m.name?.trim()) names.add(m.name.trim());
+    });
+    Object.values(ops.table_waiters || {}).forEach((tw) => {
+      if (tw?.waiter_name?.trim()) names.add(tw.waiter_name.trim());
+    });
+    (currentWaiterCfg.zones || []).forEach((z) => {
+      if (z.waiter_name?.trim()) names.add(z.waiter_name.trim());
+    });
+    if (actorName?.trim()) names.add(actorName.trim());
+    return Array.from(names).sort((a, b) => a.localeCompare(b, 'pt-BR'));
+  }, [members, ops.table_waiters, currentWaiterCfg.zones, actorName]);
+
+  const openTabsNow = useMemo(
+    () => tableTabs.filter((t) => t.status === 'open'),
+    [tableTabs]
+  );
+
+  // Comparativo ao vivo: Salão vs Delivery (hoje)
+  const salonVsDelivery = useMemo(() => {
+    const t = today();
+    let salonOrders = 0;
+    let salonRev = 0;
+    let dlvRevenue = 0;
+    const dlvCodes = new Set<string>();
+    const dlvFeesSeen = new Set<string>();
+    let dlvFees = 0;
+
+    orders.forEach((o) => {
+      if ((o.created_at || '').slice(0, 10) !== t) return;
+      const unit = Number(o.unit_price ?? o.price ?? prices[o.recipe_id] ?? 0);
+      const line = unit * (Number(o.qty) || 1);
+      if (isDeliveryOrder(o)) {
+        const meta = parseDeliveryOrderMeta(o);
+        const code = meta?.code || o.id;
+        dlvCodes.add(code);
+        dlvRevenue += line;
+        if (meta && meta.fee > 0 && !dlvFeesSeen.has(code)) {
+          dlvFeesSeen.add(code);
+          dlvFees += meta.fee;
+        }
+      } else {
+        salonOrders += 1;
+        salonRev += line;
+      }
+    });
+
+    const totalDlv = dlvRevenue + dlvFees;
+    const grand = salonRev + totalDlv;
+    const dlvShare = grand > 0 ? Math.round((totalDlv / grand) * 100) : 0;
+    return {
+      salonOrders,
+      salonRev: Math.round(salonRev * 100) / 100,
+      dlvCount: dlvCodes.size,
+      dlvRev: Math.round(totalDlv * 100) / 100,
+      dlvShare,
+      salonShare: grand > 0 ? 100 - dlvShare : 0,
+    };
+  }, [orders, prices]);
+
+  // Ranking & Comissão por Garçom (Hoje)
+  const waiterRanking = useMemo(() => {
+    const t = today();
+    const commPct = Math.max(0, Number(currentWaiterCfg.waiter_commission_pct ?? 10));
+    const map: Record<
+      string,
+      { name: string; activeTables: number; ordersCount: number; salesTotal: number; commission: number }
+    > = {};
+
+    const ensure = (wName: string) => {
+      const k = norm(wName);
+      if (!map[k]) {
+        map[k] = { name: wName, activeTables: 0, ordersCount: 0, salesTotal: 0, commission: 0 };
+      }
+      return map[k];
+    };
+
+    openTabsNow.forEach((tab) => {
+      const eff = getEffectiveTableOwner(bar, tab.table_label);
+      if (eff.waiterName) {
+        ensure(eff.waiterName).activeTables += 1;
+      }
+    });
+
+    orders.forEach((o) => {
+      if ((o.created_at || '').slice(0, 10) !== t) return;
+      if (isDeliveryOrder(o)) return;
+      const eff = getEffectiveTableOwner(bar, o.table_label);
+      if (!eff.waiterName) return;
+      const rec = ensure(eff.waiterName);
+      const unit = Number(o.unit_price ?? o.price ?? prices[o.recipe_id] ?? 0);
+      const line = unit * (Number(o.qty) || 1);
+      rec.ordersCount += 1;
+      rec.salesTotal = Math.round((rec.salesTotal + line) * 100) / 100;
+      rec.commission = Math.round(rec.salesTotal * (commPct / 100) * 100) / 100;
+    });
+
+    return {
+      commPct,
+      rows: Object.values(map).sort((a, b) => b.salesTotal - a.salesTotal || b.activeTables - a.activeTables),
+    };
+  }, [orders, openTabsNow, bar, prices, currentWaiterCfg.waiter_commission_pct]);
+
+  const handleSaveWaiterConfig = async () => {
+    setSavingWaiterCfg(true);
+    try {
+      await saveBarOpsData(bar, { waiter_config: waiterCfg }, onBarUpdated);
+      void broadcastBarOpsSync(bar.id);
+      await logBarAudit(
+        bar,
+        'Configuração de Garçons',
+        `Modo: ${WAITER_MODE_META[waiterCfg.mode].shortLabel} | Praças: ${waiterCfg.zones.length} | Comissão: ${waiterCfg.waiter_commission_pct ?? 10}%`,
+        actorName,
+        role || 'gerente',
+        onBarUpdated
+      );
+      onToast('Configuração de equipe, modo de garçons e praças salva!');
+    } finally {
+      setSavingWaiterCfg(false);
+    }
+  };
+
+  const handleAddWaiterZone = () => {
+    const zName = newZoneTitle.trim();
+    const wName = newZoneWaiter.trim();
+    if (!zName || !wName) {
+      onToast('Informe o nome da praça/setor e o garçom responsável.');
+      return;
+    }
+    if (newZoneTables.length === 0) {
+      onToast('Selecione pelo menos 1 mesa para esta praça.');
+      return;
+    }
+    const zone: WaiterZone = {
+      id: 'wz_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+      name: zName,
+      waiter_name: wName,
+      tables: newZoneTables,
+    };
+    setWaiterCfg((prev) => ({
+      ...prev,
+      zones: [...prev.zones, zone],
+    }));
+    setNewZoneTitle('');
+    setNewZoneWaiter('');
+    setNewZoneTables([]);
+  };
+
+  const handleRemoveWaiterZone = (zoneId: string) => {
+    setWaiterCfg((prev) => ({
+      ...prev,
+      zones: prev.zones.filter((z) => z.id !== zoneId),
+    }));
+  };
+
+  const handleReassignOpenTable = async (tableLabel: string, newWaiter: string) => {
+    const k = tableOwnerKey(tableLabel);
+    if (!k) return;
+    const nextMap = { ...(getBarOpsData(bar).table_waiters || {}) };
+    if (newWaiter.trim()) {
+      nextMap[k] = {
+        waiter_name: newWaiter.trim(),
+        table_label: tableLabel,
+        assigned_at: new Date().toISOString(),
+      };
+    } else {
+      delete nextMap[k];
+    }
+    await saveBarOpsData(bar, { table_waiters: nextMap }, onBarUpdated);
+    void broadcastBarOpsSync(bar.id);
+    onToast(
+      newWaiter.trim()
+        ? `${tableLabel} atribuída para ${newWaiter.trim()}!`
+        : `${tableLabel} liberada para o modo padrão.`
+    );
+  };
 
   // Bluetooth ESC/POS state
   const [btStatus, setBtStatus] = useState(() => getConnectedBluetoothPrinter());
@@ -771,6 +998,7 @@ export const ManagementProView: React.FC<{
         {(
           [
             ['dashboard', '📊 Financeiro'],
+            ['garcons', `🍽️ Garçons & Praças (${currentWaiterCfg.zones.length})`],
             ['happyhour', `🍻 Happy Hour${activeHhCount > 0 ? ` (${activeHhCount} ON)` : ''}`],
             ['fidelidade', '🎁 Fidelidade'],
             ['compras', `🛒 Compras (${shoppingList.length})`],
@@ -881,6 +1109,98 @@ export const ManagementProView: React.FC<{
                   Descontos/cortesias: {money(metrics.discounts)}
                 </div>
               </div>
+            </div>
+          </div>
+
+          {/* SALÃO VS DELIVERY + RANKING DE GARÇONS (HOJE) */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div className="panel space-y-2.5">
+              <div className="row sp flex-wrap gap-2">
+                <h3 className="!m-0">🪑 Salão vs. 🛵 Delivery (Hoje)</h3>
+                {onOpenDelivery && (
+                  <button type="button" className="b g sm" onClick={onOpenDelivery}>
+                    🛵 Abrir Central Delivery
+                  </button>
+                )}
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div className="rounded-xl p-2.5 bg-white/5 border border-white/10">
+                  <div className="text-[11px] text-[var(--mut)]">🪑 Salão / Mesas</div>
+                  <div className="text-base font-extrabold tabular-nums text-[var(--ok)]">
+                    {money(salonVsDelivery.salonRev)}
+                  </div>
+                  <div className="text-[11px] text-[var(--mut)]">
+                    {salonVsDelivery.salonOrders} pedido(s) · {salonVsDelivery.salonShare}%
+                  </div>
+                </div>
+                <div className="rounded-xl p-2.5 bg-white/5 border border-white/10">
+                  <div className="text-[11px] text-[var(--mut)]">
+                    🛵 Delivery {deliveryCfg.enabled ? '(ATIVO)' : '(Pausado)'}
+                  </div>
+                  <div className="text-base font-extrabold tabular-nums text-[var(--ac)]">
+                    {money(salonVsDelivery.dlvRev)}
+                  </div>
+                  <div className="text-[11px] text-[var(--mut)]">
+                    {salonVsDelivery.dlvCount} entrega(s) · {salonVsDelivery.dlvShare}%
+                  </div>
+                </div>
+              </div>
+              <div className="h-2 rounded-full bg-white/10 overflow-hidden flex">
+                <div
+                  className="bg-emerald-400 h-full transition-all"
+                  style={{ width: `${salonVsDelivery.salonShare}%` }}
+                />
+                <div
+                  className="bg-amber-400 h-full transition-all"
+                  style={{ width: `${salonVsDelivery.dlvShare}%` }}
+                />
+              </div>
+            </div>
+
+            <div className="panel space-y-2.5">
+              <div className="row sp flex-wrap gap-2">
+                <h3 className="!m-0">🏆 Desempenho dos Garçons (Hoje)</h3>
+                <button
+                  type="button"
+                  className="b g sm"
+                  onClick={() => setSubTab('garcons')}
+                >
+                  🍽️ Configurar Praças
+                </button>
+              </div>
+              <div className="text-[11px] text-[var(--mut)]">
+                Modo ativo: <b className="text-[var(--txt)]">{WAITER_MODE_META[currentWaiterCfg.mode].shortLabel}</b> · Comissão base: <b>{waiterRanking.commPct}%</b>
+              </div>
+              {waiterRanking.rows.length === 0 ? (
+                <p className="mu text-xs !mb-0">
+                  Assim que os garçons assumirem mesas ou praças, o faturamento e a comissão de cada
+                  um aparecem aqui automaticamente.
+                </p>
+              ) : (
+                <div className="space-y-1.5">
+                  {waiterRanking.rows.slice(0, 6).map((w, idx) => (
+                    <div
+                      key={w.name}
+                      className="flex items-center justify-between gap-2 text-xs py-1.5 px-2 rounded-lg bg-white/5 border border-white/10"
+                    >
+                      <div>
+                        <b>
+                          #{idx + 1} {w.name}
+                        </b>
+                        <div className="text-[11px] text-[var(--mut)]">
+                          {w.activeTables} mesa(s) aberta(s) · {w.ordersCount} pedido(s)
+                        </div>
+                      </div>
+                      <div className="text-right tabular-nums">
+                        <div className="font-bold text-[var(--ok)]">{money(w.salesTotal)}</div>
+                        <div className="text-[11px] text-[var(--ac)]">
+                          Comissão: {money(w.commission)}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
 
@@ -2029,6 +2349,26 @@ export const ManagementProView: React.FC<{
             </div>
           </div>
 
+          {/* ATALHOS DE OPERAÇÃO (DELIVERY E GARÇONS) */}
+          <div className="panel space-y-2">
+            <h3 className="!mt-0">⚡ Atalhos de Operação</h3>
+            <div className="flex flex-wrap gap-2">
+              {onOpenDelivery && (
+                <button type="button" className="b sm" onClick={onOpenDelivery}>
+                  🛵 Configurar Delivery, Bairros & Motoboys
+                </button>
+              )}
+              <button type="button" className="b g sm" onClick={() => setSubTab('garcons')}>
+                🍽️ Configurar Modos de Garçom & Praças
+              </button>
+              {onOpenWaiterStation && (
+                <button type="button" className="b g sm" onClick={onOpenWaiterStation}>
+                  🏃 Abrir Central do Garçom
+                </button>
+              )}
+            </div>
+          </div>
+
           {/* LOG DE AUDITORIA */}
           <div className="panel">
             <div className="row sp flex-wrap gap-2 mb-2">
@@ -2074,6 +2414,265 @@ export const ManagementProView: React.FC<{
                       </div>
                     </div>
                   ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* NOVA ABA: EQUIPE, MODOS DE GARÇOM & PRAÇAS */}
+      {subTab === 'garcons' && (
+        <div className="space-y-3">
+          <div className="panel space-y-3">
+            <div className="row sp flex-wrap gap-2">
+              <div>
+                <h3 className="!m-0">🍽️ Modelo de Operação Multi-Garçom</h3>
+                <p className="mu text-xs !mt-0.5 !mb-0">
+                  Escolha como vários garçons dividem as mesas e pedidos sem confusão nem dois
+                  atendentes indo na mesma mesa.
+                </p>
+              </div>
+              {onOpenWaiterStation && (
+                <button type="button" className="b g sm" onClick={onOpenWaiterStation}>
+                  🏃 Abrir Central do Garçom
+                </button>
+              )}
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
+              {(['hybrid', 'fixed', 'open_queue'] as WaiterOperationMode[]).map((modeId) => {
+                const meta = WAITER_MODE_META[modeId];
+                const active = waiterCfg.mode === modeId;
+                return (
+                  <button
+                    key={modeId}
+                    type="button"
+                    onClick={() => setWaiterCfg((prev) => ({ ...prev, mode: modeId }))}
+                    className={`text-left rounded-xl p-3 border transition-all cursor-pointer ${
+                      active
+                        ? 'bg-[var(--ac)]/15 border-[var(--ac)] text-[var(--txt)]'
+                        : 'bg-[var(--bg2)] border-[var(--bd)] text-[var(--mut)] hover:border-white/25'
+                    }`}
+                  >
+                    <div className="text-sm font-extrabold text-[var(--txt)]">{meta.title}</div>
+                    <p className="text-xs mt-1 leading-relaxed !mb-0">{meta.description}</p>
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-2 border-t border-white/10">
+              <label className="!mt-0 flex items-center gap-2 rounded-xl p-3 bg-[var(--bg2)] border border-[var(--bd)] cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="!w-4 !h-4"
+                  checked={waiterCfg.auto_assign_on_first_order}
+                  onChange={(e) =>
+                    setWaiterCfg((prev) => ({
+                      ...prev,
+                      auto_assign_on_first_order: e.target.checked,
+                    }))
+                  }
+                />
+                <span className="text-xs font-semibold text-[var(--txt)]">
+                  Assumir mesa automaticamente no 1º pedido lançado pelo garçom
+                </span>
+              </label>
+
+              <div>
+                <label className="!mt-0">Comissão estimada do garçom (% sobre vendas da mesa)</label>
+                <input
+                  type="number"
+                  min={0}
+                  max={30}
+                  step={0.5}
+                  value={waiterCfg.waiter_commission_pct ?? 10}
+                  onChange={(e) =>
+                    setWaiterCfg((prev) => ({
+                      ...prev,
+                      waiter_commission_pct: Math.max(0, Math.min(30, Number(e.target.value) || 0)),
+                    }))
+                  }
+                />
+              </div>
+            </div>
+
+            <button
+              type="button"
+              className="b ok sm"
+              disabled={savingWaiterCfg}
+              onClick={() => void handleSaveWaiterConfig()}
+            >
+              {savingWaiterCfg ? 'Salvando...' : '💾 Salvar Modo & Praças'}
+            </button>
+          </div>
+
+          {/* MAPA DE PRAÇAS / SETORES */}
+          <div className="panel space-y-3">
+            <div>
+              <h3 className="!mt-0 !mb-0.5">🗺️ Mapa de Praças / Setores Fixos</h3>
+              <p className="mu text-xs !mt-0 !mb-0">
+                Divida o salão em setores (ex: Varanda = Mesas 1 a 5 para João; Salão Interno =
+                Mesas 6 a 10 para Carla). Os pedidos e chamados dessas mesas já chegam destacados
+                para o garçom da praça.
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <div>
+                <label className="!mt-0">Nome da praça / setor</label>
+                <input
+                  value={newZoneTitle}
+                  onChange={(e) => setNewZoneTitle(e.target.value)}
+                  placeholder="Ex: Varanda, Salão Interno, Deck..."
+                  maxLength={40}
+                />
+              </div>
+              <div>
+                <label className="!mt-0">Garçom responsável</label>
+                <input
+                  value={newZoneWaiter}
+                  onChange={(e) => setNewZoneWaiter(e.target.value)}
+                  placeholder="Nome do garçom"
+                  maxLength={40}
+                />
+                {waiterStaffOptions.length > 0 && (
+                  <div className="flex flex-wrap gap-1 mt-1.5">
+                    {waiterStaffOptions.map((n) => (
+                      <button
+                        key={n}
+                        type="button"
+                        className={`b sm !py-0.5 !px-2 !text-[11px] ${
+                          norm(newZoneWaiter) === norm(n) ? '' : 'g'
+                        }`}
+                        onClick={() => setNewZoneWaiter(n)}
+                      >
+                        👤 {n}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div>
+              <label className="!mt-0">Mesas pertencentes a esta praça</label>
+              <div className="flex flex-wrap gap-1.5 mt-1">
+                {allBarTables.map((tb) => {
+                  const selected = newZoneTables.includes(tb);
+                  return (
+                    <button
+                      key={tb}
+                      type="button"
+                      className={`b sm !py-1 !px-2.5 !text-xs ${selected ? '' : 'g'}`}
+                      onClick={() =>
+                        setNewZoneTables((prev) =>
+                          selected ? prev.filter((x) => x !== tb) : [...prev, tb]
+                        )
+                      }
+                    >
+                      {selected ? '✓ ' : '+ '}
+                      {tb}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              <button type="button" className="b sm" onClick={handleAddWaiterZone}>
+                ➕ Adicionar Praça
+              </button>
+              <button
+                type="button"
+                className="b ok sm"
+                disabled={savingWaiterCfg}
+                onClick={() => void handleSaveWaiterConfig()}
+              >
+                💾 Salvar Alterações
+              </button>
+            </div>
+
+            {waiterCfg.zones.length > 0 && (
+              <div className="space-y-2 pt-2 border-t border-white/10">
+                {waiterCfg.zones.map((z) => (
+                  <div
+                    key={z.id}
+                    className="rounded-xl p-2.5 bg-[var(--bg2)] border border-[var(--bd)] flex items-center justify-between gap-2 flex-wrap"
+                  >
+                    <div>
+                      <div className="text-sm font-bold">
+                        📍 {z.name} · <span className="text-[var(--ac)]">👤 {z.waiter_name}</span>
+                      </div>
+                      <div className="text-xs text-[var(--mut)] mt-0.5">
+                        Mesas: <b>{z.tables.join(', ')}</b>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      className="b dn sm"
+                      onClick={() => handleRemoveWaiterZone(z.id)}
+                    >
+                      Remover
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* MESAS ABERTAS AGORA — REATRIBUIÇÃO RÁPIDA */}
+          <div className="panel space-y-2.5">
+            <h3 className="!mt-0 !mb-0.5">🪑 Mesas Abertas Agora ({openTabsNow.length})</h3>
+            <p className="mu text-xs !mt-0 !mb-0">
+              Precisa cobrir folga ou trocar um garçom de mesa no meio do turno? Reatribua em 1
+              clique:
+            </p>
+            {openTabsNow.length === 0 ? (
+              <p className="mu text-xs !mb-0">Nenhuma mesa aberta neste momento.</p>
+            ) : (
+              <div className="space-y-2">
+                {openTabsNow.map((tab) => {
+                  const eff = getEffectiveTableOwner(bar, tab.table_label);
+                  return (
+                    <div
+                      key={tab.id}
+                      className="rounded-xl p-2.5 bg-[var(--bg2)] border border-[var(--bd)] flex items-center justify-between gap-2 flex-wrap"
+                    >
+                      <div>
+                        <div className="text-sm font-bold">{tab.table_label}</div>
+                        <div className="text-xs text-[var(--mut)]">
+                          {eff.waiterName ? (
+                            <>
+                              Responsável: <b className="text-[var(--ok)]">{eff.waiterName}</b>
+                              {eff.source === 'zone' && eff.zoneName
+                                ? ` (Praça ${eff.zoneName})`
+                                : ' (Atribuição direta)'}
+                            </>
+                          ) : (
+                            'Sem garçom fixo (Fila livre)'
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <select
+                          className="!w-auto !py-1 text-xs"
+                          value={eff.source === 'explicit' ? eff.waiterName : ''}
+                          onChange={(e) =>
+                            void handleReassignOpenTable(tab.table_label, e.target.value)
+                          }
+                        >
+                          <option value="">Padrão da praça / Livre</option>
+                          {waiterStaffOptions.map((w) => (
+                            <option key={w} value={w}>
+                              👤 {w}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>

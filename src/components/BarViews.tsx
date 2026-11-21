@@ -2579,6 +2579,7 @@ export const MoreView: React.FC<{
   onOpenManagement?: (
     subtab:
       | 'dashboard'
+      | 'garcons'
       | 'compras'
       | 'happyhour'
       | 'fidelidade'
@@ -2591,6 +2592,7 @@ export const MoreView: React.FC<{
   onOpenAlertSettings?: () => void;
   onOpenPlans?: () => void;
   onOpenSuperAdmin?: () => void;
+  onOpenSalesSite?: () => void;
   onOpenLegal?: (tab: 'terms' | 'privacy') => void;
 }> = ({
   bar,
@@ -2615,6 +2617,7 @@ export const MoreView: React.FC<{
   onOpenAlertSettings,
   onOpenPlans,
   onOpenSuperAdmin,
+  onOpenSalesSite,
   onOpenLegal,
 }) => {
   const open = bar.accepting_orders !== false;
@@ -2863,6 +2866,19 @@ export const MoreView: React.FC<{
             <button
               type="button"
               className="menu-row-item"
+              onClick={() => onOpenManagement('garcons')}
+            >
+              <div className="menu-row-text">
+                <div className="menu-row-title">🍽️ Escala de Garçons & Praças</div>
+                <div className="menu-row-sub">
+                  Modo Híbrido, Praças Fixas por mesas, Fila Livre e comissões da equipe
+                </div>
+              </div>
+              <span className="menu-row-chev">›</span>
+            </button>
+            <button
+              type="button"
+              className="menu-row-item"
               onClick={() => onOpenManagement('happyhour')}
             >
               <div className="menu-row-text">
@@ -3035,6 +3051,18 @@ export const MoreView: React.FC<{
         </button>
 
         <PWAInstallButton variant="row" />
+
+        {onOpenSalesSite && (
+          <button type="button" className="menu-row-item" onClick={onOpenSalesSite}>
+            <div className="menu-row-text">
+              <div className="menu-row-title">🌐 Site Oficial de Vendas (divulgar Meu Bar)</div>
+              <div className="menu-row-sub">
+                Abrir página de apresentação comercial e calculadora de economia (?vendas=1)
+              </div>
+            </div>
+            <span className="menu-row-chev">›</span>
+          </button>
+        )}
 
         {supportWhatsAppHref && (
           <a

@@ -280,8 +280,6 @@ drop policy if exists "bars" on bars;
 create policy "bars" on bars for select using (
   owner = auth.uid()
   or is_bar_staff(id)
-  or auth.uid() is not null
-  or exists(select 1 from job_posts j where j.bar_id = id and j.is_open)
 );
 drop policy if exists "bars_insert" on bars;
 create policy "bars_insert" on bars for insert with check (owner = auth.uid());
@@ -308,14 +306,38 @@ create policy "admin ve o proprio" on admins for select using (user_id = auth.ui
 drop policy if exists "receitas ler" on recipes;
 create policy "receitas ler" on recipes for select using (is_public or owner = auth.uid());
 drop policy if exists "receitas criar" on recipes;
-create policy "receitas criar" on recipes for insert with check (owner = auth.uid() or owner is null);
+create policy "receitas criar" on recipes for insert with check (
+  owner = auth.uid()
+  or exists(select 1 from admins a where a.user_id = auth.uid())
+);
 drop policy if exists "receitas editar" on recipes;
-create policy "receitas editar" on recipes for update using (owner = auth.uid() or owner is null or exists(select 1 from admins a where a.user_id = auth.uid()));
+create policy "receitas editar" on recipes for update using (
+  owner = auth.uid()
+  or exists(select 1 from admins a where a.user_id = auth.uid())
+) with check (
+  owner = auth.uid()
+  or exists(select 1 from admins a where a.user_id = auth.uid())
+);
 drop policy if exists "receitas apagar" on recipes;
-create policy "receitas apagar" on recipes for delete using (owner = auth.uid());
+create policy "receitas apagar" on recipes for delete using (
+  owner = auth.uid()
+  or exists(select 1 from admins a where a.user_id = auth.uid())
+);
 
 drop policy if exists "bar_members_rw" on bar_members;
-create policy "bar_members_rw" on bar_members for all using (user_id = auth.uid() or is_bar_manager(bar_id)) with check (user_id = auth.uid() or is_bar_manager(bar_id));
+drop policy if exists "bar_members_select" on bar_members;
+drop policy if exists "bar_members_insert" on bar_members;
+drop policy if exists "bar_members_update" on bar_members;
+drop policy if exists "bar_members_delete" on bar_members;
+create policy "bar_members_select" on bar_members for select
+  using (user_id = auth.uid() or is_bar_staff(bar_id));
+create policy "bar_members_insert" on bar_members for insert
+  with check (is_bar_manager(bar_id));
+create policy "bar_members_update" on bar_members for update
+  using (is_bar_manager(bar_id))
+  with check (is_bar_manager(bar_id));
+create policy "bar_members_delete" on bar_members for delete
+  using (user_id = auth.uid() or is_bar_manager(bar_id));
 
 drop policy if exists "bar_pw_rw" on bar_service_passwords;
 create policy "bar_pw_rw" on bar_service_passwords for all using (is_bar_manager(bar_id)) with check (is_bar_manager(bar_id));
@@ -324,7 +346,7 @@ drop policy if exists "svc_req_rw" on service_requests;
 create policy "svc_req_rw" on service_requests for all using (requester_id = auth.uid() or is_bar_manager(bar_id)) with check (requester_id = auth.uid() or is_bar_manager(bar_id));
 
 drop policy if exists "staff_prof_r" on staff_profiles;
-create policy "staff_prof_r" on staff_profiles for select using (true);
+create policy "staff_prof_r" on staff_profiles for select using (auth.uid() is not null);
 drop policy if exists "staff_prof_w" on staff_profiles;
 create policy "staff_prof_w" on staff_profiles for all using (user_id = auth.uid()) with check (user_id = auth.uid());
 
@@ -343,7 +365,27 @@ insert into storage.buckets (id, name, public) values ('bar-media', 'bar-media',
 drop policy if exists "fotos ver" on storage.objects;
 create policy "fotos ver" on storage.objects for select using (bucket_id in ('recipes', 'bar-media'));
 drop policy if exists "fotos enviar" on storage.objects;
-create policy "fotos enviar" on storage.objects for insert to authenticated with check (bucket_id in ('recipes', 'bar-media'));
+drop policy if exists "fotos atualizar" on storage.objects;
+drop policy if exists "fotos remover" on storage.objects;
+create policy "fotos enviar" on storage.objects for insert to authenticated
+  with check (
+    bucket_id in ('recipes', 'bar-media')
+    and (storage.foldername(name))[1] = auth.uid()::text
+  );
+create policy "fotos atualizar" on storage.objects for update to authenticated
+  using (
+    bucket_id in ('recipes', 'bar-media')
+    and (storage.foldername(name))[1] = auth.uid()::text
+  )
+  with check (
+    bucket_id in ('recipes', 'bar-media')
+    and (storage.foldername(name))[1] = auth.uid()::text
+  );
+create policy "fotos remover" on storage.objects for delete to authenticated
+  using (
+    bucket_id in ('recipes', 'bar-media')
+    and (storage.foldername(name))[1] = auth.uid()::text
+  );
 
 -- RPCs do Cardápio QR (sem login) e Solicitação por @
 create or replace function get_menu(p_bar uuid) returns json language sql security definer set search_path=public,extensions as $$
@@ -386,7 +428,8 @@ select json_build_object(
     'created_at', b.created_at,
     'ops_data', json_build_object(
       'modifiers', coalesce(b.ops_data->'modifiers', '[]'::jsonb),
-      'happy_hours', coalesce(b.ops_data->'happy_hours', '[]'::jsonb)
+      'happy_hours', coalesce(b.ops_data->'happy_hours', '[]'::jsonb),
+      'delivery_config', b.ops_data->'delivery_config'
     )
   ),
   'stock_items', coalesce((
@@ -492,15 +535,31 @@ language plpgsql security definer set search_path=public,extensions as $$
 declare
   v_id uuid;
   v_kind text := case when lower(coalesce(p_kind, '')) = 'bill' then 'bill' else 'waiter' end;
+  v_table text := nullif(left(trim(coalesce(p_table, '')), 60), '');
+  v_client text := coalesce(nullif(left(trim(coalesce(p_client, '')), 50), ''), 'Cliente');
+  v_recent int;
 begin
   if not exists (select 1 from bars where id = p_bar) then
     raise exception 'Bar não encontrado.';
   end if;
+  -- Anti-flood / proteção contra spam de chamados (máx 3 abertos em 2 minutos por mesa/cliente)
+  select count(*) into v_recent
+  from table_calls
+  where bar_id = p_bar
+    and status = 'open'
+    and created_at > now() - interval '2 minutes'
+    and (
+      (v_table is not null and lower(coalesce(table_label, '')) = lower(v_table))
+      or lower(coalesce(client_name, '')) = lower(v_client)
+    );
+  if v_recent >= 3 then
+    raise exception 'Chamado já enviado! Aguarde o atendimento da equipe.';
+  end if;
   insert into table_calls(bar_id, table_label, client_name, kind, note, status)
   values (
     p_bar,
-    nullif(left(trim(coalesce(p_table, '')), 60), ''),
-    coalesce(nullif(left(trim(coalesce(p_client, '')), 50), ''), 'Cliente'),
+    v_table,
+    v_client,
     v_kind,
     nullif(left(trim(coalesce(p_note, '')), 140), ''),
     'open'
@@ -610,6 +669,9 @@ begin
     select 1 from unnest(v_members) m
     where lower(unaccent(trim(m))) = lower(unaccent(v_name))
   ) then
+    if coalesce(array_length(v_members, 1), 0) >= 25 then
+      return json_build_object('ok', false, 'error', 'Limite máximo de pessoas nesta mesa atingido.');
+    end if;
     v_members := array_append(v_members, v_name);
     update table_tabs set members = v_members where id = v_tab.id;
   end if;
@@ -635,8 +697,8 @@ language sql security definer set search_path=public,extensions as $$
         'tab_id', t.id,
         'table_label', t.table_label,
         'code', case when t.status = 'open' and trim(coalesce(p_code, '')) = t.code then t.code else null end,
-        'opened_by', t.opened_by,
-        'members', t.members
+        'opened_by', case when t.status = 'open' and trim(coalesce(p_code, '')) = t.code then t.opened_by else null end,
+        'members', case when t.status = 'open' and trim(coalesce(p_code, '')) = t.code then t.members else '{}'::text[] end
       )
       from table_tabs t
       where t.id = p_tab_id
@@ -664,12 +726,33 @@ declare
   oid uuid;
   v_tab table_tabs;
   v_table text := nullif(left(trim(coalesce(p_table, '')), 60), '');
+  v_client text := left(trim(coalesce(p_name, '')), 40);
+  v_client_recent int;
+  v_bar_recent int;
 begin
   select * into b from bars where id = p_bar;
   if b.id is null then raise exception 'Bar não encontrado'; end if;
   if not b.accepting_orders then raise exception 'Pedidos pausados no momento'; end if;
-  if length(trim(coalesce(p_name, ''))) < 2 then raise exception 'Informe seu nome'; end if;
+  if length(v_client) < 2 then raise exception 'Informe seu nome'; end if;
   if p_qty < 1 or p_qty > 5 then raise exception 'Quantidade inválida'; end if;
+
+  -- Proteção anti-flood / DoS no banco (evita derrubar a fila com bots)
+  select count(*) into v_client_recent
+  from orders
+  where bar_id = p_bar
+    and lower(coalesce(client_name, '')) = lower(v_client)
+    and created_at > now() - interval '60 seconds';
+  if v_client_recent >= 25 then
+    raise exception 'Muitos pedidos seguidos. Aguarde 1 minuto e tente novamente.';
+  end if;
+
+  select count(*) into v_bar_recent
+  from orders
+  where bar_id = p_bar
+    and created_at > now() - interval '60 seconds';
+  if v_bar_recent >= 150 then
+    raise exception 'Fila temporariamente sobrecarregada. Tente novamente em instantes.';
+  end if;
 
   if p_tab_id is not null then
     select * into v_tab from table_tabs where id = p_tab_id and bar_id = p_bar;
@@ -681,17 +764,18 @@ begin
 
   select price into pr from bar_prices where bar_id = p_bar and recipe_id = p_recipe;
   select name into rname from recipes where id = p_recipe;
+  if rname is null then raise exception 'Item não encontrado'; end if;
   if b.kind not in ('home', 'casa') and pr is null then raise exception 'Item indisponível'; end if;
 
   insert into orders(bar_id, recipe_id, client_name, customer_name, recipe_name, qty, note, price, unit_price, table_label, table_tab_id, station)
   values(
     p_bar,
     p_recipe,
-    left(trim(p_name), 40),
-    left(trim(p_name), 40),
+    v_client,
+    v_client,
     rname,
     p_qty,
-    left(p_note, 140),
+    left(coalesce(p_note, ''), 450),
     pr,
     pr,
     v_table,
@@ -709,19 +793,24 @@ begin
 end $$;
 
 create or replace function order_status(p_ids uuid[]) returns table(id uuid, status text) language sql security definer set search_path=public as $$
-  select o.id, o.status from orders o where o.id = any(p_ids)
+  select o.id, o.status from orders o where o.id = any(p_ids[1:50])
 $$;
 
 create or replace function request_service_by_handle(p_handle text, p_password text, p_role text default 'garcom') returns uuid
 language plpgsql security definer set search_path=public as $$
 declare
   clean_handle text := lower(regexp_replace(trim(coalesce(p_handle, '')), '^@', ''));
+  safe_role text := case
+    when lower(trim(coalesce(p_role, ''))) in ('garcom','barman','cozinha','caixa') then lower(trim(p_role))
+    else 'garcom'
+  end;
   b bars;
   pw_ok boolean;
   prof_name text;
   rid uuid;
 begin
   if auth.uid() is null then raise exception 'Faça login primeiro'; end if;
+  if length(trim(coalesce(p_password, ''))) < 1 then raise exception 'Informe a senha da loja'; end if;
   select * into b from bars where lower(handle) = clean_handle;
   if b.id is null then raise exception 'Bar @% não encontrado', clean_handle; end if;
   select exists(
@@ -730,12 +819,58 @@ begin
       and (password = trim(coalesce(p_password, '')) or access_code = trim(coalesce(p_password, '')))
   ) into pw_ok;
   if not pw_ok then raise exception 'Senha da loja incorreta'; end if;
+  if exists(
+    select 1 from service_requests
+    where bar_id = b.id and requester_id = auth.uid() and status = 'pendente'
+  ) then
+    raise exception 'Você já possui uma solicitação pendente para este bar.';
+  end if;
   select display_name into prof_name from staff_profiles where user_id = auth.uid();
   insert into service_requests(bar_id, requester_id, requester_name, role, status)
-  values (b.id, auth.uid(), coalesce(prof_name, 'Profissional'), coalesce(p_role, 'garcom'), 'pendente')
+  values (b.id, auth.uid(), coalesce(prof_name, 'Profissional'), safe_role, 'pendente')
   returning id into rid;
   return rid;
 end $$;
+
+create or replace function list_public_bars() returns json
+language sql security definer set search_path=public as $$
+  select coalesce((
+    select json_agg(row_to_json(t))
+    from (
+      select
+        b.id,
+        b.name,
+        b.handle,
+        b.city,
+        b.lat,
+        b.lon,
+        b.kind,
+        b.logo_url,
+        b.banner_url,
+        b.slogan,
+        b.phone,
+        b.instagram,
+        b.opening_hours,
+        b.about,
+        b.store_profile_data,
+        b.color_bg,
+        b.color_surface,
+        b.color_accent,
+        b.color_ok,
+        b.color_text,
+        b.name_font,
+        b.crest_border,
+        b.crest_base,
+        b.crest_icon,
+        b.crest_ornament,
+        b.accepting_orders,
+        b.created_at
+      from public.bars b
+      order by b.created_at desc
+      limit 80
+    ) t
+  ), '[]'::json)
+$$;
 
 create or replace function active_client_names(p_bar uuid) returns text[]
 language sql security definer set search_path=public as $$
@@ -752,7 +887,7 @@ language sql security definer set search_path=public as $$
   where t.cname <> ''
 $$;
 
-grant execute on function get_menu(uuid), active_client_names(uuid), get_table_tab_state(uuid, text), open_or_join_table_tab(uuid, text, text, text), verify_table_tab_member(uuid, text), place_order(uuid, text, uuid, int, text, text, uuid), order_status(uuid[]) to anon, authenticated;
+grant execute on function get_menu(uuid), list_public_bars(), active_client_names(uuid), get_table_tab_state(uuid, text), open_or_join_table_tab(uuid, text, text, text), verify_table_tab_member(uuid, text), place_order(uuid, text, uuid, int, text, text, uuid), order_status(uuid[]) to anon, authenticated;
 grant execute on function request_service_by_handle(text, text, text) to authenticated;
 
 do $$ begin
@@ -817,6 +952,13 @@ language sql stable security definer set search_path = public as $$
     where lower(trim(pa.email)) = lower(trim(coalesce(auth.jwt() ->> 'email', '')))
   );
 $$;
+
+drop policy if exists "bars" on bars;
+create policy "bars" on bars for select using (
+  owner = auth.uid()
+  or is_bar_staff(id)
+  or public.is_platform_admin()
+);
 
 create table if not exists platform_settings (
   id text primary key default 'default',

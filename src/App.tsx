@@ -32,6 +32,7 @@ import {
 } from './components/Modals';
 import { LegalDocsModal, PlansView, ProGateCard } from './components/PlansAndLegalModal';
 import { OfflineIndicator, PWAInstallButton } from './components/PWAControls';
+import { SalesLandingPage } from './components/SalesLandingPage';
 import { BrandMark } from './components/SharedUI';
 import { SuperAdminView } from './components/SuperAdminView';
 import {
@@ -88,7 +89,10 @@ export default function App() {
   const modeParam = params.get('mode');
   const isMenuRoute =
     Boolean(menuBarParam) || window.location.pathname.endsWith('/menu.html');
+  const wantsSalesSite =
+    !isMenuRoute && (params.get('site') === '1' || params.get('vendas') === '1');
 
+  const [showSalesSite, setShowSalesSite] = useState(wantsSalesSite);
   const [booting, setBooting] = useState(!isMenuRoute);
   const [user, setUser] = useState<User | null>(null);
   const [userCoords, setUserCoords] = useState<UserCoords | null>(null);
@@ -337,30 +341,47 @@ export default function App() {
     currentBarId: string | null,
     managerFlag: boolean
   ) => {
-    let jr = await sb
-      .from('job_posts')
-      .select('*, bars(*)')
-      .eq('is_open', true)
-      .order('created_at', { ascending: false })
-      .limit(80);
-    if (jr.error) {
-      jr = await sb
-        .from('job_posts')
-        .select('*, bars(name, handle, city, lat, lon)')
-        .eq('is_open', true)
+    // Carrega vitrine pública sem nunca consultar ops_data ou dados privados de outras lojas
+    const PUBLIC_BAR_COLS =
+      'id,name,handle,city,lat,lon,kind,logo_url,banner_url,slogan,phone,instagram,opening_hours,about,store_profile_data,color_bg,color_surface,color_accent,color_ok,color_text,name_font,crest_border,crest_base,crest_icon,crest_ornament,accepting_orders,created_at';
+    let nextPublic: Bar[] = [];
+    const rpcPub = await sb.rpc('list_public_bars');
+    if (!rpcPub.error && Array.isArray(rpcPub.data)) {
+      nextPublic = rpcPub.data as Bar[];
+    } else {
+      const pb = await sb
+        .from('bars')
+        .select(PUBLIC_BAR_COLS)
         .order('created_at', { ascending: false })
         .limit(80);
+      if (!pb.error && pb.data) {
+        nextPublic = pb.data as Bar[];
+      }
     }
-    const openJobs = jr.error ? [] : (jr.data as JobPost[]) || [];
-    setJobs(openJobs);
-
-    const pb = await sb.from('bars').select('*').order('created_at', { ascending: false }).limit(80);
-    if (!pb.error && pb.data) {
-      const nextPublic = pb.data as Bar[];
+    if (nextPublic.length > 0) {
       setPublicBars((prev) =>
         JSON.stringify(prev) === JSON.stringify(nextPublic) ? prev : nextPublic
       );
     }
+
+    const publicById: Record<string, Bar> = {};
+    nextPublic.forEach((b) => {
+      publicById[b.id] = b;
+    });
+
+    const jr = await sb
+      .from('job_posts')
+      .select('*')
+      .eq('is_open', true)
+      .order('created_at', { ascending: false })
+      .limit(80);
+    const openJobs: JobPost[] = jr.error
+      ? []
+      : ((jr.data as JobPost[]) || []).map((j) => ({
+          ...j,
+          bars: publicById[j.bar_id] || j.bars || null,
+        }));
+    setJobs(openJobs);
 
     const ar = await sb.from('job_applications').select('*').eq('applicant_id', uid);
     setMyApps(ar.error ? [] : (ar.data as JobApplication[]) || []);
@@ -1020,6 +1041,34 @@ export default function App() {
     );
   }
 
+  if (showSalesSite) {
+    return (
+      <>
+        <OfflineIndicator />
+        {toastMsg && <div className="toast">{toastMsg}</div>}
+        <SalesLandingPage
+          saasConfig={saasConfig}
+          isLoggedIn={Boolean(user)}
+          onEnterApp={() => {
+            setShowSalesSite(false);
+            try {
+              const url = new URL(window.location.href);
+              url.searchParams.delete('site');
+              url.searchParams.delete('vendas');
+              window.history.replaceState({}, '', url.toString());
+            } catch {
+              // ignore
+            }
+          }}
+          onOpenLegal={(t) => setLegalModal(t)}
+        />
+        {legalModal && (
+          <LegalDocsModal initialTab={legalModal} onClose={() => setLegalModal(null)} />
+        )}
+      </>
+    );
+  }
+
   if (!user) {
     return (
       <>
@@ -1029,6 +1078,7 @@ export default function App() {
           saasConfig={saasConfig}
           partnerAds={partnerAds}
           onOpenLegal={(t) => setLegalModal(t)}
+          onOpenSalesSite={() => setShowSalesSite(true)}
         />
         {legalModal && (
           <LegalDocsModal initialTab={legalModal} onClose={() => setLegalModal(null)} />
@@ -1511,14 +1561,23 @@ export default function App() {
               ))}
 
             {tab === 'management' &&
-              (planStatus.isPro || mgmtSubTab === 'config' ? (
+              (planStatus.isPro || mgmtSubTab === 'config' || mgmtSubTab === 'garcons' ? (
                 <ManagementProView
                   bar={activeBar}
                   role={role}
                   actorName={actorName}
                   items={items}
                   recipes={recipes}
+                  orders={orders}
+                  members={members}
+                  prices={prices}
+                  tableTabs={tableTabs}
                   initialSubTab={mgmtSubTab}
+                  onOpenDelivery={() => setTab('delivery')}
+                  onOpenWaiterStation={() => {
+                    setQueueStation('garcom');
+                    setTab('queue');
+                  }}
                   onBarUpdated={(updated) => {
                     setActiveBar(updated);
                     setBars((prev) =>
@@ -1712,6 +1771,7 @@ export default function App() {
                   onOpenAlertSettings={() => setTab('alerts')}
                   onOpenPlans={() => setTab('plans')}
                   onOpenSuperAdmin={() => setTab('superadmin')}
+                  onOpenSalesSite={() => setShowSalesSite(true)}
                   onOpenLegal={(t) => setLegalModal(t)}
                 />
                 <AdSlot

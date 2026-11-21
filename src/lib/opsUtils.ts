@@ -17,6 +17,8 @@ import type {
   PermissionKey,
   Recipe,
   TableCallAlert,
+  WaiterModeConfig,
+  WaiterOperationMode,
 } from '../types/meubar';
 import {
   buildEscPosBytes,
@@ -321,6 +323,8 @@ function printHtmlViaIframe(html: string): boolean {
     if (existing) existing.remove();
     const iframe = document.createElement('iframe');
     iframe.id = 'meubar-print-frame';
+    // Bloqueia execução de scripts dentro do documento de impressão (defesa em profundidade contra XSS)
+    iframe.setAttribute('sandbox', 'allow-modals allow-same-origin');
     iframe.style.position = 'fixed';
     iframe.style.right = '0';
     iframe.style.bottom = '0';
@@ -348,11 +352,13 @@ function printHtmlViaIframe(html: string): boolean {
   }
 }
 
-function escHtml(s: string): string {
+export function escHtml(s: string): string {
   return String(s || '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 export function printKitchenOrBarTicket(params: {
@@ -1100,10 +1106,83 @@ export async function resolveTableCall(barId: string, callId: string): Promise<v
 }
 
 /* ============================================================
- * MULTI-GARÇOM (RESPONSÁVEL DA MESA & CLAIM) + DELIVERY DIRETO
+ * MULTI-GARÇOM (MODO, PRAÇAS/SETORES, RESPONSÁVEL & CLAIM) + DELIVERY DIRETO
  * ============================================================ */
+export const WAITER_MODE_META: Record<
+  WaiterOperationMode,
+  { label: string; shortLabel: string; description: string }
+> = {
+  hybrid: {
+    label: '🔄 Híbrido (Recomendado)',
+    shortLabel: '🔄 Modo Híbrido',
+    description:
+      'O 1º garçom que atender a mesa vira o responsável oficial, mas qualquer colega livre pode ajudar usando a trava "✋ Vou levar" ou "✋ Indo atender".',
+  },
+  fixed: {
+    label: '👤 Mesa Fixa / Praças',
+    shortLabel: '👤 Praças Fixas',
+    description:
+      'Cada garçom cuida das suas mesas ou da sua praça/setor do salão. Os alertas destacam as mesas do responsável.',
+  },
+  open_queue: {
+    label: '⚡ Fila Livre (Quem pegar 1º)',
+    shortLabel: '⚡ Fila Livre',
+    description:
+      'Sem mesa fixa: todos os pedidos prontos e chamados aparecem para a equipe e o 1º garçom que tocar em "✋ Vou levar" trava o atendimento.',
+  },
+};
+
+export const DEFAULT_WAITER_CONFIG: WaiterModeConfig = {
+  mode: 'hybrid',
+  auto_assign_on_first_order: true,
+  waiter_commission_pct: 10,
+  zones: [],
+};
+
+export function getWaiterConfig(bar?: Partial<Bar> | null): WaiterModeConfig {
+  const ops = getBarOpsData(bar);
+  return {
+    ...DEFAULT_WAITER_CONFIG,
+    ...(ops.waiter_config || {}),
+    zones: Array.isArray(ops.waiter_config?.zones) ? ops.waiter_config.zones : [],
+  };
+}
+
 export function tableOwnerKey(tableLabel?: string | null): string {
   return norm(tableLabel || '');
+}
+
+export function getTableZoneForLabel(
+  bar: Partial<Bar> | null | undefined,
+  tableLabel?: string | null
+): { zoneName: string; waiterName: string } | null {
+  const k = tableOwnerKey(tableLabel);
+  if (!k) return null;
+  const cfg = getWaiterConfig(bar);
+  for (const z of cfg.zones || []) {
+    if ((z.table_labels || []).some((lbl) => tableOwnerKey(lbl) === k)) {
+      return { zoneName: z.name, waiterName: z.waiter_name };
+    }
+  }
+  return null;
+}
+
+export function getEffectiveTableOwner(
+  bar: Partial<Bar> | null | undefined,
+  tableLabel?: string | null
+): { waiterName: string; source: 'explicit' | 'zone' | 'none'; zoneName?: string } {
+  const k = tableOwnerKey(tableLabel);
+  if (!k) return { waiterName: '', source: 'none' };
+  const ops = getBarOpsData(bar);
+  const explicit = ops.table_waiters?.[k]?.waiter_name?.trim();
+  const zone = getTableZoneForLabel(bar, tableLabel);
+  if (explicit) {
+    return { waiterName: explicit, source: 'explicit', zoneName: zone?.zoneName };
+  }
+  if (zone && zone.waiterName.trim()) {
+    return { waiterName: zone.waiterName.trim(), source: 'zone', zoneName: zone.zoneName };
+  }
+  return { waiterName: '', source: 'none', zoneName: zone?.zoneName };
 }
 
 export async function broadcastBarOpsSync(barId: string): Promise<void> {
@@ -1138,11 +1217,14 @@ export const DEFAULT_DELIVERY_CONFIG: DeliveryConfig = {
   enabled: false,
   allow_pickup: true,
   delivery_fee: 8,
+  free_delivery_above: 0,
   min_order_value: 20,
   eta_minutes: '35-50 min',
+  schedule_text: '',
   areas_note: 'Consulte bairros atendidos ao finalizar o pedido.',
   whatsapp_phone: '',
   payment_methods: ['maquininha_credito', 'maquininha_debito', 'pix_entrega', 'dinheiro'],
+  zones: [],
 };
 
 export function getDeliveryConfig(bar?: Partial<Bar> | null): DeliveryConfig {
@@ -1154,6 +1236,7 @@ export function getDeliveryConfig(bar?: Partial<Bar> | null): DeliveryConfig {
       ops.delivery_config?.payment_methods && ops.delivery_config.payment_methods.length > 0
         ? ops.delivery_config.payment_methods
         : DEFAULT_DELIVERY_CONFIG.payment_methods,
+    zones: Array.isArray(ops.delivery_config?.zones) ? ops.delivery_config.zones : [],
   };
 }
 

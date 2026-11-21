@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   broadcastBarOpsSync,
   buildCustomerDeliveryWhatsAppLink,
@@ -15,7 +15,12 @@ import {
   type DeliveryOrderGroup,
 } from '../lib/opsUtils';
 import { sb } from '../lib/supabase';
-import { money } from '../lib/utils';
+import {
+  generatePrintableQrPng,
+  generateQrDataUrl,
+  money,
+  today,
+} from '../lib/utils';
 import type {
   Bar,
   DeliveryConfig,
@@ -23,6 +28,7 @@ import type {
   DeliveryDispatchRecord,
   DeliveryPaymentOption,
   DeliveryStage,
+  DeliveryZone,
   Order,
   Recipe,
 } from '../types/meubar';
@@ -118,6 +124,16 @@ export const DeliveryProView: React.FC<DeliveryProViewProps> = ({
   const currentCfg = useMemo(() => getDeliveryConfig(bar), [bar]);
   const [cfg, setCfg] = useState<DeliveryConfig>(currentCfg);
   const [savingCfg, setSavingCfg] = useState(false);
+  const [togglingEnabled, setTogglingEnabled] = useState(false);
+
+  // Delivery zones form
+  const [newZoneName, setNewZoneName] = useState('');
+  const [newZoneFee, setNewZoneFee] = useState('');
+  const [newZoneEta, setNewZoneEta] = useState('');
+
+  useEffect(() => {
+    setCfg(currentCfg);
+  }, [currentCfg]);
 
   const ops = useMemo(() => getBarOpsData(bar), [bar]);
   const couriers = ops.delivery_couriers || [];
@@ -187,6 +203,21 @@ export const DeliveryProView: React.FC<DeliveryProViewProps> = ({
   );
 
   const visibleGroups = showDelivered ? deliveryGroups : activeGroups;
+
+  const todayStats = useMemo(() => {
+    const t = today();
+    const todays = deliveryGroups.filter((g) => (g.createdAt || '').slice(0, 10) === t);
+    const nonCancelled = todays.filter((g) => computeEffectiveStage(g) !== 'cancelled');
+    const revenue = nonCancelled.reduce((s, g) => s + g.total, 0);
+    const fees = nonCancelled.reduce((s, g) => s + g.fee, 0);
+    const deliveredToday = todays.filter((g) => computeEffectiveStage(g) === 'delivered').length;
+    return {
+      totalToday: nonCancelled.length,
+      deliveredToday,
+      revenue: Math.round(revenue * 100) / 100,
+      fees: Math.round(fees * 100) / 100,
+    };
+  }, [deliveryGroups]);
 
   const updateDispatch = async (
     group: DeliveryOrderGroup,
@@ -325,7 +356,54 @@ export const DeliveryProView: React.FC<DeliveryProViewProps> = ({
     });
   };
 
+  const handleQuickToggleEnabled = async () => {
+    setTogglingEnabled(true);
+    try {
+      const nextCfg: DeliveryConfig = { ...currentCfg, enabled: !currentCfg.enabled };
+      setCfg(nextCfg);
+      await saveBarOpsData(bar, { delivery_config: nextCfg }, onBarUpdated);
+      void broadcastBarOpsSync(bar.id);
+      onToast(
+        nextCfg.enabled
+          ? '🟢 Delivery Direto LIGADO! Clientes já podem fazer pedidos pelo link.'
+          : '🔴 Delivery Direto PAUSADO temporariamente.'
+      );
+    } finally {
+      setTogglingEnabled(false);
+    }
+  };
+
+  const handleAddZone = () => {
+    const zName = newZoneName.trim();
+    if (!zName) {
+      onToast('Digite o nome do bairro ou região.');
+      return;
+    }
+    const feeVal = Math.max(0, Number(newZoneFee.replace(',', '.')) || 0);
+    const nextZone: DeliveryZone = {
+      id: 'zn_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+      name: zName,
+      fee: feeVal,
+      eta: newZoneEta.trim() || undefined,
+    };
+    setCfg((prev) => ({
+      ...prev,
+      zones: [...(prev.zones || []), nextZone],
+    }));
+    setNewZoneName('');
+    setNewZoneFee('');
+    setNewZoneEta('');
+  };
+
+  const handleRemoveZone = (zoneId: string) => {
+    setCfg((prev) => ({
+      ...prev,
+      zones: (prev.zones || []).filter((z) => z.id !== zoneId),
+    }));
+  };
+
   const directLink = deliveryMenuUrl(bar.id, 'delivery');
+  const deliveryQrUrl = useMemo(() => generateQrDataUrl(directLink, 6, 2), [directLink]);
 
   const copyDeliveryLink = async () => {
     try {
@@ -334,6 +412,21 @@ export const DeliveryProView: React.FC<DeliveryProViewProps> = ({
     } catch {
       onToast('Copie o link exibido no campo abaixo.');
     }
+  };
+
+  const handleDownloadDeliveryQr = () => {
+    const png = generatePrintableQrPng(
+      directLink,
+      `${bar.name} — Delivery`,
+      'Aponte a câmera para pedir direto sem taxa'
+    );
+    const a = document.createElement('a');
+    a.href = png;
+    a.download = `qr-delivery-${(bar.name || 'meu-bar').toLowerCase().replace(/[^a-z0-9]+/g, '-')}.png`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    onToast('QR Code do Delivery baixado em PNG!');
   };
 
   return (
@@ -350,21 +443,43 @@ export const DeliveryProView: React.FC<DeliveryProViewProps> = ({
         </button>
       </div>
 
-      {/* Status rápido + Link externo */}
-      <div className="card !border-[var(--ac)]/40">
+      {/* Status rápido + Ligar/Pausar em 1 clique + Link externo */}
+      <div className="card !border-[var(--ac)]/40 space-y-3">
         <div className="flex items-center justify-between gap-2 flex-wrap">
           <div>
             <div className="text-xs font-extrabold uppercase tracking-wider text-[var(--ac)]">
-              {currentCfg.enabled ? '🟢 Delivery Próprio ATIVO' : '⚪ Delivery Próprio DESATIVADO'}
+              {currentCfg.enabled ? '🟢 Delivery Próprio ATIVO' : '🔴 Delivery Próprio PAUSADO'}
             </div>
             <div className="text-xs text-[var(--mut)] mt-0.5">
-              Taxa: <b>{money(currentCfg.delivery_fee)}</b> · Mínimo:{' '}
-              <b>{money(currentCfg.min_order_value)}</b> · Prazo: <b>{currentCfg.eta_minutes}</b>
+              Taxa base: <b>{money(currentCfg.delivery_fee)}</b>
+              {(currentCfg.zones?.length || 0) > 0
+                ? ` (+${currentCfg.zones!.length} bairros)`
+                : ''}{' '}
+              · Mínimo: <b>{money(currentCfg.min_order_value)}</b> · Prazo:{' '}
+              <b>{currentCfg.eta_minutes}</b>
+              {(currentCfg.free_delivery_above || 0) > 0 && (
+                <>
+                  {' '}
+                  · Frete grátis acima de <b>{money(currentCfg.free_delivery_above || 0)}</b>
+                </>
+              )}
             </div>
           </div>
           <div className="flex gap-1.5 flex-wrap">
+            <button
+              type="button"
+              className={`b sm ${currentCfg.enabled ? 'dn' : 'ok'}`}
+              disabled={togglingEnabled}
+              onClick={() => void handleQuickToggleEnabled()}
+            >
+              {togglingEnabled
+                ? '...'
+                : currentCfg.enabled
+                  ? '⏸ Pausar Delivery'
+                  : '▶ Ligar Delivery'}
+            </button>
             <button type="button" className="b sm" onClick={() => void copyDeliveryLink()}>
-              🔗 Copiar Link Delivery
+              🔗 Copiar Link
             </button>
             <a
               href={directLink}
@@ -372,8 +487,34 @@ export const DeliveryProView: React.FC<DeliveryProViewProps> = ({
               rel="noopener noreferrer"
               className="b g sm no-underline"
             >
-              👁️ Abrir App Delivery
+              👁️ Abrir App
             </a>
+          </div>
+        </div>
+
+        {/* KPIs do Delivery Hoje */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2 border-t border-[var(--bd)]">
+          <div className="rounded-xl p-2 bg-[var(--bg2)] border border-[var(--bd)]">
+            <div className="text-[10px] uppercase tracking-wider text-[var(--mut)]">Em andamento</div>
+            <div className="text-lg font-extrabold tabular-nums text-[var(--ac)]">
+              {activeGroups.length}
+            </div>
+          </div>
+          <div className="rounded-xl p-2 bg-[var(--bg2)] border border-[var(--bd)]">
+            <div className="text-[10px] uppercase tracking-wider text-[var(--mut)]">Entregues hoje</div>
+            <div className="text-lg font-extrabold tabular-nums text-[var(--ok)]">
+              {todayStats.deliveredToday}
+            </div>
+          </div>
+          <div className="rounded-xl p-2 bg-[var(--bg2)] border border-[var(--bd)]">
+            <div className="text-[10px] uppercase tracking-wider text-[var(--mut)]">Vendas hoje</div>
+            <div className="text-lg font-extrabold tabular-nums text-[var(--ok)]">
+              {money(todayStats.revenue)}
+            </div>
+          </div>
+          <div className="rounded-xl p-2 bg-[var(--bg2)] border border-[var(--bd)]">
+            <div className="text-[10px] uppercase tracking-wider text-[var(--mut)]">Taxas hoje</div>
+            <div className="text-lg font-extrabold tabular-nums">{money(todayStats.fees)}</div>
           </div>
         </div>
       </div>
@@ -843,7 +984,34 @@ export const DeliveryProView: React.FC<DeliveryProViewProps> = ({
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             <div>
-              <label>Bairros atendidos / Aviso de entrega</label>
+              <label>Frete Grátis acima de (R$) — 0 desativa</label>
+              <input
+                type="number"
+                step="5"
+                min={0}
+                value={cfg.free_delivery_above || 0}
+                onChange={(e) =>
+                  setCfg((prev) => ({
+                    ...prev,
+                    free_delivery_above: Math.max(0, Number(e.target.value) || 0),
+                  }))
+                }
+                placeholder="Ex: 100"
+              />
+            </div>
+            <div>
+              <label>Horário de atendimento do Delivery</label>
+              <input
+                value={cfg.schedule_text || ''}
+                onChange={(e) => setCfg((prev) => ({ ...prev, schedule_text: e.target.value }))}
+                placeholder="Ex: Ter a Dom · 18h às 23h30"
+              />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <div>
+              <label>Aviso geral / Raio de entrega</label>
               <input
                 value={cfg.areas_note || ''}
                 onChange={(e) => setCfg((prev) => ({ ...prev, areas_note: e.target.value }))}
@@ -858,6 +1026,71 @@ export const DeliveryProView: React.FC<DeliveryProViewProps> = ({
                 placeholder="Ex: 11999998888"
               />
             </div>
+          </div>
+
+          {/* Taxas diferenciadas por Bairro / Região */}
+          <div className="rounded-xl p-3 bg-[var(--bg2)] border border-[var(--bd)] space-y-2">
+            <div>
+              <div className="text-xs font-bold text-[var(--ac)]">
+                🗺️ Taxas por Bairro / Região (opcional)
+              </div>
+              <p className="mu text-[11px] !mt-0.5 !mb-0">
+                Se cadastrar bairros aqui, o cliente escolhe a região no checkout e a taxa + prazo
+                são calculados automaticamente. Se deixar vazio, vale a taxa fixa acima.
+              </p>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
+              <div className="sm:col-span-2">
+                <input
+                  value={newZoneName}
+                  onChange={(e) => setNewZoneName(e.target.value)}
+                  placeholder="Bairro ou região (Ex: Centro)"
+                  maxLength={45}
+                />
+              </div>
+              <div>
+                <input
+                  type="number"
+                  step="0.5"
+                  min={0}
+                  value={newZoneFee}
+                  onChange={(e) => setNewZoneFee(e.target.value)}
+                  placeholder="Taxa R$"
+                />
+              </div>
+              <div className="flex gap-1.5">
+                <input
+                  value={newZoneEta}
+                  onChange={(e) => setNewZoneEta(e.target.value)}
+                  placeholder="Prazo (30 min)"
+                />
+                <button type="button" className="b sm shrink-0" onClick={handleAddZone}>
+                  + Add
+                </button>
+              </div>
+            </div>
+            {(cfg.zones || []).length > 0 && (
+              <div className="space-y-1.5 pt-1">
+                {(cfg.zones || []).map((z) => (
+                  <div
+                    key={z.id}
+                    className="flex items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 bg-black/25 border border-[var(--bd)] text-xs"
+                  >
+                    <div>
+                      <b>{z.name}</b> · <span className="text-[var(--ok)] font-bold">{money(z.fee)}</span>
+                      {z.eta && <span className="text-[var(--mut)]"> · {z.eta}</span>}
+                    </div>
+                    <button
+                      type="button"
+                      className="b dn sm !py-0.5 !px-2"
+                      onClick={() => handleRemoveZone(z.id)}
+                    >
+                      Remover
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           <div>
@@ -880,23 +1113,42 @@ export const DeliveryProView: React.FC<DeliveryProViewProps> = ({
             </div>
           </div>
 
-          <div className="rounded-xl p-3 bg-[var(--bg2)] border border-[var(--bd)] space-y-1.5">
+          {/* Link + QR Code exclusivo do App de Delivery */}
+          <div className="rounded-xl p-3 bg-[var(--bg2)] border border-[var(--bd)] space-y-2.5">
             <div className="text-xs font-bold text-[var(--ac)]">
-              🔗 Link Externo do seu App de Delivery (coloque na Bio do Instagram e WhatsApp)
+              🔗 Link & QR Code do seu App de Delivery (Instagram, WhatsApp, Panfletos e Embalagens)
             </div>
-            <input readOnly value={directLink} className="text-xs font-mono" />
-            <div className="flex gap-1.5 flex-wrap">
-              <button type="button" className="b sm" onClick={() => void copyDeliveryLink()}>
-                📋 Copiar link
-              </button>
-              <a
-                href={directLink}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="b g sm no-underline"
-              >
-                👁️ Testar como cliente
-              </a>
+            <div className="flex flex-col sm:flex-row items-center gap-3">
+              <div className="bg-white p-2 rounded-xl shrink-0">
+                <img
+                  src={deliveryQrUrl}
+                  alt="QR Code Delivery"
+                  className="w-28 h-28 object-contain block"
+                />
+              </div>
+              <div className="flex-1 w-full space-y-2">
+                <input readOnly value={directLink} className="text-xs font-mono" />
+                <div className="flex gap-1.5 flex-wrap">
+                  <button type="button" className="b sm" onClick={() => void copyDeliveryLink()}>
+                    📋 Copiar link
+                  </button>
+                  <button
+                    type="button"
+                    className="b ok sm"
+                    onClick={handleDownloadDeliveryQr}
+                  >
+                    📥 Baixar QR Delivery (PNG)
+                  </button>
+                  <a
+                    href={directLink}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="b g sm no-underline"
+                  >
+                    👁️ Testar como cliente
+                  </a>
+                </div>
+              </div>
             </div>
           </div>
 

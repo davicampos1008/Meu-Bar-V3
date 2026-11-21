@@ -6,6 +6,7 @@ import { PWAInstallButton } from './PWAControls';
 import { BrandMark, ImageUploader, LocationPicker } from './SharedUI';
 
 import { broadcastNewUserSignup } from '../lib/saas';
+import { checkActionCooldown, evaluatePasswordStrength } from '../lib/security';
 import { AdSlot } from './AdSlot';
 import type { PartnerAdBanner, PlatformSaaSConfig } from '../types/meubar';
 
@@ -13,12 +14,15 @@ export const LoginScreen: React.FC<{
   saasConfig?: PlatformSaaSConfig;
   partnerAds?: PartnerAdBanner[];
   onOpenLegal?: (tab: 'terms' | 'privacy') => void;
-}> = ({ saasConfig, partnerAds = [], onOpenLegal }) => {
+  onOpenSalesSite?: () => void;
+}> = ({ saasConfig, partnerAds = [], onOpenLegal, onOpenSalesSite }) => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [msg, setMsg] = useState('');
   const [isOk, setIsOk] = useState(false);
   const [busy, setBusy] = useState(false);
+
+  const pwStrength = evaluatePasswordStrength(password);
 
   const formatAuthError = (raw: string) => {
     const low = raw.toLowerCase();
@@ -42,13 +46,23 @@ export const LoginScreen: React.FC<{
       setMsg('Preencha e-mail e senha.');
       return;
     }
-    if (password.length < 6) {
-      setMsg('A senha deve ter pelo menos 6 caracteres.');
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(em)) {
+      setMsg('Digite um e-mail válido.');
       return;
     }
 
-    setBusy(true);
+    const cooldown = checkActionCooldown(`auth_${mode}`, mode === 'up' ? 3000 : 1200);
+    if (!cooldown.ok) {
+      setMsg(`Aguarde ${Math.ceil(cooldown.waitMs / 1000)}s antes de tentar novamente.`);
+      return;
+    }
+
     if (mode === 'in') {
+      if (password.length < 6) {
+        setMsg('A senha deve ter pelo menos 6 caracteres.');
+        return;
+      }
+      setBusy(true);
       const r = await sb.auth.signInWithPassword({ email: em, password });
       setBusy(false);
       if (r.error) {
@@ -57,6 +71,13 @@ export const LoginScreen: React.FC<{
       return;
     }
 
+    // Cadastro exige senha forte (mínimo 8 caracteres com letras e números)
+    if (!pwStrength.ok) {
+      setMsg(pwStrength.hint);
+      return;
+    }
+
+    setBusy(true);
     const r = await sb.auth.signUp({ email: em, password });
     if (r.error) {
       setBusy(false);
@@ -89,7 +110,7 @@ export const LoginScreen: React.FC<{
         <BrandMark big />
       </div>
       <p className="mu text-center">
-        Gestão completa de bar, receitas, estoque, cardápio QR e equipe.
+        Gestão completa de bar, receitas, estoque, cardápio QR, delivery 0% e equipe.
         {trialDays > 0 ? ` Comece grátis com ${trialDays} dias Pro liberados.` : ' Comece grátis.'}
       </p>
       <div className="panel">
@@ -105,13 +126,41 @@ export const LoginScreen: React.FC<{
         <input
           type="password"
           autoComplete="current-password"
-          placeholder="Mínimo 6 caracteres"
+          placeholder="Mínimo 8 caracteres (letras e números)"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'Enter') void handleAuth('in');
           }}
         />
+        {password.length > 0 && (
+          <div className="mt-2 flex items-center justify-between gap-2 text-[0.75rem]">
+            <div className="flex items-center gap-1.5 flex-1">
+              {[1, 2, 3, 4].map((lvl) => (
+                <span
+                  key={lvl}
+                  className="h-1.5 flex-1 rounded-full transition-colors"
+                  style={{
+                    background:
+                      pwStrength.score >= lvl
+                        ? pwStrength.score >= 3
+                          ? 'var(--ok)'
+                          : 'var(--ac)'
+                        : 'var(--bd)',
+                  }}
+                />
+              ))}
+            </div>
+            <span
+              className="font-semibold"
+              style={{
+                color: pwStrength.ok ? 'var(--ok)' : 'var(--mut)',
+              }}
+            >
+              {pwStrength.label}
+            </span>
+          </div>
+        )}
         <div className="row mt-4">
           <button
             type="button"
@@ -132,6 +181,18 @@ export const LoginScreen: React.FC<{
         </div>
         {msg && <p className={isOk ? 'ok-txt' : 'err'}>{msg}</p>}
       </div>
+
+      {onOpenSalesSite && (
+        <div className="mt-3">
+          <button
+            type="button"
+            className="b g full"
+            onClick={onOpenSalesSite}
+          >
+            🌐 Conhecer tudo que o Meu Bar faz (Site Oficial)
+          </button>
+        </div>
+      )}
 
       <div className="mt-3">
         <PWAInstallButton variant="card" />

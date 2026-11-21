@@ -7,7 +7,9 @@ import {
   flushOfflineOrders,
   getBarOpsData,
   getEffectiveItemPrice,
+  getEffectiveTableOwner,
   getOfflineQueuedOrders,
+  getWaiterConfig,
   isDeliveryOrder,
   logBarAudit,
   parseDeliveryOrderMeta,
@@ -15,6 +17,7 @@ import {
   printKitchenOrBarTicket,
   saveBarOpsData,
   tableOwnerKey,
+  WAITER_MODE_META,
 } from '../lib/opsUtils';
 import { broadcastMenuUpdate, sb } from '../lib/supabase';
 import {
@@ -745,15 +748,27 @@ export const WaiterStationView: React.FC<WaiterStationViewProps> = ({
   const [handoffTargetName, setHandoffTargetName] = useState('');
 
   const ops = useMemo(() => getBarOpsData(bar), [bar]);
+  const waiterCfg = useMemo(() => getWaiterConfig(bar), [bar]);
   const tableWaiters = ops.table_waiters || {};
   const orderClaims = ops.order_claims || {};
   const callClaims = ops.call_claims || {};
   const myNorm = norm(actorName);
 
+  useEffect(() => {
+    if (waiterCfg.mode === 'fixed') {
+      setWaiterScope('mine');
+    } else if (waiterCfg.mode === 'open_queue') {
+      setWaiterScope('all');
+    }
+  }, [waiterCfg.mode]);
+
+  const myZones = useMemo(
+    () => (waiterCfg.zones || []).filter((z) => norm(z.waiter_name) === myNorm),
+    [waiterCfg.zones, myNorm]
+  );
+
   const getTableOwner = (tableLabel?: string | null): string => {
-    const k = tableOwnerKey(tableLabel);
-    if (!k) return '';
-    return tableWaiters[k]?.waiter_name || '';
+    return getEffectiveTableOwner(bar, tableLabel).waiterName;
   };
 
   const staffSuggestions = useMemo(() => {
@@ -952,13 +967,38 @@ export const WaiterStationView: React.FC<WaiterStationViewProps> = ({
     return openTabs;
   }, [openTabs, waiterScope, tableWaiters, myNorm]);
 
+  const myShiftSummary = useMemo(() => {
+    let sales = 0;
+    orders.forEach((o) => {
+      if (isDeliveryOrder(o)) return;
+      const owner = getTableOwner(o.table_label);
+      if (norm(owner) !== myNorm) return;
+      const unit = Number(o.unit_price ?? o.price ?? prices[o.recipe_id] ?? 0);
+      sales += unit * (Number(o.qty) || 1);
+    });
+    const commPct = Math.max(0, Number(waiterCfg.waiter_commission_pct ?? 10));
+    return {
+      sales: Math.round(sales * 100) / 100,
+      commPct,
+      commission: Math.round(sales * (commPct / 100) * 100) / 100,
+    };
+  }, [orders, prices, myNorm, tableWaiters, waiterCfg]);
+
   const readyToDeliver = useMemo(() => {
-    if (waiterScope === 'mine') {
-      return readySalonOrders.filter((o) => {
-        const owner = getTableOwner(o.table_label);
-        const claim = orderClaims[o.id]?.waiter_name || '';
-        return norm(owner) === myNorm || norm(claim) === myNorm;
+    const sortOwnFirst = (arr: Order[]) =>
+      [...arr].sort((a, b) => {
+        const aMine = norm(getTableOwner(a.table_label)) === myNorm ? 1 : 0;
+        const bMine = norm(getTableOwner(b.table_label)) === myNorm ? 1 : 0;
+        return bMine - aMine;
       });
+    if (waiterScope === 'mine') {
+      return sortOwnFirst(
+        readySalonOrders.filter((o) => {
+          const owner = getTableOwner(o.table_label);
+          const claim = orderClaims[o.id]?.waiter_name || '';
+          return norm(owner) === myNorm || norm(claim) === myNorm;
+        })
+      );
     }
     if (waiterScope === 'free') {
       return readySalonOrders.filter((o) => {
@@ -967,16 +1007,24 @@ export const WaiterStationView: React.FC<WaiterStationViewProps> = ({
         return !owner && !claim;
       });
     }
-    return readySalonOrders;
-  }, [readySalonOrders, waiterScope, tableWaiters, orderClaims, myNorm]);
+    return sortOwnFirst(readySalonOrders);
+  }, [readySalonOrders, waiterScope, tableWaiters, orderClaims, myNorm, waiterCfg]);
 
   const visibleCalls = useMemo(() => {
-    if (waiterScope === 'mine') {
-      return tableCalls.filter((c) => {
-        const owner = getTableOwner(c.table_label);
-        const claim = callClaims[c.id]?.waiter_name || '';
-        return norm(owner) === myNorm || norm(claim) === myNorm;
+    const sortOwnFirst = (arr: TableCallAlert[]) =>
+      [...arr].sort((a, b) => {
+        const aMine = norm(getTableOwner(a.table_label)) === myNorm ? 1 : 0;
+        const bMine = norm(getTableOwner(b.table_label)) === myNorm ? 1 : 0;
+        return bMine - aMine;
       });
+    if (waiterScope === 'mine') {
+      return sortOwnFirst(
+        tableCalls.filter((c) => {
+          const owner = getTableOwner(c.table_label);
+          const claim = callClaims[c.id]?.waiter_name || '';
+          return norm(owner) === myNorm || norm(claim) === myNorm;
+        })
+      );
     }
     if (waiterScope === 'free') {
       return tableCalls.filter((c) => {
@@ -985,8 +1033,8 @@ export const WaiterStationView: React.FC<WaiterStationViewProps> = ({
         return !owner && !claim;
       });
     }
-    return tableCalls;
-  }, [tableCalls, waiterScope, tableWaiters, callClaims, myNorm]);
+    return sortOwnFirst(tableCalls);
+  }, [tableCalls, waiterScope, tableWaiters, callClaims, myNorm, waiterCfg]);
 
   const availableCatalog = useMemo(() => {
     return filterRecipesForBar(recipes, bar.id)
@@ -1082,8 +1130,13 @@ export const WaiterStationView: React.FC<WaiterStationViewProps> = ({
         return;
       }
 
-      // Modelo Híbrido Multi-Garçom: se a mesa ainda não tem responsável, assume automaticamente
-      if (selectedTableLabel && !getTableOwner(selectedTableLabel)) {
+      // Auto-atribuição de mesa no 1º pedido (respeitando waiter_config)
+      if (
+        waiterCfg.mode !== 'open_queue' &&
+        waiterCfg.auto_assign_on_first_order !== false &&
+        selectedTableLabel &&
+        !getTableOwner(selectedTableLabel)
+      ) {
         const k = tableOwnerKey(selectedTableLabel);
         const nextMap = {
           ...(getBarOpsData(bar).table_waiters || {}),
@@ -1185,8 +1238,17 @@ export const WaiterStationView: React.FC<WaiterStationViewProps> = ({
           <div>
             <h3 className="!mb-0.5">🍽️ Central do Garçom — {bar.name}</h3>
             <p className="sub !mb-0">
-              Operando como <b className="text-[var(--txt)]">{actorName}</b> · Modelo Híbrido
-              (Responsável da Mesa + Pegar 1º na fila livre).
+              Operando como <b className="text-[var(--txt)]">{actorName}</b> · Modo{' '}
+              <b className="text-[var(--ac)]">{WAITER_MODE_META[waiterCfg.mode].shortLabel}</b>
+              {myZones.length > 0 && (
+                <>
+                  {' '}
+                  · 📍 Sua praça:{' '}
+                  <b className="text-[var(--ok)]">
+                    {myZones.map((z) => `${z.name} (${z.tables.length})`).join(', ')}
+                  </b>
+                </>
+              )}
             </p>
           </div>
           <div className="flex gap-1.5">
@@ -1200,6 +1262,28 @@ export const WaiterStationView: React.FC<WaiterStationViewProps> = ({
             <button type="button" className="b g sm" onClick={() => void onRefreshAll()}>
               ↻
             </button>
+          </div>
+        </div>
+
+        {/* Resumo pessoal do turno do garçom */}
+        <div className="grid grid-cols-3 gap-2 mt-2.5">
+          <div className="rounded-xl p-2 bg-[var(--bg2)] border border-[var(--bd)]">
+            <div className="text-[10px] uppercase tracking-wider text-[var(--mut)]">Suas mesas</div>
+            <div className="text-base font-extrabold tabular-nums text-[var(--ac)]">{myTabsCount}</div>
+          </div>
+          <div className="rounded-xl p-2 bg-[var(--bg2)] border border-[var(--bd)]">
+            <div className="text-[10px] uppercase tracking-wider text-[var(--mut)]">Vendas (suas mesas)</div>
+            <div className="text-base font-extrabold tabular-nums text-[var(--ok)]">
+              {money(myShiftSummary.sales)}
+            </div>
+          </div>
+          <div className="rounded-xl p-2 bg-[var(--bg2)] border border-[var(--bd)]">
+            <div className="text-[10px] uppercase tracking-wider text-[var(--mut)]">
+              Comissão ({myShiftSummary.commPct}%)
+            </div>
+            <div className="text-base font-extrabold tabular-nums">
+              {money(myShiftSummary.commission)}
+            </div>
           </div>
         </div>
 
@@ -1290,7 +1374,7 @@ export const WaiterStationView: React.FC<WaiterStationViewProps> = ({
                             : 'bg-white/10 text-white/80'
                         }`}
                       >
-                        👤 Mesa de {owner}
+                        {norm(owner) === myNorm ? '⭐ SUA MESA' : `👤 Mesa de ${owner}`}
                       </span>
                     )}
                   </div>
@@ -1554,7 +1638,7 @@ export const WaiterStationView: React.FC<WaiterStationViewProps> = ({
                               : 'bg-white/10 text-[var(--mut)]'
                           }`}
                         >
-                          👤 Mesa de {owner}
+                          {norm(owner) === myNorm ? '⭐ SUA MESA' : `👤 Mesa de ${owner}`}
                         </span>
                       ) : (
                         o.table_label && (

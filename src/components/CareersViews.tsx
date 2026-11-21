@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { JOB_ROLES, ROLE_LABELS, SKILL_OPTIONS } from '../lib/catalog';
+import { safeExternalUrl } from '../lib/security';
 import { sb, uploadPdfFile } from '../lib/supabase';
 import {
   externalMapUrl,
@@ -1042,19 +1043,23 @@ export const ReceivedAppsSection: React.FC<{ receivedApps: JobApplication[] }> =
                             <span className="tag">Funções: {sp.skills.join(', ')}</span>
                           </>
                         )}
-                        {sp.resume_pdf_url && (
-                          <>
-                            <br />
-                            <a
-                              href={sp.resume_pdf_url}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="text-[var(--ac)] text-[0.82rem]"
-                            >
-                              📄 Ver currículo em PDF
-                            </a>
-                          </>
-                        )}
+                        {(() => {
+                          const safePdf = safeExternalUrl(sp.resume_pdf_url);
+                          if (!safePdf) return null;
+                          return (
+                            <>
+                              <br />
+                              <a
+                                href={safePdf}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-[var(--ac)] text-[0.82rem]"
+                              >
+                                📄 Ver currículo em PDF
+                              </a>
+                            </>
+                          );
+                        })()}
                         {sp.bio && <p className="mu mt-1.5">{sp.bio}</p>}
                       </div>
                     </div>
