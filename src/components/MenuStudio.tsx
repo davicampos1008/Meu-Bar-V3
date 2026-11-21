@@ -18,18 +18,27 @@ import {
   PRICE_STYLES,
   SECTION_STYLES,
   SIDE_DETAILS,
+  STORE_AMENITIES,
+  STORE_PROFILE_TEMPLATES,
   TOP_ORNAMENTS,
 } from '../lib/catalog';
 import { broadcastMenuUpdate, writeBarSafe } from '../lib/supabase';
 import {
   applyBarTheme,
-  externalMapUrl,
+  buildUnifiedStudioPresets,
+  filterRecipesForBar,
   getActivePromotion,
+  getActiveQrDesign,
+  getActiveStoreProfileId,
   getBarMenuDesign,
   getBarPromotions,
   getMenuPresets,
+  getQrDesigns,
+  getStoreProfileConfig,
+  getStoreProfiles,
   getUnpricedAvailableDrinks,
   makeDrink,
+  menuUrl,
   slugHandle,
 } from '../lib/utils';
 import type {
@@ -39,7 +48,10 @@ import type {
   MenuDesignConfig,
   MenuPreset,
   MenuPromotion,
+  QrDesignConfig,
   Recipe,
+  StoreProfileConfig,
+  StoreProfilePreset,
   UserCoords,
 } from '../types/meubar';
 import {
@@ -52,9 +64,11 @@ import {
   normalizeBlockOrder,
   SideDetailWrapper,
 } from './MenuVisualRenderer';
+import { QrDesignerPanel, QrPosterPreview } from './QrDesigner';
 import { ImageUploader, LocationPicker } from './SharedUI';
+import { StoreProfileRenderer } from './StoreProfileRenderer';
 
-type StudioTab = 'store' | 'menu' | 'promos';
+export type StudioTab = 'store' | 'menu' | 'promos' | 'qr';
 
 const DEFAULT_PROMO_COLORS = ['#e5a93c', '#34d399', '#f43f5e', '#a855f7', '#38bdf8'];
 
@@ -92,7 +106,7 @@ export const StoreStudioView: React.FC<{
     if (initialTab) setStudioTab(initialTab);
   }, [initialTab]);
 
-  // --- Aba 1: Visual da Loja (no app + identidade base) ---
+  // --- Aba 1: Perfil & Visual da Loja (completo + múltiplos perfis) ---
   const [name, setName] = useState(bar.name || '');
   const [handle, setHandle] = useState(bar.handle || '');
   const [slogan, setSlogan] = useState(bar.slogan || '');
@@ -101,6 +115,24 @@ export const StoreStudioView: React.FC<{
   const [city, setCity] = useState(bar.city || '');
   const [lat, setLat] = useState(bar.lat != null ? String(bar.lat) : '');
   const [lon, setLon] = useState(bar.lon != null ? String(bar.lon) : '');
+  const [storeProfileCfg, setStoreProfileCfg] = useState<StoreProfileConfig>(() =>
+    getStoreProfileConfig(bar)
+  );
+  const [storeProfiles, setStoreProfiles] = useState<StoreProfilePreset[]>(() =>
+    getStoreProfiles(bar)
+  );
+  const [activeStoreProfileId, setActiveStoreProfileId] = useState<string>(() =>
+    getActiveStoreProfileId(bar)
+  );
+  const [newProfileName, setNewProfileName] = useState('');
+
+  // --- Aba 4: Arte do QR Code ---
+  const [qrDesigns, setQrDesigns] = useState<QrDesignConfig[]>(() => getQrDesigns(bar));
+  const [qrDesign, setQrDesign] = useState<QrDesignConfig>(() => getActiveQrDesign(bar));
+  const [activeQrDesignId, setActiveQrDesignId] = useState<string>(
+    () => bar.active_qr_design || getActiveQrDesign(bar).id
+  );
+  const [previewQrTable, setPreviewQrTable] = useState('Mesa 1');
 
   // --- Aba 2: Edição do Cardápio (RPG modular) ---
   const [mode, setMode] = useState(bar.menu_display_mode || 'grid-classic');
@@ -180,6 +212,13 @@ export const StoreStudioView: React.FC<{
     setSelectedPreset(bar.active_menu_preset || '');
     setPromotions(getBarPromotions(bar));
     setActivePromoId(getActivePromotion(bar)?.id || null);
+    setStoreProfileCfg(getStoreProfileConfig(bar));
+    setStoreProfiles(getStoreProfiles(bar));
+    setActiveStoreProfileId(getActiveStoreProfileId(bar));
+    setQrDesigns(getQrDesigns(bar));
+    const activeQr = getActiveQrDesign(bar);
+    setQrDesign(activeQr);
+    setActiveQrDesignId(bar.active_qr_design || activeQr.id);
   }, [bar.id]);
 
   const presets = useMemo(() => getMenuPresets(bar), [bar]);
@@ -194,9 +233,10 @@ export const StoreStudioView: React.FC<{
   );
 
   // Drinks reais disponíveis para o cliente (no estoque + com preço quando bar é pago)
+  const scopedRecipes = useMemo(() => filterRecipesForBar(recipes, bar.id), [recipes, bar.id]);
   const makeableDrinks = useMemo(
-    () => recipes.filter((r) => makeDrink(r, items)),
-    [recipes, items]
+    () => scopedRecipes.filter((r) => makeDrink(r, items)),
+    [scopedRecipes, items]
   );
 
   const realClientDrinks = useMemo(
@@ -273,30 +313,62 @@ export const StoreStudioView: React.FC<{
     userPresets: MenuPreset[],
     nextDesign: MenuDesignConfig,
     nextPromos: MenuPromotion[],
-    nextActivePromoId: string | null
-  ) => [
-    ...userPresets.filter((x) => x.id !== '__studio_meta__'),
-    {
-      id: '__studio_meta__',
-      preset_name: '__studio_meta__',
+    nextActivePromoId: string | null,
+    extra?: {
+      store_profile_data?: StoreProfileConfig;
+      store_profiles?: StoreProfilePreset[];
+      active_store_profile?: string | null;
+      qr_designs?: QrDesignConfig[];
+      active_qr_design?: string | null;
+    }
+  ) =>
+    buildUnifiedStudioPresets(bar, {
+      userPresets,
       menu_design: nextDesign,
       promotions: nextPromos,
       active_promotion_id: nextActivePromoId,
-    },
-  ];
+      store_profile_data: extra?.store_profile_data ?? storeProfileCfg,
+      store_profiles: extra?.store_profiles ?? storeProfiles,
+      active_store_profile:
+        extra?.active_store_profile !== undefined
+          ? extra.active_store_profile
+          : activeStoreProfileId || null,
+      qr_designs: extra?.qr_designs ?? qrDesigns,
+      active_qr_design:
+        extra?.active_qr_design !== undefined ? extra.active_qr_design : activeQrDesignId || null,
+    });
 
   const persistStudioUpdate = async (
     patch: Record<string, unknown>,
     successMsg: string
   ) => {
     setSaving(true);
+    const nextStoreCfg = (patch.store_profile_data as StoreProfileConfig) || storeProfileCfg;
+    const nextStoreProfiles = (patch.store_profiles as StoreProfilePreset[]) || storeProfiles;
+    const nextActiveStoreProfile =
+      patch.active_store_profile !== undefined
+        ? (patch.active_store_profile as string | null)
+        : activeStoreProfileId || null;
+    const nextQrDesigns = (patch.qr_designs as QrDesignConfig[]) || qrDesigns;
+    const nextActiveQrDesign =
+      patch.active_qr_design !== undefined
+        ? (patch.active_qr_design as string | null)
+        : activeQrDesignId || null;
+
     const mergedPresets = buildStudioMetaArray(
       presets,
       (patch.menu_design as MenuDesignConfig) || design,
       (patch.menu_promotions as MenuPromotion[]) || promotions,
       patch.active_promotion_id !== undefined
         ? (patch.active_promotion_id as string | null)
-        : activePromoId
+        : activePromoId,
+      {
+        store_profile_data: nextStoreCfg,
+        store_profiles: nextStoreProfiles,
+        active_store_profile: nextActiveStoreProfile,
+        qr_designs: nextQrDesigns,
+        active_qr_design: nextActiveQrDesign,
+      }
     );
     const fullPatch: Record<string, unknown> = {
       ...patch,
@@ -312,12 +384,18 @@ export const StoreStudioView: React.FC<{
     if (r.data) {
       const normalized: Bar = {
         ...r.data,
+        menu_presets: (fullPatch.menu_presets as MenuPreset[]) || r.data.menu_presets,
         menu_design: (patch.menu_design as MenuDesignConfig) || design,
         menu_promotions: (patch.menu_promotions as MenuPromotion[]) || promotions,
         active_promotion_id:
           patch.active_promotion_id !== undefined
             ? (patch.active_promotion_id as string | null)
             : activePromoId,
+        store_profile_data: nextStoreCfg,
+        store_profiles: nextStoreProfiles,
+        active_store_profile: nextActiveStoreProfile,
+        qr_designs: nextQrDesigns,
+        active_qr_design: nextActiveQrDesign,
       };
       applyBarTheme(normalized);
       onBarUpdated(normalized);
@@ -350,30 +428,179 @@ export const StoreStudioView: React.FC<{
     active_promotion_id: activePromoId,
   });
 
+  const buildStoreProfilePatch = () => {
+    const cleanHandle = handle.trim().replace(/^@/, '');
+    return {
+      name: name.trim() || bar.name,
+      handle: cleanHandle ? slugHandle(cleanHandle) : null,
+      slogan: slogan.trim() || null,
+      city: city.trim() || null,
+      lat: lat ? Number(lat) : null,
+      lon: lon ? Number(lon) : null,
+      logo_url: logoUrl.trim() || null,
+      banner_url: bannerUrl.trim() || null,
+      name_font: font,
+      color_bg: colorBg,
+      color_surface: colorSurface,
+      color_accent: colorAccent,
+      color_ok: colorOk,
+      color_text: colorText,
+      about: storeProfileCfg.about?.trim() || null,
+      phone: storeProfileCfg.phone?.trim() || null,
+      instagram: storeProfileCfg.instagram?.trim() || null,
+      opening_hours: storeProfileCfg.opening_hours?.trim() || null,
+      store_profile_data: storeProfileCfg,
+    };
+  };
+
   const handleSaveStoreVisual = async () => {
     const cleanHandle = handle.trim().replace(/^@/, '');
     if (cleanHandle && !/^[a-z0-9_]{3,32}$/i.test(cleanHandle)) {
       onToast('@ precisa ter 3–32 letras, números ou _.');
       return;
     }
+    await persistStudioUpdate(buildStoreProfilePatch(), 'Perfil e visual da loja salvos!');
+  };
+
+  const handleSaveNewStoreProfile = async () => {
+    const pName = newProfileName.trim() || `Perfil ${storeProfiles.length + 1}`;
+    const id = 'sp_' + Math.random().toString(36).slice(2, 9);
+    const preset: StoreProfilePreset = {
+      id,
+      profile_name: pName,
+      saved_at: new Date().toISOString(),
+      name: name.trim() || bar.name,
+      slogan: slogan.trim() || null,
+      logo_url: logoUrl.trim() || null,
+      banner_url: bannerUrl.trim() || null,
+      name_font: font,
+      color_bg: colorBg,
+      color_surface: colorSurface,
+      color_accent: colorAccent,
+      color_ok: colorOk,
+      color_text: colorText,
+      profile_config: storeProfileCfg,
+    };
+    const nextList = [...storeProfiles, preset];
+    setStoreProfiles(nextList);
+    setActiveStoreProfileId(id);
+    setNewProfileName('');
     await persistStudioUpdate(
       {
-        name: name.trim() || bar.name,
-        handle: cleanHandle ? slugHandle(cleanHandle) : null,
-        slogan: slogan.trim() || null,
-        city: city.trim() || null,
-        lat: lat ? Number(lat) : null,
-        lon: lon ? Number(lon) : null,
-        logo_url: logoUrl.trim() || null,
-        banner_url: bannerUrl.trim() || null,
-        name_font: font,
-        color_bg: colorBg,
-        color_surface: colorSurface,
-        color_accent: colorAccent,
-        color_ok: colorOk,
-        color_text: colorText,
+        ...buildStoreProfilePatch(),
+        store_profiles: nextList,
+        active_store_profile: id,
       },
-      'Visual da loja salvo!'
+      `Perfil "${pName}" salvo e ativado!`
+    );
+  };
+
+  const handleApplyStoreProfile = async (sp: StoreProfilePreset) => {
+    if (sp.name) setName(sp.name);
+    if (sp.slogan !== undefined) setSlogan(sp.slogan || '');
+    if (sp.logo_url !== undefined) setLogoUrl(sp.logo_url || '');
+    if (sp.banner_url !== undefined) setBannerUrl(sp.banner_url || '');
+    if (sp.name_font) setFont(sp.name_font);
+    if (sp.color_bg) setColorBg(sp.color_bg);
+    if (sp.color_surface) setColorSurface(sp.color_surface);
+    if (sp.color_accent) setColorAccent(sp.color_accent);
+    if (sp.color_ok) setColorOk(sp.color_ok);
+    if (sp.color_text) setColorText(sp.color_text);
+    const nextCfg: StoreProfileConfig = {
+      ...storeProfileCfg,
+      ...(sp.profile_config || {}),
+    };
+    setStoreProfileCfg(nextCfg);
+    setActiveStoreProfileId(sp.id);
+    await persistStudioUpdate(
+      {
+        name: sp.name || name.trim() || bar.name,
+        slogan: sp.slogan ?? (slogan.trim() || null),
+        logo_url: sp.logo_url ?? (logoUrl.trim() || null),
+        banner_url: sp.banner_url ?? (bannerUrl.trim() || null),
+        name_font: sp.name_font || font,
+        color_bg: sp.color_bg || colorBg,
+        color_surface: sp.color_surface || colorSurface,
+        color_accent: sp.color_accent || colorAccent,
+        color_ok: sp.color_ok || colorOk,
+        color_text: sp.color_text || colorText,
+        store_profile_data: nextCfg,
+        active_store_profile: sp.id,
+      },
+      `Perfil "${sp.profile_name}" ativado!`
+    );
+  };
+
+  const handleDeleteStoreProfile = async (id: string) => {
+    const nextList = storeProfiles.filter((x) => x.id !== id);
+    const nextActive = activeStoreProfileId === id ? nextList[0]?.id || '' : activeStoreProfileId;
+    setStoreProfiles(nextList);
+    setActiveStoreProfileId(nextActive);
+    await persistStudioUpdate(
+      {
+        store_profiles: nextList,
+        active_store_profile: nextActive || null,
+      },
+      'Perfil removido!'
+    );
+  };
+
+  const handleSaveNewQrDesign = async (designName: string) => {
+    const id = 'qr_' + Math.random().toString(36).slice(2, 9);
+    const created: QrDesignConfig = {
+      ...qrDesign,
+      id,
+      design_name: designName,
+      saved_at: new Date().toISOString(),
+    };
+    const nextList = [...qrDesigns, created];
+    setQrDesigns(nextList);
+    setQrDesign(created);
+    setActiveQrDesignId(id);
+    await persistStudioUpdate(
+      {
+        qr_designs: nextList,
+        active_qr_design: id,
+      },
+      `Design de QR "${designName}" salvo!`
+    );
+  };
+
+  const handleUpdateCurrentQrDesign = async () => {
+    const exists = qrDesigns.some((d) => d.id === qrDesign.id);
+    const nextId = exists ? qrDesign.id : 'qr_' + Math.random().toString(36).slice(2, 9);
+    const updatedItem: QrDesignConfig = {
+      ...qrDesign,
+      id: nextId,
+      design_name: qrDesign.design_name || 'Design QR Principal',
+      saved_at: new Date().toISOString(),
+    };
+    const nextList = exists
+      ? qrDesigns.map((d) => (d.id === nextId ? updatedItem : d))
+      : [...qrDesigns, updatedItem];
+    setQrDesigns(nextList);
+    setQrDesign(updatedItem);
+    setActiveQrDesignId(nextId);
+    await persistStudioUpdate(
+      {
+        qr_designs: nextList,
+        active_qr_design: nextId,
+      },
+      'Design de QR Code salvo e ativado!'
+    );
+  };
+
+  const handleDeleteQrDesign = async (id: string) => {
+    const nextList = qrDesigns.filter((d) => d.id !== id);
+    const nextActive = activeQrDesignId === id ? nextList[0]?.id || '' : activeQrDesignId;
+    setQrDesigns(nextList);
+    setActiveQrDesignId(nextActive);
+    await persistStudioUpdate(
+      {
+        qr_designs: nextList,
+        active_qr_design: nextActive || null,
+      },
+      'Design de QR removido!'
     );
   };
 
@@ -661,6 +888,28 @@ export const StoreStudioView: React.FC<{
         return (
           <div className="my-2">
             <div
+              className="grid grid-cols-3 gap-1 p-1 rounded-xl border mb-2"
+              style={{ background: `${colorSurface}dd`, borderColor: `${colorAccent}44` }}
+            >
+              {[
+                { label: '🍸 Drinks', active: true },
+                { label: '🍟 Petiscos', active: false },
+                { label: '🍺 Avulsos', active: false },
+              ].map((t) => (
+                <span
+                  key={t.label}
+                  className="text-[10px] font-bold py-1.5 rounded-lg text-center"
+                  style={
+                    t.active
+                      ? { background: colorAccent, color: '#141115' }
+                      : { color: colorText, opacity: 0.72 }
+                  }
+                >
+                  {t.label}
+                </span>
+              ))}
+            </div>
+            <div
               className="rounded-xl px-3 py-2 text-xs opacity-70 border"
               style={{ background: colorSurface, borderColor: `${colorAccent}33` }}
             >
@@ -821,7 +1070,7 @@ export const StoreStudioView: React.FC<{
           className={`chip ${studioTab === 'store' ? 'on' : ''}`}
           onClick={() => setStudioTab('store')}
         >
-          🏪 Visual da loja
+          🏪 Perfil da loja
         </button>
         <button
           type="button"
@@ -837,6 +1086,13 @@ export const StoreStudioView: React.FC<{
         >
           🏷️ Promoções ({promotions.length})
         </button>
+        <button
+          type="button"
+          className={`chip ${studioTab === 'qr' ? 'on' : ''}`}
+          onClick={() => setStudioTab('qr')}
+        >
+          📱 Arte do QR Code ({qrDesigns.length})
+        </button>
       </div>
 
       {/* Layout responsivo: controles à esquerda, prévia fixa à direita no desktop quando visível */}
@@ -849,39 +1105,217 @@ export const StoreStudioView: React.FC<{
       >
         {/* Coluna de Controles */}
         <div className="min-w-0">
-          {/* ================= ABA 1: VISUAL DA LOJA (NO APP) ================= */}
+          {/* ================= ABA 1: PERFIL COMPLETO & VISUAL DA LOJA ================= */}
           {studioTab === 'store' && (
-            <div>
+            <div className="space-y-4">
+              {/* Temas prontos do Perfil da Loja */}
               <div className="panel">
-                <h2>Identidade da Loja no App</h2>
+                <h2>✨ Temas prontos para o Perfil da Loja</h2>
                 <p className="mu">
-                  Defina como o estabelecimento aparece no topo do aplicativo, nas vagas e no cardápio.
+                  Este perfil personalizado aparece para funcionários na aba <b>Bares próximos</b> e
+                  nas vagas. Crie e alterne entre vários perfis!
                 </p>
-
-                <label>Nome da loja</label>
-                <input value={name} onChange={(e) => setName(e.target.value)} />
-
-                <label>Fonte do nome da loja ({NAME_FONTS.length} opções)</label>
-                <select value={font} onChange={(e) => setFont(e.target.value)}>
-                  {NAME_FONTS.map((f) => (
-                    <option key={f.id} value={f.id}>
-                      {f.label}
-                    </option>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mt-2">
+                  {STORE_PROFILE_TEMPLATES.map((tpl) => (
+                    <button
+                      key={tpl.id}
+                      type="button"
+                      className="rounded-xl p-2.5 text-left border cursor-pointer"
+                      style={{
+                        background: tpl.color_bg,
+                        borderColor: `${tpl.color_accent}66`,
+                        color: tpl.color_text,
+                      }}
+                      onClick={() => {
+                        setFont(tpl.name_font);
+                        setColorBg(tpl.color_bg);
+                        setColorSurface(tpl.color_surface);
+                        setColorAccent(tpl.color_accent);
+                        setColorOk(tpl.color_ok);
+                        setColorText(tpl.color_text);
+                        setStoreProfileCfg((prev) => ({ ...prev, ...tpl.profile_config }));
+                        onToast(`Tema de perfil "${tpl.label}" aplicado!`);
+                      }}
+                    >
+                      <div className="text-xs font-bold" style={{ color: tpl.color_accent }}>
+                        {tpl.label}
+                      </div>
+                      <div className="text-[10px] opacity-75 mt-0.5 truncate">
+                        {tpl.profile_config.badge_text}
+                      </div>
+                    </button>
                   ))}
-                </select>
+                </div>
+              </div>
 
-                <label>@ único da loja (handle)</label>
-                <input
-                  value={handle}
-                  onChange={(e) => setHandle(e.target.value)}
-                  placeholder="ex: meu_bar_brasilia"
+              {/* Múltiplos Perfis Salvos */}
+              <div className="panel">
+                <h2>🗂️ Meus perfis salvos da loja ({storeProfiles.length})</h2>
+                <p className="mu">
+                  Salve versões diferentes (ex: Perfil Oficial, Perfil Eventos, Perfil Fim de Semana)
+                  e ative com 1 clique.
+                </p>
+                {storeProfiles.length > 0 && (
+                  <div className="flex flex-col gap-2 mt-2 mb-3">
+                    {storeProfiles.map((sp) => {
+                      const isAct = sp.id === activeStoreProfileId;
+                      return (
+                        <div
+                          key={sp.id}
+                          className={`rounded-xl p-2.5 border flex items-center justify-between gap-2 ${
+                            isAct
+                              ? 'border-[var(--ac)] bg-[var(--ac)]/10'
+                              : 'border-[var(--bd)] bg-[var(--bg2)]'
+                          }`}
+                        >
+                          <div className="min-w-0">
+                            <div className="font-bold text-xs sm:text-sm truncate">
+                              {sp.profile_name}{' '}
+                              {isAct && <span className="text-[var(--ac)]">· Ativo</span>}
+                            </div>
+                            <div className="text-[11px] text-[var(--mut)] truncate">
+                              {sp.name || bar.name} · {sp.profile_config?.badge_text || 'Perfil'}
+                            </div>
+                          </div>
+                          <div className="flex gap-1.5 shrink-0">
+                            <button
+                              type="button"
+                              className="b g sm"
+                              onClick={() => void handleApplyStoreProfile(sp)}
+                            >
+                              Ativar
+                            </button>
+                            <button
+                              type="button"
+                              className="b d sm"
+                              onClick={() => void handleDeleteStoreProfile(sp.id)}
+                            >
+                              ✕
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                <div className="row mt-2">
+                  <input
+                    value={newProfileName}
+                    onChange={(e) => setNewProfileName(e.target.value)}
+                    placeholder="Nome do perfil (ex: Perfil Oficial, Eventos VIP)"
+                    className="grow"
+                  />
+                  <button
+                    type="button"
+                    className="b sm"
+                    disabled={saving}
+                    onClick={() => void handleSaveNewStoreProfile()}
+                  >
+                    + Salvar perfil
+                  </button>
+                </div>
+              </div>
+
+              {/* Informações Completas da Loja */}
+              <div className="panel">
+                <h2>🏪 Informações do Estabelecimento</h2>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <div>
+                    <label>Nome da loja</label>
+                    <input value={name} onChange={(e) => setName(e.target.value)} />
+                  </div>
+                  <div>
+                    <label>@ único da loja (handle)</label>
+                    <input
+                      value={handle}
+                      onChange={(e) => setHandle(e.target.value)}
+                      placeholder="ex: meu_bar_brasilia"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <div>
+                    <label>Slogan / frase de destaque</label>
+                    <input
+                      value={slogan}
+                      onChange={(e) => setSlogan(e.target.value)}
+                      placeholder="Ex: Coquetelaria autoral & boas noites"
+                    />
+                  </div>
+                  <div>
+                    <label>Selo no banner (badge)</label>
+                    <input
+                      value={storeProfileCfg.badge_text || ''}
+                      onChange={(e) =>
+                        setStoreProfileCfg({ ...storeProfileCfg, badge_text: e.target.value })
+                      }
+                      placeholder="Ex: COQUETELARIA & LOUNGE"
+                    />
+                  </div>
+                </div>
+
+                <label>Sobre a loja (história, ambiente, proposta)</label>
+                <textarea
+                  rows={3}
+                  value={storeProfileCfg.about || ''}
+                  onChange={(e) =>
+                    setStoreProfileCfg({ ...storeProfileCfg, about: e.target.value })
+                  }
+                  placeholder="Conte sobre seu espaço, música, drinks especiais, equipe e estilo da casa..."
                 />
 
-                <label>Slogan / descrição curta</label>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <div>
+                    <label>Horário de funcionamento</label>
+                    <input
+                      value={storeProfileCfg.opening_hours || ''}
+                      onChange={(e) =>
+                        setStoreProfileCfg({ ...storeProfileCfg, opening_hours: e.target.value })
+                      }
+                      placeholder="Ex: Ter–Dom · 18h às 02h"
+                    />
+                  </div>
+                  <div>
+                    <label>Telefone / Reservas</label>
+                    <input
+                      value={storeProfileCfg.phone || ''}
+                      onChange={(e) =>
+                        setStoreProfileCfg({ ...storeProfileCfg, phone: e.target.value })
+                      }
+                      placeholder="(61) 99999-9999"
+                    />
+                  </div>
+                  <div>
+                    <label>WhatsApp (com DDD)</label>
+                    <input
+                      value={storeProfileCfg.whatsapp || ''}
+                      onChange={(e) =>
+                        setStoreProfileCfg({ ...storeProfileCfg, whatsapp: e.target.value })
+                      }
+                      placeholder="5561999999999"
+                    />
+                  </div>
+                  <div>
+                    <label>Instagram</label>
+                    <input
+                      value={storeProfileCfg.instagram || ''}
+                      onChange={(e) =>
+                        setStoreProfileCfg({ ...storeProfileCfg, instagram: e.target.value })
+                      }
+                      placeholder="@seubar"
+                    />
+                  </div>
+                </div>
+
+                <label>Site / Linktree (opcional)</label>
                 <input
-                  value={slogan}
-                  onChange={(e) => setSlogan(e.target.value)}
-                  placeholder="Ex: Coquetelaria autoral & boas noites"
+                  value={storeProfileCfg.website || ''}
+                  onChange={(e) =>
+                    setStoreProfileCfg({ ...storeProfileCfg, website: e.target.value })
+                  }
+                  placeholder="https://seubar.com.br"
                 />
 
                 <LocationPicker
@@ -899,6 +1333,39 @@ export const StoreStudioView: React.FC<{
                   }}
                 />
 
+                <label>Complemento / Ponto de referência</label>
+                <input
+                  value={storeProfileCfg.address_details || ''}
+                  onChange={(e) =>
+                    setStoreProfileCfg({ ...storeProfileCfg, address_details: e.target.value })
+                  }
+                  placeholder="Ex: CLN 205 Bloco B Loja 12 · Entrada pela varanda"
+                />
+
+                <label>Estrutura & Diferenciais da casa</label>
+                <div className="chips !flex-wrap !overflow-visible mt-1">
+                  {STORE_AMENITIES.map((am) => {
+                    const selected = (storeProfileCfg.amenities || []).includes(am);
+                    return (
+                      <span
+                        key={am}
+                        className={`chip ${selected ? 'on' : ''}`}
+                        onClick={() => {
+                          const cur = storeProfileCfg.amenities || [];
+                          const next = selected ? cur.filter((x) => x !== am) : [...cur, am];
+                          setStoreProfileCfg({ ...storeProfileCfg, amenities: next });
+                        }}
+                      >
+                        {am}
+                      </span>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Imagens, Banners e Galeria */}
+              <div className="panel">
+                <h2>🖼️ Logo, Banner Principal & Galeria de Banners</h2>
                 <ImageUploader
                   label="Logo da loja (câmera ou galeria)"
                   value={logoUrl}
@@ -908,14 +1375,206 @@ export const StoreStudioView: React.FC<{
                 />
 
                 <ImageUploader
-                  label="Banner / foto de fundo do cabeçalho"
+                  label="Banner principal do topo do perfil e cardápio"
                   value={bannerUrl}
                   folder="banners"
                   onChange={setBannerUrl}
                   onToast={onToast}
                 />
 
-                <h2 className="mt-4">Paleta do App da Loja</h2>
+                <h3 className="mt-4">📸 Banners extras da loja (até 4 fotos do ambiente/drinks)</h3>
+                <div className="space-y-2.5">
+                  {[0, 1, 2, 3].map((slotIdx) => {
+                    const currentBanners = storeProfileCfg.extra_banners || [];
+                    const val = currentBanners[slotIdx] || '';
+                    return (
+                      <div key={slotIdx} className="relative">
+                        <ImageUploader
+                          label={`Banner extra #${slotIdx + 1}`}
+                          value={val}
+                          folder="banners"
+                          onChange={(url) => {
+                            const next = [...currentBanners];
+                            while (next.length <= slotIdx) next.push('');
+                            next[slotIdx] = url;
+                            setStoreProfileCfg({ ...storeProfileCfg, extra_banners: next });
+                          }}
+                          onToast={onToast}
+                        />
+                        {val && (
+                          <button
+                            type="button"
+                            className="b d sm mt-1"
+                            onClick={() => {
+                              const next = [...currentBanners];
+                              next[slotIdx] = '';
+                              setStoreProfileCfg({ ...storeProfileCfg, extra_banners: next });
+                            }}
+                          >
+                            Remover banner #{slotIdx + 1}
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Design Visual Avançado do Perfil (mesmo nível do Cardápio!) */}
+              <div className="panel">
+                <h2>🎨 Design Visual do Perfil & Paleta</h2>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <div>
+                    <label>Fonte do nome da loja ({NAME_FONTS.length} opções)</label>
+                    <select value={font} onChange={(e) => setFont(e.target.value)}>
+                      {NAME_FONTS.map((f) => (
+                        <option key={f.id} value={f.id}>
+                          {f.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label>Textura / fundo do perfil</label>
+                    <select
+                      value={storeProfileCfg.bg_pattern || 'radial'}
+                      onChange={(e) =>
+                        setStoreProfileCfg({ ...storeProfileCfg, bg_pattern: e.target.value })
+                      }
+                    >
+                      {BG_PATTERNS.map((bp) => (
+                        <option key={bp.id} value={bp.id}>
+                          {bp.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label>Altura do banner</label>
+                    <select
+                      value={storeProfileCfg.banner_height || 'md'}
+                      onChange={(e) =>
+                        setStoreProfileCfg({
+                          ...storeProfileCfg,
+                          banner_height: e.target.value as StoreProfileConfig['banner_height'],
+                        })
+                      }
+                    >
+                      <option value="sm">Compacto</option>
+                      <option value="md">Médio (Padrão)</option>
+                      <option value="lg">Grande Destaque</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label>Contraste sobre o banner</label>
+                    <select
+                      value={storeProfileCfg.banner_overlay || 'gradient'}
+                      onChange={(e) =>
+                        setStoreProfileCfg({
+                          ...storeProfileCfg,
+                          banner_overlay: e.target.value as StoreProfileConfig['banner_overlay'],
+                        })
+                      }
+                    >
+                      <option value="gradient">Degradê suave</option>
+                      <option value="dark">Escuro elegante</option>
+                      <option value="soft">Claro / Sutil</option>
+                      <option value="none">Sem filtro</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label>Formato da logo</label>
+                    <select
+                      value={storeProfileCfg.logo_shape || 'rounded'}
+                      onChange={(e) =>
+                        setStoreProfileCfg({ ...storeProfileCfg, logo_shape: e.target.value })
+                      }
+                    >
+                      {LOGO_SHAPES.map((ls) => (
+                        <option key={ls.id} value={ls.id}>
+                          {ls.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label>Tamanho da logo</label>
+                    <select
+                      value={storeProfileCfg.logo_size || 'md'}
+                      onChange={(e) =>
+                        setStoreProfileCfg({
+                          ...storeProfileCfg,
+                          logo_size: e.target.value as StoreProfileConfig['logo_size'],
+                        })
+                      }
+                    >
+                      <option value="sm">Pequena</option>
+                      <option value="md">Média</option>
+                      <option value="lg">Grande</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label>Estilo dos cartões</label>
+                    <select
+                      value={storeProfileCfg.card_style || 'glass'}
+                      onChange={(e) =>
+                        setStoreProfileCfg({
+                          ...storeProfileCfg,
+                          card_style: e.target.value as StoreProfileConfig['card_style'],
+                        })
+                      }
+                    >
+                      <option value="glass">Vidro translúcido</option>
+                      <option value="bordered">Borda destaque</option>
+                      <option value="elevated">Elevado c/ sombra</option>
+                      <option value="neon">Brilho Neon</option>
+                      <option value="minimal">Minimalista</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label>Enfeite do topo</label>
+                    <select
+                      value={storeProfileCfg.top_ornament || 'classic-filigree'}
+                      onChange={(e) =>
+                        setStoreProfileCfg({ ...storeProfileCfg, top_ornament: e.target.value })
+                      }
+                    >
+                      {TOP_ORNAMENTS.map((o) => (
+                        <option key={o.id} value={o.id}>
+                          {o.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label>Moldura / detalhes laterais</label>
+                    <select
+                      value={storeProfileCfg.side_detail || 'thin-gold'}
+                      onChange={(e) =>
+                        setStoreProfileCfg({ ...storeProfileCfg, side_detail: e.target.value })
+                      }
+                    >
+                      {SIDE_DETAILS.map((sd) => (
+                        <option key={sd.id} value={sd.id}>
+                          {sd.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label>Cor secundária de fundo</label>
+                    <input
+                      type="color"
+                      value={storeProfileCfg.bg_color_2 || '#1b1626'}
+                      onChange={(e) =>
+                        setStoreProfileCfg({ ...storeProfileCfg, bg_color_2: e.target.value })
+                      }
+                    />
+                  </div>
+                </div>
+
+                <h3 className="mt-4">Paleta de cores da loja</h3>
                 <div className="row">
                   <div className="grow">
                     <label>Fundo</label>
@@ -930,7 +1589,7 @@ export const StoreStudioView: React.FC<{
                     />
                   </div>
                   <div className="grow">
-                    <label>Destaque (Ouro)</label>
+                    <label>Destaque</label>
                     <input
                       type="color"
                       value={colorAccent}
@@ -957,54 +1616,8 @@ export const StoreStudioView: React.FC<{
                   disabled={saving}
                   onClick={() => void handleSaveStoreVisual()}
                 >
-                  {saving ? 'Salvando...' : 'Salvar visual da loja'}
+                  {saving ? 'Salvando...' : '💾 Salvar perfil e visual da loja'}
                 </button>
-              </div>
-
-              <div className="panel" style={{ background: colorSurface, color: colorText }}>
-                <h2 className="!mt-0">Prévia no Topo do App</h2>
-                <div
-                  className="rounded-xl p-3 flex items-center justify-between border mt-2"
-                  style={{ background: colorBg, borderColor: `${colorAccent}44` }}
-                >
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <img
-                      key={logoUrl || 'fallback'}
-                      src={logoUrl || '/logo.png'}
-                      alt="Logo"
-                      className="w-9 h-9 rounded-lg object-cover border"
-                      style={{ borderColor: colorAccent }}
-                    />
-                    <div className="min-w-0">
-                      <div className={`font-bold truncate ${font}`} style={{ color: colorAccent }}>
-                        {name.trim() || bar.name}
-                      </div>
-                      {city.trim() && (
-                        <div className="text-xs opacity-75 truncate">
-                          📍 {city.trim()}{' '}
-                          <a
-                            href={externalMapUrl({
-                              city: city.trim(),
-                              lat: lat ? Number(lat) : null,
-                              lon: lon ? Number(lon) : null,
-                            })}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            style={{ color: colorAccent }}
-                          >
-                            (Mapa)
-                          </a>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                  <span
-                    className="text-xs font-bold px-2.5 py-1 rounded-full"
-                    style={{ background: colorAccent, color: '#16120c' }}
-                  >
-                    Ativo
-                  </span>
-                </div>
               </div>
             </div>
           )}
@@ -1633,6 +2246,28 @@ export const StoreStudioView: React.FC<{
               </div>
             </div>
           )}
+          {/* ================= ABA 4: ARTE DO QR CODE ================= */}
+          {studioTab === 'qr' && (
+            <QrDesignerPanel
+              bar={liveBar}
+              design={qrDesign}
+              savedDesigns={qrDesigns}
+              activeDesignId={activeQrDesignId}
+              onChangeDesign={setQrDesign}
+              onSelectSaved={async (d) => {
+                setQrDesign(d);
+                setActiveQrDesignId(d.id);
+                await persistStudioUpdate(
+                  { active_qr_design: d.id },
+                  `Design de QR "${d.design_name}" ativado!`
+                );
+              }}
+              onSaveAsNew={handleSaveNewQrDesign}
+              onUpdateCurrent={handleUpdateCurrentQrDesign}
+              onDeleteSaved={handleDeleteQrDesign}
+              saving={saving}
+            />
+          )}
         </div>
 
         {/* Coluna Direita Fixa (Desktop) / Painel Visível (Mobile): Prévia em Tempo Real */}
@@ -1641,11 +2276,21 @@ export const StoreStudioView: React.FC<{
             <div className="panel">
               <div className="row sp mb-2.5">
                 <div>
-                  <h2 className="!m-0">Prévia em tempo real</h2>
+                  <h2 className="!m-0">
+                    {studioTab === 'store'
+                      ? 'Prévia do Perfil da Loja'
+                      : studioTab === 'qr'
+                        ? 'Prévia da Placa QR Code'
+                        : 'Prévia do Cardápio'}
+                  </h2>
                   <span className="tag">
-                    {realClientDrinks.length > 0
-                      ? `${realClientDrinks.length} drink(s) ativos no cardápio`
-                      : 'Modo exemplo (adicione estoque + preço)'}
+                    {studioTab === 'store'
+                      ? 'Assim aparece em Bares próximos'
+                      : studioTab === 'qr'
+                        ? 'Pronta para imprimir ou enviar'
+                        : realClientDrinks.length > 0
+                          ? `${realClientDrinks.length} item(ns) ativos no cardápio`
+                          : 'Modo exemplo (adicione estoque + preço)'}
                   </span>
                 </div>
                 <button
@@ -1653,13 +2298,40 @@ export const StoreStudioView: React.FC<{
                   className="b sm"
                   disabled={saving}
                   onClick={() =>
-                    void (studioTab === 'store' ? handleSaveStoreVisual() : handleSaveCardapio())
+                    void (studioTab === 'store'
+                      ? handleSaveStoreVisual()
+                      : studioTab === 'qr'
+                        ? handleUpdateCurrentQrDesign()
+                        : handleSaveCardapio())
                   }
                 >
                   {saving ? 'Salvando…' : 'Salvar'}
                 </button>
               </div>
-              {renderLiveMenuPreview(false)}
+
+              {studioTab === 'store' ? (
+                <StoreProfileRenderer bar={liveBar} profileConfig={storeProfileCfg} compact />
+              ) : studioTab === 'qr' ? (
+                <div>
+                  <div className="mb-2.5 flex items-center gap-2">
+                    <span className="text-xs text-[var(--mut)]">Testar mesa:</span>
+                    <input
+                      value={previewQrTable}
+                      onChange={(e) => setPreviewQrTable(e.target.value)}
+                      placeholder="Vazio = Cardápio geral"
+                      className="!py-1 !text-xs flex-1"
+                    />
+                  </div>
+                  <QrPosterPreview
+                    bar={liveBar}
+                    design={qrDesign}
+                    qrUrl={menuUrl(bar.id, previewQrTable)}
+                    tableLabel={previewQrTable}
+                  />
+                </div>
+              ) : (
+                renderLiveMenuPreview(false)
+              )}
             </div>
           </div>
         )}

@@ -1,23 +1,44 @@
 import React, { useEffect, useState } from 'react';
-import { allIngredientNames, CAT, CATS, ROLE_LABELS } from '../lib/catalog';
+import {
+  allIngredientNames,
+  CAT,
+  CATS,
+  QR_DESIGN_TEMPLATES,
+  ROLE_LABELS,
+} from '../lib/catalog';
 import { broadcastMenuUpdate, sb, writeBarSafe } from '../lib/supabase';
 import {
   applyBarTheme,
+  buildUnifiedStudioPresets,
+  filterRecipesForBar,
   formatShakers,
+  generateCustomQrPosterPng,
   generatePrintableQrPng,
   generateQrDataUrl,
   getActivePromotion,
+  getActiveQrDesign,
   getBarMenuDesign,
   getBarPromotions,
   getMenuPresets,
   getMissingIngredientsForRecipe,
+  getQrDesigns,
   makeDrink,
   menuUrl,
   money,
   norm,
   parseShakers,
 } from '../lib/utils';
-import type { Bar, BarEntry, BarItem, Order, Recipe, TableTab, UserCoords } from '../types/meubar';
+import type {
+  Bar,
+  BarEntry,
+  BarItem,
+  Order,
+  QrDesignConfig,
+  Recipe,
+  TableTab,
+  UserCoords,
+} from '../types/meubar';
+import { QrPosterPreview } from './QrDesigner';
 import { ImageUploader, LocationPicker, RecipeTile } from './SharedUI';
 
 export const SwitchBarModal: React.FC<{
@@ -621,13 +642,14 @@ select json_build_object(
   ), '[]'::json),
   'items', coalesce((
     select json_agg(json_build_object(
-      'id', r.id, 'name', r.name, 'category', r.category, 'image_url', r.image_url,
-      'price', p.price, 'ingredients', r.ingredients, 'description', r.description,
-      'story', r.story, 'tags', r.tags
+      'id', r.id, 'name', r.name, 'category', r.category, 'item_type', coalesce(r.item_type, 'drink'),
+      'image_url', r.image_url, 'price', p.price, 'ingredients', r.ingredients,
+      'description', r.description, 'story', r.story, 'tags', r.tags
     ) order by r.name)
     from recipes r
     left join bar_prices p on p.bar_id = b.id and p.recipe_id = r.id
     where (r.is_public is not false or r.owner = b.owner or p.price is not null)
+      and (not exists (select 1 from unnest(coalesce(r.tags, '{}')) tg where tg like '__bar:%') or ('__bar:' || b.id::text) = any(coalesce(r.tags, '{}')))
       and (lower(coalesce(b.kind, '')) in ('home', 'casa') or p.price is not null)
       and not exists (
         select 1 from jsonb_array_elements(coalesce(r.ingredients, '[]'::jsonb)) i
@@ -657,6 +679,7 @@ export const QrModal: React.FC<{
   onItemsChange?: (items: BarItem[]) => void;
   onGoPrices?: () => void;
   onGoStock?: () => void;
+  onGoQrStudio?: () => void;
   onBarUpdated: (bar: Bar) => void;
   onClose: () => void;
   onToast: (msg: string) => void;
@@ -668,14 +691,30 @@ export const QrModal: React.FC<{
   onItemsChange,
   onGoPrices,
   onGoStock,
+  onGoQrStudio,
   onBarUpdated,
   onClose,
   onToast,
 }) => {
   const presets = getMenuPresets(bar);
   const promos = getBarPromotions(bar);
+  const savedQrDesigns = getQrDesigns(bar);
+  const activeQrDefault = getActiveQrDesign(bar);
   const [designId, setDesignId] = useState(bar.active_menu_preset || '');
   const [promoId, setPromoId] = useState(() => getActivePromotion(bar)?.id || '');
+  const [qrStyleMode, setQrStyleMode] = useState<'simple' | 'custom'>('simple');
+  const [selectedQrDesignId, setSelectedQrDesignId] = useState<string>(
+    activeQrDefault.id || QR_DESIGN_TEMPLATES[0].id
+  );
+  const [exportingPoster, setExportingPoster] = useState(false);
+
+  const allQrOptions: QrDesignConfig[] = [
+    ...savedQrDesigns,
+    ...QR_DESIGN_TEMPLATES.filter((t) => !savedQrDesigns.some((s) => s.id === t.id)),
+  ];
+  const currentQrDesign: QrDesignConfig =
+    allQrOptions.find((d) => d.id === selectedQrDesignId) || activeQrDefault;
+
   const defaultTables = ['Mesa 1', 'Mesa 2', 'Mesa 3', 'Mesa 4', 'Mesa 5', 'Mesa 6', 'Mesa 7', 'Mesa 8', 'Mesa 9', 'Mesa 10', 'Mesa 12', 'Mesa 15', 'Mesa 20'];
   const getInitialTables = (): string[] => {
     const rawBar = Array.isArray(bar.table_names) ? bar.table_names.map((x) => String(x).trim()).filter(Boolean) : [];
@@ -746,14 +785,15 @@ export const QrModal: React.FC<{
     await handleAddTable(`Mesa ${nextNum}`);
   };
 
+  const scopedRecipes = filterRecipesForBar(recipes, bar.id);
   const isHome = bar.kind === 'home' || bar.kind === 'casa';
-  const makeable = recipes.filter((r) => makeDrink(r, items));
+  const makeable = scopedRecipes.filter((r) => makeDrink(r, items));
   const readyForMenu = isHome ? makeable : makeable.filter((r) => prices[r.id] != null);
   const pricedMissingStock = isHome
     ? []
-    : recipes.filter((r) => !makeDrink(r, items) && prices[r.id] != null);
+    : scopedRecipes.filter((r) => !makeDrink(r, items) && prices[r.id] != null);
   const unpricedAvailable = isHome ? [] : makeable.filter((r) => prices[r.id] == null);
-  const pricedCount = recipes.filter((r) => prices[r.id] != null).length;
+  const pricedCount = scopedRecipes.filter((r) => prices[r.id] != null).length;
   const stockedCount = items.filter((i) => i.in_stock).length;
   const missingNamesForPriced = Array.from(
     new Set(pricedMissingStock.flatMap((r) => getMissingIngredientsForRecipe(r, items)))
@@ -879,17 +919,10 @@ export const QrModal: React.FC<{
       ...pr,
       active: pr.id === nextPromoId,
     }));
-    const rawList = Array.isArray(bar.menu_presets) ? bar.menu_presets : presets;
-    const updatedPresetsMeta = [
-      ...rawList.filter((x) => typeof x === 'object' && x.id !== '__studio_meta__'),
-      {
-        id: '__studio_meta__',
-        preset_name: '__studio_meta__',
-        menu_design: getBarMenuDesign(bar),
-        promotions: nextPromos,
-        active_promotion_id: nextPromoId || null,
-      },
-    ];
+    const updatedPresetsMeta = buildUnifiedStudioPresets(bar, {
+      promotions: nextPromos,
+      active_promotion_id: nextPromoId || null,
+    });
     const r = await writeBarSafe(
       'update',
       {
@@ -904,6 +937,7 @@ export const QrModal: React.FC<{
         ...r.data,
         menu_promotions: nextPromos,
         active_promotion_id: nextPromoId || null,
+        menu_presets: updatedPresetsMeta,
       };
       onBarUpdated(normalized);
       void broadcastMenuUpdate(bar.id, normalized);
@@ -912,13 +946,30 @@ export const QrModal: React.FC<{
     }
   };
 
-  const handleDownloadPng = () => {
+  const handleDownloadPng = async () => {
+    const slug = `${(bar.handle || bar.name).toLowerCase().replace(/\s+/g, '-')}${
+      tableVal ? '-' + tableVal.toLowerCase().replace(/\s+/g, '-') : ''
+    }`;
+    if (qrStyleMode === 'custom') {
+      setExportingPoster(true);
+      try {
+        const pngUrl = await generateCustomQrPosterPng(targetUrl, bar, currentQrDesign, tableVal);
+        const a = document.createElement('a');
+        a.href = pngUrl;
+        a.download = `placa-qr-${slug}.png`;
+        a.click();
+        onToast('Arte do QR Code personalizada baixada!');
+      } finally {
+        setExportingPoster(false);
+      }
+      return;
+    }
     const pngUrl = generatePrintableQrPng(targetUrl, bar.name, tableVal || 'Cardápio Digital');
     const a = document.createElement('a');
     a.href = pngUrl;
-    a.download = `qr-${(bar.handle || bar.name).toLowerCase().replace(/\s+/g, '-')}${tableVal ? '-' + tableVal.toLowerCase().replace(/\s+/g, '-') : ''}.png`;
+    a.download = `qr-${slug}.png`;
     a.click();
-    onToast('QR Code baixado!');
+    onToast('QR Code simples baixado!');
   };
 
   return (
@@ -1156,16 +1207,88 @@ export const QrModal: React.FC<{
           )}
         </div>
 
-        <div className="text-center">
-          <div className="qr-box">
-            {qrSrc && <img src={qrSrc} alt="QR Code" />}
-            <span className="tag !text-[#222] font-semibold">{label}</span>
+        {/* Escolha do formato da imagem PNG: QR Simples vs QR Personalizado */}
+        <div className="panel mt-3">
+          <div className="row sp flex-wrap gap-2">
+            <b className="text-[0.88rem]">🖼️ Formato da imagem do QR Code</b>
+            {onGoQrStudio && (
+              <button
+                type="button"
+                className="b g sm"
+                onClick={() => {
+                  onClose();
+                  onGoQrStudio();
+                }}
+              >
+                🎨 Personalizar arte do QR
+              </button>
+            )}
           </div>
+          <div className="grid grid-cols-2 gap-2 mt-2">
+            <button
+              type="button"
+              className={`b sm ${qrStyleMode === 'simple' ? '' : 'g'}`}
+              onClick={() => setQrStyleMode('simple')}
+            >
+              📄 QR Simples (só nome)
+            </button>
+            <button
+              type="button"
+              className={`b sm ${qrStyleMode === 'custom' ? '' : 'g'}`}
+              onClick={() => setQrStyleMode('custom')}
+            >
+              🎨 QR Personalizado (arte)
+            </button>
+          </div>
+
+          {qrStyleMode === 'custom' && (
+            <div className="mt-2.5">
+              <label className="!mt-0">Escolher design da placa QR</label>
+              <select
+                value={selectedQrDesignId}
+                onChange={(e) => setSelectedQrDesignId(e.target.value)}
+              >
+                {savedQrDesigns.length > 0 && (
+                  <optgroup label="Meus designs salvos">
+                    {savedQrDesigns.map((d) => (
+                      <option key={d.id} value={d.id}>
+                        ⭐ {d.design_name}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
+                <optgroup label="Modelos prontos">
+                  {QR_DESIGN_TEMPLATES.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.design_name}
+                    </option>
+                  ))}
+                </optgroup>
+              </select>
+            </div>
+          )}
         </div>
 
-        <p className="tag break-all text-center">{targetUrl}</p>
+        <div className="text-center mt-3">
+          {qrStyleMode === 'simple' ? (
+            <div className="qr-box">
+              {qrSrc && <img src={qrSrc} alt="QR Code" />}
+              <span className="tag !text-[#222] font-semibold">{label}</span>
+            </div>
+          ) : (
+            <QrPosterPreview
+              bar={bar}
+              design={currentQrDesign}
+              qrUrl={targetUrl}
+              tableLabel={tableVal}
+              compact
+            />
+          )}
+        </div>
 
-        <div className="row mt-3.5">
+        <p className="tag break-all text-center mt-2">{targetUrl}</p>
+
+        <div className="row mt-3.5 flex-wrap">
           <button
             type="button"
             className="b grow"
@@ -1176,8 +1299,17 @@ export const QrModal: React.FC<{
           >
             Copiar link
           </button>
-          <button type="button" className="b g grow" onClick={handleDownloadPng}>
-            Baixar QR (PNG)
+          <button
+            type="button"
+            className="b g grow"
+            disabled={exportingPoster}
+            onClick={() => void handleDownloadPng()}
+          >
+            {exportingPoster
+              ? 'Gerando arte...'
+              : qrStyleMode === 'custom'
+                ? '⬇️ Baixar Placa QR (PNG)'
+                : '⬇️ Baixar QR Simples (PNG)'}
           </button>
           <a
             className="b g grow"

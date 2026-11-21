@@ -6,6 +6,7 @@ import {
   getMissingBarFields,
   getMissingProfileFields,
   haversineKm,
+  menuUrl,
   reverseGeocodeExact,
 } from '../lib/utils';
 import type {
@@ -20,6 +21,7 @@ import type {
   UserCoords,
 } from '../types/meubar';
 import { ImageUploader, LocationPicker } from './SharedUI';
+import { StoreProfileRenderer } from './StoreProfileRenderer';
 
 export const ProfileSection: React.FC<{
   profile: StaffProfile;
@@ -268,6 +270,8 @@ export const JobsSection: React.FC<{
     })
     .sort((a, b) => a._km - b._km);
 
+  const [inspectBar, setInspectBar] = useState<Partial<Bar> | null>(null);
+
   const handleApply = async (jobId: string) => {
     if (missingProfileFields.length > 0) {
       onToast(`Complete seu currículo antes de se candidatar: ${missingProfileFields.join(', ')}.`);
@@ -397,7 +401,18 @@ export const JobsSection: React.FC<{
                   </span>
                   <br />
                   <span className="tag">
-                    {bName} · 📍 {j.location}
+                    {j.bars?.name ? (
+                      <button
+                        type="button"
+                        className="lnk !p-0 !text-[var(--ac)] underline font-semibold mr-1"
+                        onClick={() => setInspectBar({ id: j.bar_id, ...j.bars })}
+                      >
+                        🏪 {bName}
+                      </button>
+                    ) : (
+                      bName
+                    )}{' '}
+                    · 📍 {j.location}
                     {distTxt} ·{' '}
                     <a
                       href={externalMapUrl(j.bars || { city: j.location })}
@@ -410,14 +425,25 @@ export const JobsSection: React.FC<{
                   </span>
                   {j.description && <p className="mu mt-1.5">{j.description}</p>}
                 </div>
-                <button
-                  type="button"
-                  className={`b sm ${applied ? 'g' : ''}`}
-                  disabled={applied}
-                  onClick={() => void handleApply(j.id)}
-                >
-                  {applied ? 'Candidatado' : 'Candidatar-se'}
-                </button>
+                <div className="flex flex-col gap-1.5 shrink-0">
+                  <button
+                    type="button"
+                    className={`b sm ${applied ? 'g' : ''}`}
+                    disabled={applied}
+                    onClick={() => void handleApply(j.id)}
+                  >
+                    {applied ? 'Candidatado' : 'Candidatar-se'}
+                  </button>
+                  {j.bars?.name && (
+                    <button
+                      type="button"
+                      className="b g sm"
+                      onClick={() => setInspectBar({ id: j.bar_id, ...j.bars })}
+                    >
+                      Ver loja
+                    </button>
+                  )}
+                </div>
               </div>
             );
           })
@@ -425,6 +451,29 @@ export const JobsSection: React.FC<{
           <p className="mu">Nenhuma vaga disponível no momento.</p>
         )}
       </div>
+
+      {inspectBar && (
+        <div className="ov">
+          <div className="w narrow">
+            <button
+              type="button"
+              className="b g sm mb-3"
+              onClick={() => setInspectBar(null)}
+            >
+              ← Voltar para vagas
+            </button>
+            <StoreProfileRenderer
+              bar={inspectBar}
+              jobs={jobs.filter((x) => x.bar_id === inspectBar.id)}
+              appliedJobIds={myApps.map((a) => a.job_id)}
+              onApplyJob={(job) => void handleApply(job.id)}
+              onOpenMenu={(id) => {
+                window.location.href = menuUrl(id);
+              }}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 };
@@ -1247,70 +1296,189 @@ export const CareersView: React.FC<{
 
 export const ExploreBarsView: React.FC<{
   jobs: JobPost[];
+  publicBars?: Bar[];
+  myApps?: JobApplication[];
+  profile?: StaffProfile;
+  userId?: string;
   userCoords: UserCoords | null;
-}> = ({ jobs, userCoords }) => {
+  onRefreshJobs?: () => Promise<void>;
+  onGoProfile?: () => void;
+  onToast?: (msg: string) => void;
+}> = ({
+  jobs,
+  publicBars = [],
+  myApps = [],
+  profile,
+  userId,
+  userCoords,
+  onRefreshJobs,
+  onGoProfile,
+  onToast,
+}) => {
+  const [selectedBar, setSelectedBar] = useState<Partial<Bar> | null>(null);
+  const [search, setSearch] = useState('');
   const origin = userCoords || { lat: -15.7942, lon: -47.8822 };
-  const map: Record<
-    string,
-    { id: string; name: string; handle?: string; city?: string; lat?: number | null; lon?: number | null; jobs: number }
-  > = {};
+
+  const map: Record<string, { bar: Partial<Bar>; jobs: JobPost[] }> = {};
+
+  publicBars.forEach((b) => {
+    if (!b?.id || !b?.name) return;
+    map[b.id] = { bar: b, jobs: [] };
+  });
 
   jobs.forEach((j) => {
-    if (!j.bars?.name) return;
-    const id = j.bar_id;
-    if (!map[id]) {
-      map[id] = {
-        id,
-        name: j.bars.name,
-        handle: j.bars.handle,
-        city: j.bars.city || j.location,
-        lat: j.bars.lat,
-        lon: j.bars.lon,
-        jobs: 0,
+    if (!j.bar_id) return;
+    if (!map[j.bar_id]) {
+      if (!j.bars?.name) return;
+      map[j.bar_id] = {
+        bar: { id: j.bar_id, ...j.bars, city: j.bars.city || j.location },
+        jobs: [],
       };
+    } else if (j.bars) {
+      map[j.bar_id].bar = { ...j.bars, ...map[j.bar_id].bar, id: j.bar_id };
     }
-    map[id].jobs++;
+    map[j.bar_id].jobs.push(j);
   });
 
   const list = Object.values(map)
-    .map((b) => {
+    .map((entry) => {
+      const b = entry.bar;
       const km =
         b.lat != null && b.lon != null
           ? haversineKm(origin, { lat: Number(b.lat), lon: Number(b.lon) })
           : 9999;
-      return { ...b, _km: km };
+      return { ...entry, _km: km };
     })
-    .sort((a, b) => a._km - b._km);
+    .filter((entry) => {
+      if (!search.trim()) return true;
+      const q = search.trim().toLowerCase();
+      return (
+        (entry.bar.name || '').toLowerCase().includes(q) ||
+        (entry.bar.city || '').toLowerCase().includes(q) ||
+        (entry.bar.handle || '').toLowerCase().includes(q) ||
+        (entry.bar.slogan || '').toLowerCase().includes(q)
+      );
+    })
+    .sort((a, b) => {
+      if (a._km !== b._km) return a._km - b._km;
+      return b.jobs.length - a.jobs.length;
+    });
+
+  const handleApplyFromProfile = async (job: JobPost) => {
+    if (!userId) return;
+    const missing = getMissingProfileFields(profile);
+    if (missing.length > 0) {
+      onToast?.(`Complete seu currículo antes de se candidatar: ${missing.join(', ')}.`);
+      onGoProfile?.();
+      return;
+    }
+    const r = await sb
+      .from('job_applications')
+      .insert({ job_id: job.id, applicant_id: userId, message: 'Currículo enviado.' });
+    if (r.error) {
+      onToast?.('Erro: ' + r.error.message);
+      return;
+    }
+    onToast?.('Candidatura enviada!');
+    if (onRefreshJobs) await onRefreshJobs();
+  };
 
   return (
     <div>
-      <h1>Bares próximos</h1>
-      <p className="mu">Com vagas abertas.</p>
-      <div className="list mt-3">
+      <h1>🏪 Lojas & Bares próximos</h1>
+      <p className="mu">
+        Toque em qualquer estabelecimento para abrir o perfil personalizado, ver fotos, informações
+        e se candidatar às vagas abertas.
+      </p>
+
+      <input
+        value={search}
+        onChange={(e) => setSearch(e.target.value)}
+        placeholder="Buscar bar por nome, @ ou cidade..."
+        className="mt-2.5"
+      />
+
+      <div className="flex flex-col gap-2.5 mt-3">
         {list.length > 0 ? (
-          list.map((b) => (
-            <div key={b.id}>
-              <div className="flex-1">
-                <b>{b.name}</b>
-                {b.handle && <span className="tag"> @{b.handle}</span>}
-                {b.city && (
-                  <>
-                    <br />
-                    <span className="tag">
-                      📍 {b.city}
-                      {b._km < 9000 ? ` · ${b._km.toFixed(1)} km` : ''}
-                    </span>
-                  </>
+          list.map(({ bar: b, jobs: barJobs, _km }) => {
+            const accent = b.color_accent || '#e5a93c';
+            return (
+              <div
+                key={b.id}
+                onClick={() => setSelectedBar(b)}
+                className="rounded-2xl overflow-hidden border border-[var(--bd)] bg-[var(--sf)] cursor-pointer hover:border-[var(--ac)] transition-all"
+              >
+                {b.banner_url && (
+                  <div
+                    className="h-24 w-full bg-cover bg-center relative"
+                    style={{ backgroundImage: `url('${b.banner_url}')` }}
+                  >
+                    <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent" />
+                  </div>
                 )}
-                <br />
-                <span className="mu">{b.jobs} vaga(s)</span>
+                <div className="p-3.5 flex items-center gap-3">
+                  <img
+                    src={b.logo_url || '/logo.png'}
+                    alt={b.name || 'Bar'}
+                    className="w-12 h-12 rounded-xl object-cover shrink-0 border-2"
+                    style={{ borderColor: accent }}
+                  />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <b className={`text-base truncate ${b.name_font || ''}`}>{b.name}</b>
+                      {b.handle && <span className="tag">@{b.handle}</span>}
+                    </div>
+                    {b.slogan && (
+                      <div className="text-xs text-[var(--mut)] truncate mt-0.5">{b.slogan}</div>
+                    )}
+                    <div className="flex items-center gap-2 flex-wrap mt-1 text-xs">
+                      {b.city && (
+                        <span className="tag">
+                          📍 {b.city}
+                          {_km < 9000 ? ` · ${_km.toFixed(1)} km` : ''}
+                        </span>
+                      )}
+                      {barJobs.length > 0 && (
+                        <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-[var(--ok)]/20 text-[var(--ok)]">
+                          💼 {barJobs.length} vaga(s)
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  <span className="b g sm shrink-0">Ver perfil →</span>
+                </div>
               </div>
-            </div>
-          ))
+            );
+          })
         ) : (
-          <p className="mu">Nenhum bar com vaga no momento.</p>
+          <div className="panel">
+            <p className="mu">Nenhum bar encontrado no momento.</p>
+          </div>
         )}
       </div>
+
+      {selectedBar && (
+        <div className="ov">
+          <div className="w narrow">
+            <button
+              type="button"
+              className="b g sm mb-3"
+              onClick={() => setSelectedBar(null)}
+            >
+              ← Voltar para bares próximos
+            </button>
+            <StoreProfileRenderer
+              bar={selectedBar}
+              jobs={jobs.filter((x) => x.bar_id === selectedBar.id)}
+              appliedJobIds={myApps.map((a) => a.job_id)}
+              onApplyJob={userId ? (job) => void handleApplyFromProfile(job) : undefined}
+              onOpenMenu={(id) => {
+                window.location.href = menuUrl(id);
+              }}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 };

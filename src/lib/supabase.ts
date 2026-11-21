@@ -38,6 +38,15 @@ export async function writeBarSafe(
     'menu_design',
     'menu_promotions',
     'active_promotion_id',
+    'store_profile_data',
+    'store_profiles',
+    'active_store_profile',
+    'qr_designs',
+    'active_qr_design',
+    'phone',
+    'instagram',
+    'opening_hours',
+    'about',
     'color_bg',
     'color_surface',
     'color_accent',
@@ -45,10 +54,11 @@ export async function writeBarSafe(
     'color_text',
     'base_cost',
     'table_names',
+    'ops_data',
     'shakers',
   ];
 
-  for (let attempt = 0; attempt < 26; attempt++) {
+  for (let attempt = 0; attempt < 36; attempt++) {
     const res =
       mode === 'insert'
         ? await sb.from('bars').insert(data).select().single()

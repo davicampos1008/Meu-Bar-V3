@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { sb, writeBarSafe } from '../lib/supabase';
 import { slugHandle } from '../lib/utils';
-import type { JobPost, StaffProfile, UserCoords } from '../types/meubar';
+import type { Bar, BarEntry, JobPost, StaffProfile, UserCoords } from '../types/meubar';
 import { PWAInstallButton } from './PWAControls';
 import { BrandMark, ImageUploader, LocationPicker } from './SharedUI';
 
@@ -130,8 +130,10 @@ export const OnboardingScreen: React.FC<{
   userId: string;
   profile: StaffProfile;
   jobs: JobPost[];
+  bars?: BarEntry[];
   userCoords: UserCoords | null;
   hasExistingBars: boolean;
+  onPickBar?: (bar: Bar, role: string) => Promise<void>;
   onDetectCoords: () => Promise<UserCoords | null>;
   onGoSeeker: () => void;
   onBarCreated: (barId: string) => Promise<void>;
@@ -143,8 +145,10 @@ export const OnboardingScreen: React.FC<{
   userId,
   profile,
   jobs,
+  bars = [],
   userCoords,
   hasExistingBars,
+  onPickBar,
   onDetectCoords,
   onGoSeeker,
   onBarCreated,
@@ -265,6 +269,43 @@ export const OnboardingScreen: React.FC<{
         <p className="mu">
           Crie seu bar, entre numa equipe, ou use só para <b>currículo e vagas</b>.
         </p>
+
+        {bars.length > 0 && onPickBar && (
+          <div className="panel !border-[var(--ok)]">
+            <h2>🏪 Meus bares conectados ({bars.length})</h2>
+            <p className="mu">Toque para entrar direto em um bar que você já participa:</p>
+            <div className="flex flex-col gap-2 mt-2.5">
+              {bars.map((entry) => (
+                <div
+                  key={entry.bar.id}
+                  className="rounded-xl p-2.5 border border-[var(--bd)] bg-[var(--bg2)] flex items-center justify-between gap-2"
+                >
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <img
+                      src={entry.bar.logo_url || '/logo.png'}
+                      alt={entry.bar.name}
+                      className="w-10 h-10 rounded-lg object-cover border border-[var(--bd)] shrink-0"
+                    />
+                    <div className="min-w-0">
+                      <div className="font-bold text-sm truncate">{entry.bar.name}</div>
+                      <div className="text-xs text-[var(--mut)] truncate">
+                        {entry.bar.handle ? `@${entry.bar.handle} · ` : ''}
+                        Função: {entry.role}
+                      </div>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="b sm shrink-0"
+                    onClick={() => void onPickBar(entry.bar, entry.role)}
+                  >
+                    Entrar →
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         <div className="panel !border-[var(--ac)]">
           <h2>Só quero emprego</h2>

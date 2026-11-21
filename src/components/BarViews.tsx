@@ -3,12 +3,25 @@ import {
   ALL_TAGS,
   CAT,
   CATS,
+  getDefaultUnitForIngredient,
+  getUnitMeta,
+  STARTER_KITS,
+  STOCK_UNITS,
+  type StockUnitId,
 } from '../lib/catalog';
+import {
+  autoDeductStockForOrder,
+  getActiveHappyHours,
+  logBarAudit,
+  playStationAlert,
+} from '../lib/opsUtils';
 import { broadcastMenuUpdate, sb } from '../lib/supabase';
 import {
   estimateRecipeCost,
   externalMapUrl,
+  filterRecipesForBar,
   getMissingIngredientsForRecipe,
+  getRecipeItemType,
   getUnpricedAvailableDrinks,
   makeDrink,
   matchRecipeTags,
@@ -17,9 +30,10 @@ import {
   recipeTags,
   suggestedPrice,
 } from '../lib/utils';
-import type { Bar, BarItem, Order, Recipe, TableTab } from '../types/meubar';
+import type { Bar, BarItem, Order, Recipe, TableCallAlert, TableTab } from '../types/meubar';
 import { PWAInstallButton } from './PWAControls';
 import { RecipeTile } from './SharedUI';
+import { BarmanStationView, KitchenStationView, WaiterStationView } from './StationViews';
 export { StoreStudioView } from './MenuStudio';
 
 export const RecipesView: React.FC<{
@@ -47,9 +61,12 @@ export const RecipesView: React.FC<{
   const [rTags, setRTags] = useState<Set<string>>(new Set());
   const [showTags, setShowTags] = useState(false);
 
-  const canList = recipes.filter((r) => makeDrink(r, items));
-  const missingList = recipes.filter((r) => !makeDrink(r, items));
-  const basePool = rFilter === 'can' ? canList : rFilter === 'missing' ? missingList : recipes;
+  const drinkRecipes = filterRecipesForBar(recipes, bar.id).filter(
+    (r) => getRecipeItemType(r) === 'drink'
+  );
+  const canList = drinkRecipes.filter((r) => makeDrink(r, items));
+  const missingList = drinkRecipes.filter((r) => !makeDrink(r, items));
+  const basePool = rFilter === 'can' ? canList : rFilter === 'missing' ? missingList : drinkRecipes;
   const q = rQuery.trim().toLowerCase();
 
   const filtered = basePool.filter((r) => {
@@ -168,6 +185,8 @@ export const RecipesView: React.FC<{
         {filtered.length > 0 ? (
           filtered.map((r) => {
             const tg = recipeTags(r).slice(0, 2);
+            const missingIngs = getMissingIngredientsForRecipe(r, items);
+            const canMakeNow = missingIngs.length === 0;
             const pr = hasPricing && prices[r.id] != null ? money(prices[r.id]) : null;
             return (
               <button
@@ -180,11 +199,18 @@ export const RecipesView: React.FC<{
                 <div className="t">
                   <div>
                     <div>{r.name}</div>
-                    {tg.length > 0 && <span className="pill-tag">{tg.join(' · ')}</span>}
+                    {!canMakeNow ? (
+                      <span className="pill-tag !text-red-300 !border-red-400/30">
+                        ❌ Falta: {missingIngs.slice(0, 2).join(', ')}
+                        {missingIngs.length > 2 ? ` +${missingIngs.length - 2}` : ''}
+                      </span>
+                    ) : (
+                      tg.length > 0 && <span className="pill-tag">{tg.join(' · ')}</span>
+                    )}
                   </div>
-                  {pr ? (
+                  {pr && canMakeNow ? (
                     <span className="tag pr">{pr}</span>
-                  ) : hasPricing && makeDrink(r, items) ? (
+                  ) : hasPricing && canMakeNow ? (
                     <span className="badge-warn !ml-0">Sem preço</span>
                   ) : null}
                 </div>
@@ -208,6 +234,7 @@ export const StockView: React.FC<{
   hasPricing: boolean;
   onItemsChange: (items: BarItem[]) => void;
   onGoPrices: () => void;
+  onOpenCompras?: () => void;
   onToast: (msg: string) => void;
 }> = ({
   bar,
@@ -218,6 +245,7 @@ export const StockView: React.FC<{
   hasPricing,
   onItemsChange,
   onGoPrices,
+  onOpenCompras,
   onToast,
 }) => {
   const cats = Object.keys(CAT);
@@ -228,25 +256,36 @@ export const StockView: React.FC<{
   const [customCat, setCustomCat] = useState(cats[0] || 'Outros');
   const unpricedAvailable = getUnpricedAvailableDrinks(recipes, items, prices, bar);
   const [brand, setBrand] = useState('');
-  const [sizeMl, setSizeMl] = useState('');
+  const [unit, setUnit] = useState<StockUnitId>('garrafa');
+  const [sizeMl, setSizeMl] = useState('750');
   const [variant, setVariant] = useState('');
   const [cost, setCost] = useState('');
   const [err, setErr] = useState('');
   const [showShopping, setShowShopping] = useState(false);
+  const [showStarterKits, setShowStarterKits] = useState(() => items.length < 5);
+  const [addingKitId, setAddingKitId] = useState<string | null>(null);
   const [quickAddingIng, setQuickAddingIng] = useState<string | null>(null);
   const [editingItem, setEditingItem] = useState<BarItem | null>(null);
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null);
 
   const [edBrand, setEdBrand] = useState('');
   const [edVariant, setEdVariant] = useState('');
+  const [edUnit, setEdUnit] = useState<StockUnitId>('garrafa');
   const [edSize, setEdSize] = useState('');
   const [edCost, setEdCost] = useState('');
+  const [edQty, setEdQty] = useState('');
+  const [edMinQty, setEdMinQty] = useState('');
+  const [edSupplier, setEdSupplier] = useState('');
   const [edErr, setEdErr] = useState('');
+
+  const drinkRecipes = filterRecipesForBar(recipes, bar.id).filter(
+    (r) => getRecipeItemType(r) === 'drink'
+  );
 
   // Calcula quais ingredientes faltantes liberam mais receitas imediatamente (falta só 1 item)
   const unlockMap = new Map<string, { label: string; recipes: string[] }>();
   const nearTwoList: { recipe: string; missing: string[] }[] = [];
-  recipes.forEach((r) => {
+  drinkRecipes.forEach((r) => {
     const miss = getMissingIngredientsForRecipe(r, items);
     if (miss.length === 1) {
       const rawIng = miss[0];
@@ -306,24 +345,31 @@ export const StockView: React.FC<{
       name: nm,
       in_stock: true,
       category: inferredCat,
+      unit,
       unit_cost: Math.max(0, Number(cost) || 0),
       brand: brand.trim() || null,
       variant: variant.trim() || null,
       size_ml: sizeMl ? parseInt(sizeMl, 10) : null,
     };
     let r = await sb.from('bar_items').insert(row).select().single();
+    if (r.error && /unit|column .* does not exist/i.test(r.error.message || '')) {
+      delete row.unit;
+      r = await sb.from('bar_items').insert(row).select().single();
+    }
     if (r.error) {
       delete row.brand;
       delete row.variant;
       delete row.size_ml;
       delete row.category;
+      delete row.unit;
       r = await sb.from('bar_items').insert(row).select().single();
     }
     if (r.error) {
       setErr(r.error.message);
       return;
     }
-    const next = [...items, r.data as BarItem].sort((a, b) => a.name.localeCompare(b.name));
+    const insertedItem: BarItem = { ...(r.data as BarItem), unit: (r.data as BarItem).unit || unit };
+    const next = [...items, insertedItem].sort((a, b) => a.name.localeCompare(b.name));
     onItemsChange(next);
     void broadcastMenuUpdate(bar.id);
     setSelectedName('');
@@ -343,23 +389,34 @@ export const StockView: React.FC<{
 
   const handleToggle = async (it: BarItem) => {
     const prevAvailableCount = recipes.filter((r) => makeDrink(r, items)).length;
+    const nextInStock = !it.in_stock;
+    const sameNameIds = items
+      .filter((x) => norm(x.name) === norm(it.name))
+      .map((x) => x.id);
+    const idsToUpdate = !nextInStock && sameNameIds.length > 1 ? sameNameIds : [it.id];
+
+    const patch: Record<string, unknown> = { in_stock: nextInStock };
+    if (nextInStock && it.qty != null && Number(it.qty) <= 0) {
+      patch.qty = 1;
+    }
+
     const r = await sb
       .from('bar_items')
-      .update({ in_stock: !it.in_stock })
-      .eq('id', it.id)
-      .select()
-      .single();
-    if (!r.error && r.data) {
-      const updatedItem = r.data as BarItem;
-      const next = items.map((x) => (x.id === it.id ? updatedItem : x));
+      .update(patch)
+      .in('id', idsToUpdate)
+      .select();
+
+    if (!r.error && Array.isArray(r.data) && r.data.length > 0) {
+      const updatedById = new Map((r.data as BarItem[]).map((u) => [u.id, u]));
+      const next = items.map((x) => updatedById.get(x.id) || x);
       onItemsChange(next);
       void broadcastMenuUpdate(bar.id);
       const nextAvailableCount = recipes.filter((rec) => makeDrink(rec, next)).length;
-      if (!updatedItem.in_stock) {
+      if (!nextInStock) {
         const removedCount = Math.max(0, prevAvailableCount - nextAvailableCount);
         onToast(
           removedCount > 0
-            ? `${it.name} marcado como indisponível — ${removedCount} drink(s) saíram dos catálogos.`
+            ? `${it.name} indisponível — ${removedCount} receita(s) saíram de Receitas e do Cardápio.`
             : `${it.name} marcado como indisponível.`
         );
       } else {
@@ -372,40 +429,104 @@ export const StockView: React.FC<{
           );
         }
       }
+    } else if (r.error) {
+      onToast(`Erro ao atualizar estoque: ${r.error.message}`);
     }
   };
 
   const handleRemove = async (id: string) => {
-    await sb.from('bar_items').delete().eq('id', id);
-    onItemsChange(items.filter((x) => x.id !== id));
+    const targetItem = items.find((x) => x.id === id);
+    const prevAvailableCount = recipes.filter((r) => makeDrink(r, items)).length;
+    const del = await sb.from('bar_items').delete().eq('id', id);
+
+    let next: BarItem[];
+    if (del.error) {
+      // Fallback caso RLS impeça DELETE mas permita UPDATE
+      const up = await sb
+        .from('bar_items')
+        .update({ in_stock: false, qty: 0 })
+        .eq('id', id)
+        .select()
+        .single();
+      if (up.error) {
+        onToast(`Não foi possível remover o item: ${del.error.message}`);
+        return;
+      }
+      next = items.map((x) => (x.id === id ? (up.data as BarItem) : x));
+    } else {
+      next = items.filter((x) => x.id !== id);
+    }
+
+    onItemsChange(next);
     void broadcastMenuUpdate(bar.id);
     setConfirmRemoveId(null);
-    onToast('Item removido');
+
+    const nextAvailableCount = recipes.filter((rec) => makeDrink(rec, next)).length;
+    const removedCount = Math.max(0, prevAvailableCount - nextAvailableCount);
+    const hasDuplicateLeft =
+      targetItem && next.some((x) => x.in_stock && norm(x.name) === norm(targetItem.name));
+
+    if (hasDuplicateLeft) {
+      onToast(
+        `${targetItem?.name} removido, mas ainda há outro registro ativo de "${targetItem?.name}" no estoque.`
+      );
+    } else if (removedCount > 0) {
+      onToast(
+        `${targetItem?.name || 'Item'} removido — ${removedCount} receita(s) saíram de Receitas e do Cardápio.`
+      );
+    } else {
+      onToast('Item removido do estoque.');
+    }
   };
 
   const openEdit = (it: BarItem) => {
     setEditingItem(it);
     setEdBrand(it.brand || '');
     setEdVariant(it.variant || '');
-    setEdSize(it.size_ml != null ? String(it.size_ml) : '');
+    const def = getDefaultUnitForIngredient(it.name, it.category);
+    setEdUnit((it.unit as StockUnitId) || def.unit);
+    setEdSize(it.size_ml != null ? String(it.size_ml) : def.defaultSize ? String(def.defaultSize) : '');
     setEdCost(it.unit_cost != null ? String(it.unit_cost) : '');
+    setEdQty(it.qty != null ? String(it.qty) : '');
+    setEdMinQty(it.min_qty != null ? String(it.min_qty) : '');
+    setEdSupplier(it.supplier || '');
     setEdErr('');
   };
 
   const saveEdit = async () => {
     if (!editingItem) return;
     setEdErr('');
-    const patch = {
+    const parsedQty = edQty !== '' ? Math.max(0, parseInt(edQty, 10) || 0) : null;
+    const nextInStock = parsedQty !== null ? parsedQty > 0 : editingItem.in_stock;
+    const patch: Record<string, unknown> = {
       brand: edBrand.trim() || null,
       variant: edVariant.trim() || null,
+      unit: edUnit,
       size_ml: edSize ? parseInt(edSize, 10) : null,
+      qty: parsedQty,
+      in_stock: nextInStock,
+      min_qty: edMinQty !== '' ? Math.max(0, parseInt(edMinQty, 10) || 0) : null,
+      supplier: edSupplier.trim() || null,
       unit_cost: Math.max(0, Number(edCost) || 0),
     };
     let r = await sb.from('bar_items').update(patch).eq('id', editingItem.id).select().single();
+    if (r.error && /column .* does not exist/i.test(r.error.message || '')) {
+      const stripped = { ...patch };
+      ['unit', 'min_qty', 'supplier'].forEach((k) => {
+        if (r.error?.message.includes(k)) delete stripped[k];
+      });
+      r = await sb.from('bar_items').update(stripped).eq('id', editingItem.id).select().single();
+      if (r.error) {
+        delete stripped.unit;
+        delete stripped.min_qty;
+        delete stripped.supplier;
+        r = await sb.from('bar_items').update(stripped).eq('id', editingItem.id).select().single();
+      }
+    }
     if (r.error) {
       r = await sb
         .from('bar_items')
-        .update({ unit_cost: patch.unit_cost })
+        .update({ unit_cost: patch.unit_cost, in_stock: nextInStock })
         .eq('id', editingItem.id)
         .select()
         .single();
@@ -415,10 +536,27 @@ export const StockView: React.FC<{
       return;
     }
     onItemsChange(
-      items.map((x) => (x.id === editingItem.id ? { ...x, ...(r.data as BarItem) } : x))
+      items.map((x) =>
+        x.id === editingItem.id
+          ? {
+              ...x,
+              ...(r.data as BarItem),
+              in_stock: nextInStock,
+              unit: edUnit,
+              qty: parsedQty !== null ? parsedQty : x.qty,
+              min_qty: edMinQty !== '' ? Math.max(0, parseInt(edMinQty, 10) || 0) : x.min_qty,
+              supplier: edSupplier.trim() || null,
+            }
+          : x
+      )
     );
+    void broadcastMenuUpdate(bar.id);
     setEditingItem(null);
-    onToast('Item atualizado');
+    onToast(
+      parsedQty === 0
+        ? 'Quantidade zerada — receitas com este item saíram dos catálogos.'
+        : 'Item atualizado'
+    );
   };
 
   const handleQuickAddIngredient = async (rawName: string) => {
@@ -441,11 +579,27 @@ export const StockView: React.FC<{
       const inferredCat =
         cats.find((c) => (CAT[c] || []).some((s) => norm(String(s).split('|')[0]) === targetNorm)) ||
         null;
+      const defUnit = getDefaultUnitForIngredient(rawName, inferredCat);
       let ins = await sb
         .from('bar_items')
-        .insert({ bar_id: bar.id, name: rawName, in_stock: true, category: inferredCat, unit_cost: 0 })
+        .insert({
+          bar_id: bar.id,
+          name: rawName,
+          in_stock: true,
+          category: inferredCat,
+          unit: defUnit.unit,
+          size_ml: defUnit.defaultSize ?? null,
+          unit_cost: 0,
+        })
         .select()
         .single();
+      if (ins.error) {
+        ins = await sb
+          .from('bar_items')
+          .insert({ bar_id: bar.id, name: rawName, in_stock: true, category: inferredCat, unit_cost: 0 })
+          .select()
+          .single();
+      }
       if (ins.error) {
         ins = await sb
           .from('bar_items')
@@ -454,7 +608,7 @@ export const StockView: React.FC<{
           .single();
       }
       if (!ins.error && ins.data) {
-        nextItems.push(ins.data as BarItem);
+        nextItems.push({ ...(ins.data as BarItem), unit: (ins.data as BarItem).unit || defUnit.unit });
       }
     }
 
@@ -471,11 +625,79 @@ export const StockView: React.FC<{
     }
   };
 
+  const handleAddStarterKit = async (kitId: string, ingNames: string[]) => {
+    setAddingKitId(kitId);
+    let nextItems = [...items];
+    for (const rawName of ingNames) {
+      const targetNorm = norm(rawName);
+      if (targetNorm === 'gelo' || targetNorm === 'agua') continue;
+      const alreadyIn = nextItems.some((it) => norm(it.name) === targetNorm && it.in_stock);
+      if (alreadyIn) continue;
+      const existingOut = nextItems.find((it) => norm(it.name) === targetNorm && !it.in_stock);
+      if (existingOut) {
+        const up = await sb
+          .from('bar_items')
+          .update({ in_stock: true })
+          .eq('id', existingOut.id)
+          .select()
+          .single();
+        if (!up.error && up.data) {
+          nextItems = nextItems.map((it) => (it.id === existingOut.id ? (up.data as BarItem) : it));
+        }
+        continue;
+      }
+      const inferredCat =
+        cats.find((c) => (CAT[c] || []).some((s) => norm(String(s).split('|')[0]) === targetNorm)) ||
+        null;
+      const defUnit = getDefaultUnitForIngredient(rawName, inferredCat);
+      let ins = await sb
+        .from('bar_items')
+        .insert({
+          bar_id: bar.id,
+          name: rawName,
+          in_stock: true,
+          category: inferredCat,
+          unit: defUnit.unit,
+          size_ml: defUnit.defaultSize ?? null,
+          unit_cost: 0,
+        })
+        .select()
+        .single();
+      if (ins.error) {
+        ins = await sb
+          .from('bar_items')
+          .insert({ bar_id: bar.id, name: rawName, in_stock: true })
+          .select()
+          .single();
+      }
+      if (!ins.error && ins.data) {
+        nextItems.push({ ...(ins.data as BarItem), unit: (ins.data as BarItem).unit || defUnit.unit });
+      }
+    }
+    setAddingKitId(null);
+    nextItems.sort((a, b) => a.name.localeCompare(b.name));
+    onItemsChange(nextItems);
+    void broadcastMenuUpdate(bar.id);
+    const unlockedCount = drinkRecipes.filter((r) => makeDrink(r, nextItems)).length;
+    onToast(`Kit adicionado! Agora você já pode fazer ${unlockedCount} receitas!`);
+  };
+
+  const activeUnitMeta = getUnitMeta(unit);
+  const editUnitMeta = getUnitMeta(edUnit);
+
   return (
     <div>
       <div className="row sp flex-wrap gap-2">
         <h1>Estoque</h1>
-        <div className="row">
+        <div className="row flex-wrap">
+          <button
+            type="button"
+            className={`b sm ${showStarterKits ? '' : 'g'}`}
+            onClick={() => setShowStarterKits((v) => !v)}
+            title="Resumo do que comprar rápido, fácil e barato para já ter drinks"
+          >
+            🚀 Kit inicial
+          </button>
           <button
             type="button"
             className={`b sm ${showShopping ? '' : 'g'}`}
@@ -484,6 +706,16 @@ export const StockView: React.FC<{
           >
             💡 O que comprar{unlockSuggestions.length > 0 ? ` (${unlockSuggestions.length})` : ''}
           </button>
+          {onOpenCompras && (
+            <button
+              type="button"
+              className="b g sm"
+              onClick={onOpenCompras}
+              title="Lista de compras automática, fornecedores e perdas"
+            >
+              🛒 Compras & Perdas
+            </button>
+          )}
           {canEditMenu && hasPricing && (
             <button type="button" className="b sm" onClick={onGoPrices}>
               Precificação
@@ -492,7 +724,98 @@ export const StockView: React.FC<{
           )}
         </div>
       </div>
-      <p className="mu">Pesquise o nome direto ou filtre por categoria. Sempre selecione da lista ou cadastre novo.</p>
+      <p className="mu">Pesquise o nome direto ou filtre por categoria. A unidade de medida é sugerida automaticamente para facilitar o custo.</p>
+
+      {showStarterKits && (
+        <div className="panel mt-3 !border-[var(--ok)]">
+          <div className="row sp">
+            <div>
+              <h3 className="!m-0">🚀 Guia Rápido: O que comprar fácil e barato para começar</h3>
+              <p className="mu mt-0.5 text-[0.78rem]">
+                Acabou de montar o bar? Escolha um kit econômico abaixo para liberar dezenas de
+                drinks clássicos, cremosos, com café e sem álcool hoje mesmo.
+              </p>
+            </div>
+            <button
+              type="button"
+              className="b g sm"
+              onClick={() => setShowStarterKits(false)}
+            >
+              Ocultar
+            </button>
+          </div>
+          <div className="grid grid-cols-1 gap-2.5 mt-3">
+            {STARTER_KITS.map((kit) => {
+              const simulatedItems: BarItem[] = [
+                ...items,
+                ...kit.ingredients.map((n, idx) => ({
+                  id: `sim-${idx}`,
+                  bar_id: bar.id,
+                  name: n,
+                  in_stock: true,
+                })),
+              ];
+              const unlockedWithKit = drinkRecipes.filter((r) => makeDrink(r, simulatedItems)).length;
+              const missingInKit = kit.ingredients.filter(
+                (n) =>
+                  norm(n) !== 'gelo' &&
+                  !items.some((it) => it.in_stock && norm(it.name) === norm(n))
+              );
+              const isBusy = addingKitId === kit.id;
+              return (
+                <div
+                  key={kit.id}
+                  className="rounded-xl p-3 border border-[var(--bd)] bg-[var(--bg2)]"
+                >
+                  <div className="row sp flex-wrap gap-2">
+                    <div>
+                      <b className="text-sm">{kit.title}</b>{' '}
+                      <span className="chip st1 !py-0.5 !px-2 !text-[0.72rem]">
+                        Libera até {unlockedWithKit} receitas
+                      </span>
+                      <div className="text-xs text-[var(--ac)] font-semibold mt-0.5">
+                        💰 {kit.priceRange} · {kit.highlight}
+                      </div>
+                      <div className="text-[11px] text-[var(--mut)] mt-0.5">{kit.subtitle}</div>
+                    </div>
+                    <button
+                      type="button"
+                      className="b sm ok shrink-0"
+                      disabled={isBusy || missingInKit.length === 0}
+                      onClick={() => void handleAddStarterKit(kit.id, kit.ingredients)}
+                    >
+                      {isBusy
+                        ? 'Adicionando...'
+                        : missingInKit.length === 0
+                          ? '✓ Kit completo!'
+                          : `+ Adicionar faltantes (${missingInKit.length})`}
+                    </button>
+                  </div>
+                  <div className="chips !flex-wrap !overflow-visible mt-2">
+                    {kit.ingredients.map((ingName) => {
+                      const hasIt =
+                        norm(ingName) === 'gelo' ||
+                        items.some((it) => it.in_stock && norm(it.name) === norm(ingName));
+                      return (
+                        <button
+                          key={ingName}
+                          type="button"
+                          disabled={hasIt}
+                          onClick={() => void handleQuickAddIngredient(ingName)}
+                          className={`chip !text-[0.74rem] ${hasIt ? 'st1' : ''}`}
+                        >
+                          {hasIt ? '✓ ' : '+ '}
+                          {ingName}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {showShopping && (
         <div className="panel mt-3 !border-[var(--ac)]">
@@ -597,7 +920,20 @@ export const StockView: React.FC<{
         <label>
           3. Selecionar item ({catalogMatches.length} encontrado{catalogMatches.length === 1 ? '' : 's'})
         </label>
-        <select value={selectedName} onChange={(e) => setSelectedName(e.target.value)}>
+        <select
+          value={selectedName}
+          onChange={(e) => {
+            const val = e.target.value;
+            setSelectedName(val);
+            if (val && val !== '__custom__') {
+              const catFound =
+                stockCat || allCatalogEntries.find((en) => en.name === val)?.category || null;
+              const def = getDefaultUnitForIngredient(val, catFound);
+              setUnit(def.unit);
+              setSizeMl(def.defaultSize ? String(def.defaultSize) : '');
+            }
+          }}
+        >
           <option value="">— selecione ou cadastre novo —</option>
           {catalogMatches.map((entry) => (
             <option key={`${entry.category}-${entry.name}`} value={entry.name}>
@@ -613,7 +949,15 @@ export const StockView: React.FC<{
               <label>Nome do novo item *</label>
               <input
                 value={customName}
-                onChange={(e) => setCustomName(e.target.value)}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setCustomName(v);
+                  if (v.trim().length >= 3) {
+                    const def = getDefaultUnitForIngredient(v, stockCat || customCat);
+                    setUnit(def.unit);
+                    if (def.defaultSize) setSizeMl(String(def.defaultSize));
+                  }
+                }}
                 placeholder="Ex: Xarope de hibisco caseiro"
               />
             </div>
@@ -632,39 +976,56 @@ export const StockView: React.FC<{
           </div>
         )}
 
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-2">
+          <div>
+            <label className="!mt-0">Unidade de medida (como você compra)</label>
+            <select value={unit} onChange={(e) => setUnit(e.target.value as StockUnitId)}>
+              {STOCK_UNITS.map((u) => (
+                <option key={u.id} value={u.id}>
+                  {u.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="!mt-0">{activeUnitMeta.costLabel}</label>
+            <input
+              type="number"
+              step="0.1"
+              min="0"
+              value={cost}
+              onChange={(e) => setCost(e.target.value)}
+              placeholder={`Ex: R$ por ${activeUnitMeta.short}`}
+            />
+          </div>
+        </div>
+
         <div className="row mt-2">
           <input
             value={brand}
             onChange={(e) => setBrand(e.target.value)}
-            placeholder="Marca"
+            placeholder="Marca (opcional)"
             className="flex-1"
           />
-          <input
-            type="number"
-            value={sizeMl}
-            onChange={(e) => setSizeMl(e.target.value)}
-            placeholder="ml"
-            className="!w-[80px]"
-          />
+          {activeUnitMeta.showSize && (
+            <input
+              type="number"
+              value={sizeMl}
+              onChange={(e) => setSizeMl(e.target.value)}
+              placeholder={activeUnitMeta.sizePlaceholder || 'ml'}
+              className="!w-[105px]"
+            />
+          )}
         </div>
         <div className="row mt-2">
           <input
             value={variant}
             onChange={(e) => setVariant(e.target.value)}
-            placeholder="Sabor / variação"
+            placeholder="Sabor / variação (opcional)"
             className="flex-1"
           />
-          <input
-            type="number"
-            step="0.1"
-            min="0"
-            value={cost}
-            onChange={(e) => setCost(e.target.value)}
-            placeholder="Custo R$"
-            className="!w-[100px]"
-          />
           <button type="button" className="b sm" onClick={() => void handleAdd()}>
-            Add
+            + Adicionar ao estoque
           </button>
         </div>
         {err && <p className="err">{err}</p>}
@@ -697,15 +1058,32 @@ export const StockView: React.FC<{
       <div className="list mt-3.5">
         {list.length > 0 ? (
           list.map((i) => {
+            const unitId =
+              (i.unit as StockUnitId) || getDefaultUnitForIngredient(i.name, i.category).unit;
+            const uMeta = getUnitMeta(unitId);
             const meta: string[] = [];
+            meta.push(`📏 ${uMeta.label}`);
             if (i.brand) meta.push(i.brand);
             if (i.variant) meta.push(i.variant);
-            if (i.size_ml) meta.push(`${i.size_ml} ml`);
-            if (i.unit_cost != null) meta.push(`custo ${money(i.unit_cost)}`);
+            if (i.size_ml && uMeta.showSize) meta.push(`${i.size_ml} ml`);
+            if (i.qty != null) meta.push(`qtd: ${i.qty} ${uMeta.short}`);
+            if (i.min_qty != null && Number(i.min_qty) > 0) meta.push(`mín: ${i.min_qty}`);
+            if (i.unit_cost != null && Number(i.unit_cost) > 0) {
+              meta.push(`custo ${money(i.unit_cost)} / ${uMeta.short}`);
+            } else {
+              meta.push(`custo não informado (R$/${uMeta.short})`);
+            }
+            const isLowStock =
+              i.in_stock && Number(i.min_qty || 0) > 0 && Number(i.qty || 0) <= Number(i.min_qty || 0);
             return (
               <div key={i.id} className="!items-start">
                 <div className="flex-1">
-                  <b>{i.name}</b>
+                  <b>{i.name}</b>{' '}
+                  {isLowStock && (
+                    <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-300">
+                      ⚠️ Estoque baixo
+                    </span>
+                  )}
                   {meta.length > 0 && (
                     <>
                       <br />
@@ -757,19 +1135,60 @@ export const StockView: React.FC<{
               ← Voltar
             </button>
             <h1 className="mt-3">Editar {editingItem.name}</h1>
-            <label>Marca</label>
-            <input value={edBrand} onChange={(e) => setEdBrand(e.target.value)} />
-            <label>Sabor / variação</label>
-            <input value={edVariant} onChange={(e) => setEdVariant(e.target.value)} />
-            <label>Tamanho (ml)</label>
-            <input type="number" value={edSize} onChange={(e) => setEdSize(e.target.value)} />
-            <label>Custo (R$)</label>
+            <label>Unidade de medida (como você compra)</label>
+            <select value={edUnit} onChange={(e) => setEdUnit(e.target.value as StockUnitId)}>
+              {STOCK_UNITS.map((u) => (
+                <option key={u.id} value={u.id}>
+                  {u.label}
+                </option>
+              ))}
+            </select>
+            <label>{editUnitMeta.costLabel}</label>
             <input
               type="number"
               step="0.1"
               value={edCost}
               onChange={(e) => setEdCost(e.target.value)}
+              placeholder={`R$ por ${editUnitMeta.short}`}
             />
+            {editUnitMeta.showSize && (
+              <>
+                <label>Tamanho ({editUnitMeta.sizePlaceholder || 'ml'})</label>
+                <input type="number" value={edSize} onChange={(e) => setEdSize(e.target.value)} />
+              </>
+            )}
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label>Qtd atual ({editUnitMeta.short})</label>
+                <input
+                  type="number"
+                  min={0}
+                  value={edQty}
+                  onChange={(e) => setEdQty(e.target.value)}
+                  placeholder="Ex: 5"
+                />
+              </div>
+              <div>
+                <label>Estoque mínimo (alerta)</label>
+                <input
+                  type="number"
+                  min={0}
+                  value={edMinQty}
+                  onChange={(e) => setEdMinQty(e.target.value)}
+                  placeholder="Ex: 2"
+                />
+              </div>
+            </div>
+            <label>Fornecedor (opcional)</label>
+            <input
+              value={edSupplier}
+              onChange={(e) => setEdSupplier(e.target.value)}
+              placeholder="Ex: Distribuidora Silva"
+            />
+            <label>Marca</label>
+            <input value={edBrand} onChange={(e) => setEdBrand(e.target.value)} />
+            <label>Sabor / variação</label>
+            <input value={edVariant} onChange={(e) => setEdVariant(e.target.value)} />
             <button type="button" className="b full mt-3" onClick={() => void saveEdit()}>
               Salvar
             </button>
@@ -783,17 +1202,71 @@ export const StockView: React.FC<{
 
 export const QueueView: React.FC<{
   bar: Bar;
+  role?: string | null;
+  actorName?: string;
   orders: Order[];
   recipes: Recipe[];
+  items?: BarItem[];
+  prices?: Record<string, number>;
+  tableTabs?: TableTab[];
+  tableCalls?: TableCallAlert[];
+  defaultStation?: 'all' | 'bar' | 'cozinha' | 'garcom';
   onBarUpdated: (bar: Bar) => void;
+  onItemsChange?: (items: BarItem[]) => void;
   onRefreshOrders: () => Promise<void>;
-}> = ({ bar, orders, recipes, onBarUpdated, onRefreshOrders }) => {
+  onRefreshTableTabs?: () => Promise<void>;
+  onResolveCall?: (id: string) => Promise<void>;
+  onRecipesUpdated?: () => Promise<void>;
+  onGoStock?: () => void;
+  onOpenCatalog?: () => void;
+  onToast?: (msg: string) => void;
+}> = ({
+  bar,
+  role,
+  actorName = 'Equipe',
+  orders,
+  recipes,
+  items = [],
+  prices = {},
+  tableTabs = [],
+  tableCalls = [],
+  defaultStation = 'all',
+  onBarUpdated,
+  onItemsChange,
+  onRefreshOrders,
+  onRefreshTableTabs,
+  onResolveCall,
+  onRecipesUpdated,
+  onGoStock,
+  onOpenCatalog,
+  onToast,
+}) => {
+  const [stationMode, setStationMode] = useState<'all' | 'bar' | 'cozinha' | 'garcom'>(
+    defaultStation
+  );
   const [clientFilter, setClientFilter] = useState('');
   const [clientSearch, setClientSearch] = useState('');
 
+  useEffect(() => {
+    setStationMode(defaultStation);
+  }, [defaultStation]);
+
   const open = bar.accepting_orders !== false;
   const activeAll = orders.filter((o) => o.status !== 'done');
+  const recipeMapById = new Map(recipes.map((r) => [r.id, r]));
   const recipeNameById = new Map(recipes.map((r) => [r.id, r.name]));
+
+  const barStationCount = activeAll.filter((o) => {
+    const rec = recipeMapById.get(o.recipe_id);
+    return (o.station || (rec && getRecipeItemType(rec) === 'petisco' ? 'cozinha' : 'bar')) === 'bar';
+  }).length;
+  const kitchenStationCount = activeAll.filter((o) => {
+    const rec = recipeMapById.get(o.recipe_id);
+    return (
+      (o.station || (rec && getRecipeItemType(rec) === 'petisco' ? 'cozinha' : 'bar')) === 'cozinha'
+    );
+  }).length;
+  const readyWaiterCount = activeAll.filter((o) => o.status === 'ready').length;
 
   // Lista única (sem nomes duplicados) de clientes ativos agora na fila
   const activeClientMap = new Map<string, { label: string; count: number }>();
@@ -883,13 +1356,58 @@ export const QueueView: React.FC<{
     if (res.error && status === 'ready') {
       res = await sb.from('orders').update({ status }).in('id', ids);
     }
+
+    if (status === 'ready') {
+      playStationAlert('garcom');
+      const allLow: string[] = [];
+      let curItems = [...items];
+      for (const id of ids) {
+        const ord = orders.find((x) => x.id === id);
+        if (!ord) continue;
+        const rec = recipeMapById.get(ord.recipe_id);
+        const ded = await autoDeductStockForOrder(
+          bar,
+          rec,
+          Number(ord.qty) || 1,
+          curItems,
+          (next) => {
+            curItems = next;
+          }
+        );
+        allLow.push(...ded.lowStockNames);
+      }
+      if (onItemsChange && curItems !== items) onItemsChange(curItems);
+      if (allLow.length > 0 && onToast) {
+        onToast(`⚠️ Estoque baixo: ${Array.from(new Set(allLow)).join(', ')}`);
+      }
+    }
+
+    await onRefreshOrders();
+  };
+
+  const handleSingleStatus = async (orderId: string, status: Order['status']) => {
+    if (status === 'pending') return;
+    await handleBatchStatus([orderId], status);
+  };
+
+  const handleCancelOrder = async (ord: Order, reason: string) => {
+    await sb.from('orders').delete().eq('id', ord.id);
+    await logBarAudit(
+      bar,
+      'Cancelamento de pedido',
+      `${ord.qty}x ${ord.recipe_name || recipeNameById.get(ord.recipe_id) || 'Item'} (${ord.table_label || ord.client_name || 'Balcão'}) — Motivo: ${reason}`,
+      actorName,
+      role || 'staff',
+      onBarUpdated
+    );
+    if (onToast) onToast('Pedido cancelado e registrado na auditoria.');
     await onRefreshOrders();
   };
 
   return (
     <div>
       <div className="row sp">
-        <h1>Fila de Pedidos</h1>
+        <h1>Fila & Estações</h1>
         <button
           type="button"
           className={`b sm ${open ? 'g' : 'ok'}`}
@@ -899,7 +1417,122 @@ export const QueueView: React.FC<{
         </button>
       </div>
       {!open && <p className="warn-txt">Pedidos pausados no cardápio agora.</p>}
-      <p className="mu">Pedidos iguais do mesmo drink são agrupados para preparar juntos.</p>
+
+      {/* Seletor de Estações Operacionais: Geral | Barman | Cozinha | Garçom */}
+      <div className="chips !flex-wrap !overflow-visible mt-2.5 mb-3">
+        <button
+          type="button"
+          className={`chip ${stationMode === 'all' ? 'on' : ''}`}
+          onClick={() => setStationMode('all')}
+        >
+          📋 Geral ({activeAll.length})
+        </button>
+        <button
+          type="button"
+          className={`chip ${stationMode === 'bar' ? 'on' : ''}`}
+          onClick={() => setStationMode('bar')}
+        >
+          🍸 Barman ({barStationCount})
+        </button>
+        <button
+          type="button"
+          className={`chip ${stationMode === 'cozinha' ? 'on' : ''}`}
+          onClick={() => setStationMode('cozinha')}
+        >
+          🍳 Cozinha ({kitchenStationCount})
+        </button>
+        <button
+          type="button"
+          className={`chip ${stationMode === 'garcom' ? 'on' : ''}`}
+          onClick={() => setStationMode('garcom')}
+        >
+          🍽️ Garçom {readyWaiterCount > 0 ? `(🔔 ${readyWaiterCount})` : ''}
+        </button>
+      </div>
+
+      {stationMode === 'bar' && (
+        <BarmanStationView
+          bar={bar}
+          role={role}
+          actorName={actorName}
+          orders={orders}
+          recipes={recipes}
+          onSetOrderStatus={handleSingleStatus}
+          onCancelOrder={handleCancelOrder}
+          onGoStock={onGoStock}
+          onRefresh={onRefreshOrders}
+        />
+      )}
+
+      {stationMode === 'cozinha' && (
+        <KitchenStationView
+          bar={bar}
+          role={role}
+          orders={orders}
+          recipes={recipes}
+          onSetOrderStatus={handleSingleStatus}
+          onCancelOrder={handleCancelOrder}
+          onRecipesUpdated={onRecipesUpdated || (async () => {})}
+          onOpenCatalog={onOpenCatalog}
+          onRefresh={onRefreshOrders}
+          onToast={onToast || (() => {})}
+        />
+      )}
+
+      {tableCalls.length > 0 && stationMode !== 'garcom' && (
+        <div className="panel !border-amber-400/60 bg-amber-500/10 mb-3 space-y-1.5">
+          <div className="text-xs font-bold text-amber-200">
+            🔔 {tableCalls.length} chamado(s) de mesa aguardando atendimento
+          </div>
+          {tableCalls.map((c) => (
+            <div
+              key={c.id}
+              className="flex items-center justify-between gap-2 text-xs bg-black/20 rounded-lg px-2.5 py-1.5"
+            >
+              <div>
+                <b>{c.kind === 'bill' ? '🧾 Pediu a Conta' : '🙋 Chamou Garçom'}</b> ·{' '}
+                {c.table_label ? `${c.table_label} (${c.client_name})` : c.client_name}
+                {c.note ? ` — ${c.note}` : ''}
+              </div>
+              {onResolveCall && (
+                <button
+                  type="button"
+                  className="b ok sm !py-1"
+                  onClick={() => void onResolveCall(c.id)}
+                >
+                  ✓ Atendido
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {stationMode === 'garcom' && (
+        <WaiterStationView
+          bar={bar}
+          role={role}
+          actorName={actorName}
+          orders={orders}
+          recipes={recipes}
+          items={items}
+          prices={prices}
+          tableTabs={tableTabs}
+          tableCalls={tableCalls}
+          onResolveCall={onResolveCall}
+          onSetOrderStatus={handleSingleStatus}
+          onBarUpdated={onBarUpdated}
+          onRefreshAll={async () => {
+            await onRefreshOrders();
+            if (onRefreshTableTabs) await onRefreshTableTabs();
+          }}
+          onToast={onToast || (() => {})}
+        />
+      )}
+
+      {stationMode === 'all' && (
+        <>
+          <p className="mu">Pedidos iguais do mesmo item são agrupados para preparar juntos.</p>
 
       {activeClients.length > 0 && (
         <div className="panel mt-3">
@@ -995,6 +1628,8 @@ export const QueueView: React.FC<{
           </p>
         )}
       </div>
+        </>
+      )}
     </div>
   );
 };
@@ -1332,12 +1967,15 @@ export const PricesView: React.FC<{
     });
   }, [prices]);
 
-  // Trava: só entram na precificação receitas com TODOS os ingredientes em estoque (in_stock = true)
-  const availableRecipes = recipes.filter((r) => makeDrink(r, items));
+  // Trava: só entram na precificação receitas deste bar com TODOS os ingredientes em estoque (in_stock = true)
+  const scopedBarRecipes = filterRecipesForBar(recipes, bar.id);
+  const availableRecipes = scopedBarRecipes.filter((r) => makeDrink(r, items));
   const makeableCount = availableRecipes.length;
   const readyForMenu = availableRecipes.filter((r) => prices[r.id] != null);
-  const pricedMissingStock = recipes.filter((r) => !makeDrink(r, items) && prices[r.id] != null);
-  const pricedTotal = recipes.filter((r) => prices[r.id] != null).length;
+  const pricedMissingStock = scopedBarRecipes.filter(
+    (r) => !makeDrink(r, items) && prices[r.id] != null
+  );
+  const pricedTotal = scopedBarRecipes.filter((r) => prices[r.id] != null).length;
   const unpricedAvailable = availableRecipes.filter((r) => prices[r.id] == null);
 
   const scopedMissingCount = unpricedAvailable.length;
@@ -1907,6 +2545,17 @@ export const MoreView: React.FC<{
   onOpenQr: () => void;
   onOpenShakers: () => void;
   onOpenCreateDrink: (editExisting: boolean) => void;
+  onOpenStation?: (station: 'bar' | 'cozinha' | 'garcom') => void;
+  onOpenManagement?: (
+    subtab:
+      | 'dashboard'
+      | 'compras'
+      | 'happyhour'
+      | 'fidelidade'
+      | 'reservas'
+      | 'modificadores'
+      | 'config'
+  ) => void;
   onNavigate: (tab: string, careerMode?: 'store' | 'personal') => void;
   onOpenSwitchBar: () => void;
 }> = ({
@@ -1919,6 +2568,8 @@ export const MoreView: React.FC<{
   onOpenQr,
   onOpenShakers,
   onOpenCreateDrink,
+  onOpenStation,
+  onOpenManagement,
   onNavigate,
   onOpenSwitchBar,
 }) => {
@@ -2012,14 +2663,156 @@ export const MoreView: React.FC<{
         <button
           type="button"
           className="menu-row-item"
-          onClick={() => onNavigate('cashier')}
+          onClick={() => onNavigate('catalog')}
         >
           <div className="menu-row-text">
-            <div className="menu-row-title">💵 Caixa</div>
-            <div className="menu-row-sub">Comandas, totais e fechamento</div>
+            <div className="menu-row-title">🍟 Petiscos, Comidas & Avulsos</div>
+            <div className="menu-row-sub">
+              Cadastre porções, lanches, cervejas, energéticos e latas no cardápio
+            </div>
           </div>
           <span className="menu-row-chev">›</span>
         </button>
+
+        {onOpenStation && (
+          <div className="panel mt-1 mb-1">
+            <div className="text-xs font-bold uppercase tracking-wider text-[var(--ac)] mb-2">
+              🎯 Áreas Operacionais da Equipe
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              <button
+                type="button"
+                className="b g sm"
+                onClick={() => onOpenStation('bar')}
+              >
+                🍸 Barman
+              </button>
+              <button
+                type="button"
+                className="b g sm"
+                onClick={() => onOpenStation('cozinha')}
+              >
+                🍳 Cozinha
+              </button>
+              <button
+                type="button"
+                className="b g sm"
+                onClick={() => onOpenStation('garcom')}
+              >
+                🍽️ Garçom
+              </button>
+            </div>
+          </div>
+        )}
+
+        <button
+          type="button"
+          className="menu-row-item"
+          onClick={() => onNavigate('cashier')}
+        >
+          <div className="menu-row-text">
+            <div className="menu-row-title">💵 Caixa & Turno</div>
+            <div className="menu-row-sub">
+              Abertura/fechamento, maquininha/Pix/dinheiro, 10%, divisão e pré-conta
+            </div>
+          </div>
+          <span className="menu-row-chev">›</span>
+        </button>
+
+        {onOpenManagement && (
+          <>
+            <button
+              type="button"
+              className="menu-row-item"
+              onClick={() => onOpenManagement('happyhour')}
+            >
+              <div className="menu-row-text">
+                <div className="menu-row-title">
+                  🍻 Happy Hour Automático
+                  {getActiveHappyHours(bar).length > 0 && (
+                    <span className="badge-warn !bg-emerald-500/20 !text-emerald-300">
+                      ATIVO AGORA
+                    </span>
+                  )}
+                </div>
+                <div className="menu-row-sub">
+                  Cadastre promoções por dia e horário que ligam e desligam sozinhas
+                </div>
+              </div>
+              <span className="menu-row-chev">›</span>
+            </button>
+
+            <button
+              type="button"
+              className="menu-row-item"
+              onClick={() => onOpenManagement('fidelidade')}
+            >
+              <div className="menu-row-text">
+                <div className="menu-row-title">🎁 Cartão Fidelidade & Cashback</div>
+                <div className="menu-row-sub">
+                  Carimbos ou cashback % por cliente com resgate automático no Caixa
+                </div>
+              </div>
+              <span className="menu-row-chev">›</span>
+            </button>
+
+            <button
+              type="button"
+              className="menu-row-item"
+              onClick={() => onOpenManagement('dashboard')}
+            >
+              <div className="menu-row-text">
+                <div className="menu-row-title">📊 Relatórios, Financeiro & Lucro</div>
+                <div className="menu-row-sub">
+                  Faturamento, CMV, lucro líquido, top vendidos, picos e exportação CSV
+                </div>
+              </div>
+              <span className="menu-row-chev">›</span>
+            </button>
+
+            <button
+              type="button"
+              className="menu-row-item"
+              onClick={() => onOpenManagement('compras')}
+            >
+              <div className="menu-row-text">
+                <div className="menu-row-title">🛒 Compras, Fornecedores & Perdas</div>
+                <div className="menu-row-sub">
+                  Lista automática de reposição, WhatsApp, quebras e cortesias
+                </div>
+              </div>
+              <span className="menu-row-chev">›</span>
+            </button>
+
+            <button
+              type="button"
+              className="menu-row-item"
+              onClick={() => onOpenManagement('reservas')}
+            >
+              <div className="menu-row-text">
+                <div className="menu-row-title">📅 Reservas de Mesa & Clientes (CRM)</div>
+                <div className="menu-row-sub">
+                  Agenda de reservas e ranking automático dos clientes frequentes
+                </div>
+              </div>
+              <span className="menu-row-chev">›</span>
+            </button>
+
+            <button
+              type="button"
+              className="menu-row-item"
+              onClick={() => onOpenManagement('config')}
+            >
+              <div className="menu-row-text">
+                <div className="menu-row-title">🛡️ Pix, Bluetooth, Adicionais & Permissões</div>
+                <div className="menu-row-sub">
+                  Chave Pix da loja, impressora Bluetooth ESC/POS, baixa automática e RBAC
+                </div>
+              </div>
+              <span className="menu-row-chev">›</span>
+            </button>
+          </>
+        )}
 
         {canEditMenu && (
           <button
@@ -2028,8 +2821,10 @@ export const MoreView: React.FC<{
             onClick={() => onNavigate('studio')}
           >
             <div className="menu-row-text">
-              <div className="menu-row-title">🎨 Editor do cardápio</div>
-              <div className="menu-row-sub">Logo, layout, cores, presets e prévia ao vivo</div>
+              <div className="menu-row-title">🎨 Editor: Perfil, Cardápio & Arte QR</div>
+              <div className="menu-row-sub">
+                Personalize o perfil da loja, cardápio, promoções e placas de QR Code
+              </div>
             </div>
             <span className="menu-row-chev">›</span>
           </button>
@@ -2050,7 +2845,7 @@ export const MoreView: React.FC<{
               </div>
               <div className="menu-row-sub">
                 {hasPricing && unpricedCount > 0
-                  ? `${unpricedCount} drink(s) do estoque aguardando preço para o cardápio`
+                  ? `${unpricedCount} item(ns) do estoque aguardando preço para o cardápio`
                   : 'Preços dos drinks (cardápio pago)'}
               </div>
             </div>

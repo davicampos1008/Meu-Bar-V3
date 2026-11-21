@@ -1,5 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { ALL_TAGS, CATS } from '../lib/catalog';
+import {
+  getActiveHappyHours,
+  getBarOpsData,
+  getEffectiveItemPrice,
+  sendTableCall,
+} from '../lib/opsUtils';
 import { sb } from '../lib/supabase';
 import {
   applyBarTheme,
@@ -8,13 +14,21 @@ import {
   getBarMenuDesign,
   getMissingIngredientsForRecipe,
   getPromoAdjustedPrice,
+  getRecipeItemType,
   makeDrink,
   money,
   norm,
   recipeTags,
   today,
 } from '../lib/utils';
-import type { Bar, BarItem, ClientOrderLocal, MenuBlockId, Recipe } from '../types/meubar';
+import type {
+  Bar,
+  BarItem,
+  ClientOrderLocal,
+  ItemType,
+  MenuBlockId,
+  Recipe,
+} from '../types/meubar';
 import {
   buildMenuBackgroundStyle,
   FooterOrnamentView,
@@ -77,6 +91,7 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
   const [checkingName, setCheckingName] = useState(false);
   const [tableState, setTableState] = useState<TableServerState | null>(null);
   const [tableSession, setTableSession] = useState<TableSession | null>(null);
+  const [menuSection, setMenuSection] = useState<ItemType>('drink');
   const [cat, setCat] = useState('Todas');
   const [query, setQuery] = useState('');
   const [tags, setTags] = useState<Set<string>>(new Set());
@@ -92,6 +107,18 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
   const [qty, setQty] = useState(1);
   const [orderErr, setOrderErr] = useState('');
   const [sending, setSending] = useState(false);
+
+  // Call Waiter / Request Bill state
+  const [callModal, setCallModal] = useState<null | 'waiter' | 'bill'>(null);
+  const [callNote, setCallNote] = useState('');
+  const [callingStaff, setCallingStaff] = useState(false);
+  const [lastCallAt, setLastCallAt] = useState(0);
+  const [hhTick, setHhTick] = useState(0);
+
+  useEffect(() => {
+    const id = setInterval(() => setHhTick((t) => t + 1), 30000);
+    return () => clearInterval(id);
+  }, []);
 
   const tableSessionRef = useRef<TableSession | null>(null);
   tableSessionRef.current = tableSession;
@@ -229,6 +256,7 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
       const data = res.data as {
         bar?: MenuBarData;
         items?: MenuItem[];
+        stock_items?: BarItem[];
         active_clients?: string[];
       } | null;
       if (!data || !data.bar) {
@@ -245,7 +273,24 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
       setActiveClients(Array.isArray(data.active_clients) ? data.active_clients : []);
 
       let resolvedItems: MenuItem[] = Array.isArray(data.items) ? data.items : [];
+      let liveStock: BarItem[] | null = Array.isArray(data.stock_items) ? data.stock_items : null;
       const diag: string[] = [];
+
+      // Tenta ler bar_items (se público ou autenticado) para dupla checagem em tempo real do estoque
+      if (!liveStock) {
+        try {
+          const riCheck = await sb.from('bar_items').select('*').eq('bar_id', barId);
+          if (!riCheck.error && Array.isArray(riCheck.data)) {
+            liveStock = riCheck.data as BarItem[];
+          }
+        } catch {
+          // sem permissão anônima direta — confia no get_menu
+        }
+      }
+
+      if (liveStock && resolvedItems.length > 0) {
+        resolvedItems = resolvedItems.filter((r) => makeDrink(r, liveStock!));
+      }
 
       // Fallback autenticado: garante que receitas/preços recém-criados apareçam e mostra diagnóstico claro para o dono se algo faltar
       if (resolvedItems.length === 0) {
@@ -268,7 +313,7 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
             .map((r) => ({ ...r, price: prMap[r.id] ?? null }));
 
           if (resolvedItems.length === 0) {
-            const stockedCount = barItems.filter((i) => i.in_stock).length;
+            const stockedCount = barItems.filter((i) => i.in_stock && (i.qty == null || i.qty > 0)).length;
             const makeable = allRecs.filter((r) => makeDrink(r, barItems));
             const pricedRecs = allRecs.filter((r) => prMap[r.id] != null);
 
@@ -831,10 +876,20 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
   const colorText = bar.color_text || '#f6f1ea';
   const bgStyle = buildMenuBackgroundStyle(colorBg, design, accent);
 
-  const cats = ['Todas', ...Array.from(new Set(items.map((i) => i.category)))];
-  const filtered = items.filter((i) => {
+  const drinksItems = items.filter((i) => getRecipeItemType(i) === 'drink');
+  const petiscosItems = items.filter((i) => getRecipeItemType(i) === 'petisco');
+  const avulsosItems = items.filter((i) => getRecipeItemType(i) === 'avulso');
+  const sectionItems =
+    menuSection === 'petisco'
+      ? petiscosItems
+      : menuSection === 'avulso'
+        ? avulsosItems
+        : drinksItems;
+
+  const cats = ['Todas', ...Array.from(new Set(sectionItems.map((i) => i.category)))];
+  const filtered = sectionItems.filter((i) => {
     if (cat !== 'Todas' && i.category !== cat) return false;
-    if (tags.size > 0) {
+    if (menuSection === 'drink' && tags.size > 0) {
       const t = new Set(recipeTags(i));
       for (const x of tags) {
         if (!t.has(x)) return false;
@@ -843,8 +898,9 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
     if (query.trim()) {
       const q = query.trim().toLowerCase();
       const inName = (i.name || '').toLowerCase().includes(q);
+      const inDesc = (i.story || i.description || '').toLowerCase().includes(q);
       const inIng = (i.ingredients || []).some((x) => (x.n || '').toLowerCase().includes(q));
-      if (!inName && !inIng) return false;
+      if (!inName && !inIng && !inDesc) return false;
     }
     return true;
   });
@@ -859,14 +915,53 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
     setOrderErr('');
   };
 
+  const nowForHh = new Date(Date.now() + hhTick * 0);
+  const activeHappyHours = getActiveHappyHours(bar, nowForHh);
+
+  const getItemFinalPrice = (r: MenuItem) => {
+    const promoRes = getPromoAdjustedPrice(r.price, r.category, activePromo);
+    const hhRes = getEffectiveItemPrice(r.price, r, bar, nowForHh);
+    if (
+      hhRes.discounted &&
+      hhRes.finalPrice != null &&
+      (promoRes.finalPrice == null || hhRes.finalPrice <= promoRes.finalPrice)
+    ) {
+      return {
+        finalPrice: hhRes.finalPrice,
+        originalPrice: hhRes.originalPrice,
+        discounted: true,
+        badge: hhRes.badge,
+        happyHourName: hhRes.ruleName,
+      };
+    }
+    return {
+      finalPrice: promoRes.finalPrice,
+      originalPrice: promoRes.originalPrice,
+      discounted: promoRes.discounted,
+      badge: undefined as string | undefined,
+      happyHourName: undefined as string | undefined,
+    };
+  };
+
+  const filteredWithHappyHour = filtered.map((r) => {
+    const eff = getEffectiveItemPrice(r.price, r, bar, nowForHh);
+    if (eff.discounted && eff.finalPrice != null) {
+      return { ...r, price: eff.finalPrice };
+    }
+    return r;
+  });
+
   const handlePlaceOrder = async (recipe: MenuItem, orderQty: number, orderNote: string) => {
     setSending(true);
     setOrderErr('');
+    const priceInfo = getItemFinalPrice(recipe);
+    const hhNote = priceInfo.happyHourName ? `[${priceInfo.happyHourName}]` : '';
+    const joinedNote = [hhNote, orderNote.trim()].filter(Boolean).join(' · ');
     const finalNote = cleanMesa
-      ? orderNote.trim()
-        ? `${cleanMesa} · ${orderNote.trim()}`
+      ? joinedNote
+        ? `${cleanMesa} · ${joinedNote}`
         : cleanMesa
-      : orderNote.trim();
+      : joinedNote;
 
     let res = await sb.rpc('place_order', {
       p_bar: barId,
@@ -901,7 +996,6 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
       return;
     }
 
-    const { finalPrice } = getPromoAdjustedPrice(recipe.price, recipe.category, activePromo);
     const next = [
       ...mine,
       {
@@ -909,7 +1003,7 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
         recipe_id: recipe.id,
         name: recipe.name,
         qty: orderQty,
-        price: finalPrice ?? recipe.price,
+        price: priceInfo.finalPrice ?? recipe.price,
         status: 'pending',
         d: today(),
         tableTabId: tableSession?.tabId,
@@ -918,6 +1012,34 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
     saveMine(next);
     setSelectedRecipe(null);
     showToast(`Pedido enviado, ${name}!`);
+  };
+
+  const handleSendStaffCall = async (kind: 'waiter' | 'bill', customNote: string) => {
+    const elapsed = Date.now() - lastCallAt;
+    if (elapsed < 20000) {
+      const waitSec = Math.ceil((20000 - elapsed) / 1000);
+      showToast(`Aguarde ${waitSec}s antes de chamar novamente.`);
+      return;
+    }
+    setCallingStaff(true);
+    try {
+      await sendTableCall(barId, {
+        table_label: tableSession?.table || cleanMesa || null,
+        client_name: name || 'Cliente',
+        kind,
+        note: customNote.trim() || null,
+      });
+      setLastCallAt(Date.now());
+      setCallModal(null);
+      setCallNote('');
+      showToast(
+        kind === 'bill'
+          ? '🧾 Conta solicitada! O garçom já foi avisado.'
+          : '🙋 Garçom chamado! Já avisamos a equipe.'
+      );
+    } finally {
+      setCallingStaff(false);
+    }
   };
 
   const statusLabels: Record<string, string> = {
@@ -938,6 +1060,11 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
     }
 
     if (blockId === 'filters') {
+      const tabBtns: { id: ItemType; emoji: string; label: string; count: number }[] = [
+        { id: 'drink', emoji: '🍸', label: 'Drinks', count: drinksItems.length },
+        { id: 'petisco', emoji: '🍟', label: 'Petiscos', count: petiscosItems.length },
+        { id: 'avulso', emoji: '🍺', label: 'Avulsos', count: avulsosItems.length },
+      ];
       return (
         <div>
           {!bar.open && (
@@ -945,22 +1072,84 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
               Pedidos pausados no momento. Tente de novo em instantes.
             </p>
           )}
+
+          {/* 3 Abas Principais do Cardápio: Drinks | Petiscos | Avulsos */}
+          <div
+            className="grid grid-cols-3 gap-1.5 mt-3 p-1 rounded-2xl border"
+            style={{
+              background: `${surface}dd`,
+              borderColor: `${accent}44`,
+            }}
+          >
+            {tabBtns.map((tb) => {
+              const active = menuSection === tb.id;
+              return (
+                <button
+                  key={tb.id}
+                  type="button"
+                  onClick={() => {
+                    setMenuSection(tb.id);
+                    setCat('Todas');
+                    if (tb.id !== 'drink') {
+                      setShowTags(false);
+                      setTags(new Set());
+                    }
+                  }}
+                  className="py-2.5 px-2 rounded-xl text-xs sm:text-sm font-bold border-0 cursor-pointer transition-all flex items-center justify-center gap-1"
+                  style={
+                    active
+                      ? {
+                          background: accent,
+                          color: '#121015',
+                          boxShadow: `0 4px 14px ${accent}44`,
+                        }
+                      : {
+                          background: 'transparent',
+                          color: colorText,
+                          opacity: 0.78,
+                        }
+                  }
+                >
+                  <span>{tb.emoji}</span>
+                  <span>{tb.label}</span>
+                  <span
+                    className="text-[10px] px-1.5 py-0.2 rounded-full font-extrabold"
+                    style={{
+                      background: active ? 'rgba(0,0,0,0.18)' : `${accent}24`,
+                      color: active ? '#121015' : accent,
+                    }}
+                  >
+                    {tb.count}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Buscar drink ou ingrediente…"
+            placeholder={
+              menuSection === 'petisco'
+                ? 'Buscar petisco, porção ou lanche…'
+                : menuSection === 'avulso'
+                  ? 'Buscar cerveja, energético ou refrigerante…'
+                  : 'Buscar drink ou ingrediente…'
+            }
             className="mt-3"
           />
 
-          <div className="row mt-2.5">
-            <button
-              type="button"
-              className="b g sm"
-              onClick={() => setShowTags((s) => !s)}
-            >
-              ✨ O que tomar?
-            </button>
-          </div>
+          {menuSection === 'drink' && (
+            <div className="row mt-2.5">
+              <button
+                type="button"
+                className="b g sm"
+                onClick={() => setShowTags((s) => !s)}
+              >
+                ✨ O que tomar?
+              </button>
+            </div>
+          )}
 
           {cats.length > 2 && (
             <div className="chips">
@@ -976,7 +1165,7 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
             </div>
           )}
 
-          {showTags && (
+          {menuSection === 'drink' && showTags && (
             <>
               <div className="chips !flex-wrap !overflow-visible">
                 {ALL_TAGS.map((t) => (
@@ -1014,17 +1203,29 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
     }
 
     if (blockId === 'drinks') {
-      if (items.length === 0) {
+      if (sectionItems.length === 0) {
         return (
           <div className="panel mt-3">
-            <p className="mu">Nenhum drink disponível no cardápio agora.</p>
-            {priced && (
+            <p className="mu">
+              {menuSection === 'petisco'
+                ? '🍟 Nenhum petisco disponível no cardápio agora.'
+                : menuSection === 'avulso'
+                  ? '🍺 Nenhuma bebida avulsa disponível no cardápio agora.'
+                  : '🍸 Nenhum drink disponível no cardápio agora.'}
+            </p>
+            {menuSection === 'drink' && priced && (
               <p className="mu mt-1 text-[0.78rem]">
                 Assim que houver ingredientes no estoque e preço salvo para o drink, ele aparece aqui
                 automaticamente em segundos.
               </p>
             )}
-            {ownerDiag.length > 0 && (
+            {menuSection !== 'drink' && (
+              <p className="mu mt-1 text-[0.78rem]">
+                Assim que o estabelecimento cadastrar itens nesta aba, eles aparecem aqui
+                automaticamente.
+              </p>
+            )}
+            {menuSection === 'drink' && ownerDiag.length > 0 && (
               <div className="alert-box mt-2.5 text-left">
                 <b>🔍 Diagnóstico da loja (visível só para quem gerencia):</b>
                 {ownerDiag.map((line, i) => (
@@ -1040,7 +1241,7 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
       if (filtered.length === 0) {
         return (
           <div className="panel mt-3">
-            <p className="mu">Nenhum drink encontrado com esse filtro.</p>
+            <p className="mu">Nenhum item encontrado com esse filtro.</p>
             <button
               type="button"
               className="b g sm mt-2"
@@ -1057,7 +1258,7 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
       }
       return (
         <MenuDrinksCatalog
-          recipes={filtered}
+          recipes={filteredWithHappyHour}
           displayMode={displayMode}
           design={design}
           accent={accent}
@@ -1065,7 +1266,10 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
           okColor={okColor}
           textColor={colorText}
           activePromo={activePromo}
-          onSelectDrink={(r) => openRecipeDetail(r as MenuItem)}
+          onSelectDrink={(r) => {
+            const orig = items.find((x) => x.id === r.id) || (r as MenuItem);
+            openRecipeDetail(orig);
+          }}
         />
       );
     }
@@ -1080,9 +1284,7 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
     );
   };
 
-  const selectedPriceInfo = selectedRecipe
-    ? getPromoAdjustedPrice(selectedRecipe.price, selectedRecipe.category, activePromo)
-    : null;
+  const selectedPriceInfo = selectedRecipe ? getItemFinalPrice(selectedRecipe) : null;
 
   return (
     <div style={{ ...bgStyle, color: colorText, minHeight: '100dvh' }}>
@@ -1141,6 +1343,60 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
             </div>
           </div>
         )}
+        {activeHappyHours.length > 0 && (
+          <div
+            className="panel mb-3 !py-2.5"
+            style={{
+              background: 'linear-gradient(135deg, rgba(245,158,11,0.22), rgba(234,88,12,0.16))',
+              borderColor: 'rgba(251,191,36,0.55)',
+            }}
+          >
+            <div className="row sp flex-wrap gap-2">
+              <div>
+                <b className="text-sm text-amber-200">
+                  🍻 Happy Hour Ativo Agora — {activeHappyHours[0].name}
+                </b>
+                <p className="mu text-xs !mt-0.5 !mb-0">
+                  Preços promocionais aplicados automaticamente até às{' '}
+                  <b>{activeHappyHours[0].end_time}</b>!
+                </p>
+              </div>
+              <span className="text-xs font-extrabold px-2.5 py-1 rounded-full bg-amber-400/25 text-amber-100">
+                {activeHappyHours[0].badge ||
+                  (activeHappyHours[0].discount_type === 'percent'
+                    ? `-${activeHappyHours[0].discount_value}% OFF`
+                    : activeHappyHours[0].discount_type === 'fixed_price'
+                      ? `Por ${money(activeHappyHours[0].discount_value)}`
+                      : `-${money(activeHappyHours[0].discount_value)}`)}
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* BOTÕES RÁPIDOS DE ATENDIMENTO: CHAMAR GARÇOM & PEDIR A CONTA */}
+        <div className="grid grid-cols-2 gap-2 mb-3">
+          <button
+            type="button"
+            className="b g sm !py-2.5"
+            onClick={() => {
+              setCallNote('');
+              setCallModal('waiter');
+            }}
+          >
+            🙋 Chamar Garçom
+          </button>
+          <button
+            type="button"
+            className="b sm !py-2.5"
+            onClick={() => {
+              setCallNote('Trazer maquininha (Crédito/Débito)');
+              setCallModal('bill');
+            }}
+          >
+            🧾 Pedir a Conta
+          </button>
+        </div>
+
         <SideDetailWrapper sideDetail={design.side_detail} accent={accent}>
           {blockOrder.map((blockId) => {
             const node = renderSection(blockId);
@@ -1168,7 +1424,13 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
                 : undefined
             }
           >
-            {selectedRecipe.image_url ? null : '🍸'}
+            {selectedRecipe.image_url
+              ? null
+              : getRecipeItemType(selectedRecipe) === 'petisco'
+                ? '🍟'
+                : getRecipeItemType(selectedRecipe) === 'avulso'
+                  ? '🍺'
+                  : '🍸'}
           </div>
           <div className="w">
             <button
@@ -1180,29 +1442,40 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
             </button>
             <h1 className="mt-4">{selectedRecipe.name}</h1>
             {selectedPriceInfo?.finalPrice != null && (
-              <p className="text-[1.4rem] text-[var(--ok)] font-bold">
+              <p className="text-[1.4rem] text-[var(--ok)] font-bold flex items-center gap-2 flex-wrap">
                 {selectedPriceInfo.discounted && selectedPriceInfo.originalPrice != null && (
-                  <span className="text-base line-through opacity-55 mr-2">
+                  <span className="text-base line-through opacity-55">
                     {money(selectedPriceInfo.originalPrice)}
                   </span>
                 )}
-                {money(selectedPriceInfo.finalPrice)}
+                <span>{money(selectedPriceInfo.finalPrice)}</span>
+                {selectedPriceInfo.badge && (
+                  <span className="text-xs px-2 py-0.5 rounded-full bg-amber-500/25 text-amber-200 font-bold">
+                    {selectedPriceInfo.badge}
+                  </span>
+                )}
               </p>
             )}
             {selectedRecipe.description && <p className="desc">{selectedRecipe.description}</p>}
 
-            <h2 className="mt-5.5 mb-1">O que leva</h2>
-            <div className="chips !flex-wrap !overflow-visible">
-              {(selectedRecipe.ingredients || []).map((i, idx) => (
-                <span key={`${i.n}-${idx}`} className="chip st1">
-                  {i.n}
-                </span>
-              ))}
-            </div>
+            {(selectedRecipe.ingredients || []).length > 0 && (
+              <>
+                <h2 className="mt-5.5 mb-1">O que leva</h2>
+                <div className="chips !flex-wrap !overflow-visible">
+                  {(selectedRecipe.ingredients || []).map((i, idx) => (
+                    <span key={`${i.n}-${idx}`} className="chip st1">
+                      {i.n}
+                    </span>
+                  ))}
+                </div>
+              </>
+            )}
 
             {selectedRecipe.story && (
               <>
-                <h2 className="mt-4.5 mb-1.5">A história</h2>
+                <h2 className="mt-4.5 mb-1.5">
+                  {getRecipeItemType(selectedRecipe) === 'drink' ? 'A história' : 'Descrição'}
+                </h2>
                 <p className="mu story">{selectedRecipe.story}</p>
               </>
             )}
@@ -1212,6 +1485,47 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
                 🪑 Pedido vinculado automaticamente à <b>{mesa}</b>
               </p>
             )}
+
+            {(() => {
+              const itemType = getRecipeItemType(selectedRecipe);
+              const mods = (getBarOpsData(bar).modifiers || []).filter(
+                (m) => m.applies_to === 'all' || m.applies_to === itemType
+              );
+              if (mods.length === 0) return null;
+              return (
+                <div className="mt-3">
+                  <label className="!mt-0">Opções rápidas / Adicionais</label>
+                  <div className="chips !flex-wrap !overflow-visible mt-1">
+                    {mods.map((m) => {
+                      const token = m.price > 0 ? `${m.name} (+${money(m.price)})` : m.name;
+                      const isOn = note.includes(m.name);
+                      return (
+                        <button
+                          key={m.id}
+                          type="button"
+                          className={`chip cursor-pointer ${isOn ? 'on' : ''}`}
+                          onClick={() => {
+                            if (isOn) {
+                              setNote((prev) =>
+                                prev
+                                  .split(' · ')
+                                  .filter((p) => !p.includes(m.name))
+                                  .join(' · ')
+                              );
+                            } else {
+                              setNote((prev) => (prev.trim() ? `${prev.trim()} · ${token}` : token));
+                            }
+                          }}
+                        >
+                          {isOn ? '✓ ' : '+ '}
+                          {token}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })()}
 
             <label>Observação (opcional)</label>
             <input
@@ -1307,6 +1621,96 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
                 </>
               )}
             </div>
+          </div>
+        </div>
+      )}
+
+      {callModal && (
+        <div className="ov !z-40" onClick={() => !callingStaff && setCallModal(null)}>
+          <div className="w narrow" onClick={(e) => e.stopPropagation()}>
+            <div className="row sp mb-2">
+              <h2 className="!m-0">
+                {callModal === 'bill' ? '🧾 Pedir a Conta' : '🙋 Chamar Garçom'}
+              </h2>
+              <button
+                type="button"
+                className="b g sm"
+                onClick={() => setCallModal(null)}
+              >
+                ✕
+              </button>
+            </div>
+            <p className="mu text-xs mb-3">
+              {cleanMesa ? `Mesa: ${cleanMesa} · ` : ''}Cliente: <b>{name}</b>
+              {callModal === 'bill' && priced && totalPay > 0
+                ? ` · Consumo estimado: ${money(totalPay)}`
+                : ''}
+            </p>
+
+            {callModal === 'bill' ? (
+              <div className="space-y-2 mb-3">
+                <label className="!mt-0">Como prefere pagar presencialmente?</label>
+                <div className="grid grid-cols-1 gap-1.5">
+                  {[
+                    'Trazer maquininha (Crédito/Débito)',
+                    'Pagar no Pix (mostrar QR na mesa)',
+                    'Pagar em Dinheiro',
+                    'Dividir a conta na mesa',
+                  ].map((opt) => (
+                    <button
+                      key={opt}
+                      type="button"
+                      className={`b sm !justify-start ${callNote === opt ? '' : 'g'}`}
+                      onClick={() => setCallNote(opt)}
+                    >
+                      {opt}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-2 mb-3">
+                <label className="!mt-0">O que você precisa? (opcional)</label>
+                <div className="flex flex-wrap gap-1.5">
+                  {['Atendimento na mesa', 'Guardanapos / Talheres', 'Mais gelo / Limão', 'Limpar a mesa'].map(
+                    (opt) => (
+                      <button
+                        key={opt}
+                        type="button"
+                        className={`b sm ${callNote === opt ? '' : 'g'}`}
+                        onClick={() => setCallNote(opt)}
+                      >
+                        {opt}
+                      </button>
+                    )
+                  )}
+                </div>
+              </div>
+            )}
+
+            <input
+              value={callNote}
+              onChange={(e) => setCallNote(e.target.value)}
+              placeholder={
+                callModal === 'bill'
+                  ? 'Ex: Troco para R$ 100 ou dividir em 2x'
+                  : 'Algum recado para o garçom?'
+              }
+              maxLength={120}
+            />
+
+            <button
+              type="button"
+              className="b ok full mt-3"
+              disabled={callingStaff}
+              onClick={() => void handleSendStaffCall(callModal, callNote)}
+            >
+              {callingStaff
+                ? 'Avisando equipe…'
+                : callModal === 'bill'
+                  ? '🧾 Enviar pedido de conta'
+                  : '🙋 Chamar garçom agora'}
+            </button>
           </div>
         </div>
       )}

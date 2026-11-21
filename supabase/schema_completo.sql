@@ -45,6 +45,16 @@ alter table bars add column if not exists menu_design jsonb default '{}'::jsonb;
 alter table bars add column if not exists menu_promotions jsonb default '[]'::jsonb;
 alter table bars add column if not exists active_promotion_id text;
 alter table bars add column if not exists table_names jsonb default '[]'::jsonb;
+alter table bars add column if not exists store_profile_data jsonb default '{}'::jsonb;
+alter table bars add column if not exists store_profiles jsonb default '[]'::jsonb;
+alter table bars add column if not exists active_store_profile text;
+alter table bars add column if not exists qr_designs jsonb default '[]'::jsonb;
+alter table bars add column if not exists active_qr_design text;
+alter table bars add column if not exists phone text;
+alter table bars add column if not exists instagram text;
+alter table bars add column if not exists opening_hours text;
+alter table bars add column if not exists about text;
+alter table bars add column if not exists ops_data jsonb default '{}'::jsonb;
 
 create unique index if not exists bars_handle_unique on bars (lower(handle)) where handle is not null;
 
@@ -64,6 +74,9 @@ alter table bar_items add column if not exists size_ml int;
 alter table bar_items add column if not exists level text;
 alter table bar_items add column if not exists qty int;
 alter table bar_items add column if not exists unit_cost numeric(8,2) default 0;
+alter table bar_items add column if not exists unit text;
+alter table bar_items add column if not exists min_qty int;
+alter table bar_items add column if not exists supplier text;
 
 -- 3) Receitas
 create table if not exists recipes (
@@ -89,6 +102,7 @@ alter table recipes add column if not exists tags text[];
 alter table recipes add column if not exists sources jsonb;
 alter table recipes add column if not exists verified boolean not null default false;
 alter table recipes add column if not exists base_cost numeric(8,2);
+alter table recipes add column if not exists item_type text default 'drink';
 
 -- 4) Preços por bar
 create table if not exists bar_prices (
@@ -116,6 +130,12 @@ alter table orders add column if not exists customer_name text;
 alter table orders add column if not exists recipe_name text;
 alter table orders add column if not exists unit_price numeric(8,2);
 alter table orders add column if not exists table_label text;
+alter table orders add column if not exists station text;
+alter table orders add column if not exists payment_method text;
+alter table orders add column if not exists discount numeric(8,2) default 0;
+alter table orders add column if not exists service_fee numeric(8,2) default 0;
+alter table orders add column if not exists canceled_reason text;
+alter table orders add column if not exists paid_at timestamptz;
 
 create table if not exists table_tabs (
   id uuid primary key default gen_random_uuid(),
@@ -134,6 +154,19 @@ create unique index if not exists table_tabs_one_open_per_table
 
 alter table orders add column if not exists table_tab_id uuid references table_tabs(id) on delete set null;
 create index if not exists orders_bar_created on orders (bar_id, created_at desc);
+
+create table if not exists table_calls (
+  id uuid primary key default gen_random_uuid(),
+  bar_id uuid not null references bars on delete cascade,
+  table_label text,
+  client_name text not null,
+  kind text not null default 'waiter' check (kind in ('waiter','bill')),
+  note text,
+  status text not null default 'open' check (status in ('open','resolved')),
+  created_at timestamptz default now(),
+  resolved_at timestamptz
+);
+create index if not exists table_calls_bar_status on table_calls (bar_id, status, created_at desc);
 
 -- 6) Admins, Equipe, Senhas de Serviço, Solicitações, Currículos e Vagas
 create table if not exists admins (
@@ -220,6 +253,7 @@ alter table recipes enable row level security;
 alter table bar_prices enable row level security;
 alter table orders enable row level security;
 alter table table_tabs enable row level security;
+alter table table_calls enable row level security;
 alter table admins enable row level security;
 alter table bar_members enable row level security;
 alter table bar_service_passwords enable row level security;
@@ -239,7 +273,12 @@ create or replace function is_bar_manager(p_bar uuid) returns boolean language s
 $$;
 
 drop policy if exists "bars" on bars;
-create policy "bars" on bars for select using (owner = auth.uid() or is_bar_staff(id) or exists(select 1 from job_posts j where j.bar_id = id and j.is_open));
+create policy "bars" on bars for select using (
+  owner = auth.uid()
+  or is_bar_staff(id)
+  or auth.uid() is not null
+  or exists(select 1 from job_posts j where j.bar_id = id and j.is_open)
+);
 drop policy if exists "bars_insert" on bars;
 create policy "bars_insert" on bars for insert with check (owner = auth.uid());
 drop policy if exists "bars_update" on bars;
@@ -331,8 +370,28 @@ select json_build_object(
     'menu_promotions', b.menu_promotions,
     'active_promotion_id', b.active_promotion_id,
     'menu_presets', b.menu_presets,
-    'active_menu_preset', b.active_menu_preset
+    'active_menu_preset', b.active_menu_preset,
+    'store_profile_data', b.store_profile_data,
+    'phone', b.phone,
+    'instagram', b.instagram,
+    'opening_hours', b.opening_hours,
+    'about', b.about,
+    'ops_data', json_build_object(
+      'modifiers', coalesce(b.ops_data->'modifiers', '[]'::jsonb),
+      'happy_hours', coalesce(b.ops_data->'happy_hours', '[]'::jsonb)
+    )
   ),
+  'stock_items', coalesce((
+    select json_agg(json_build_object(
+      'id', bi.id,
+      'bar_id', bi.bar_id,
+      'name', bi.name,
+      'in_stock', bi.in_stock,
+      'qty', bi.qty
+    ))
+    from bar_items bi
+    where bi.bar_id = b.id
+  ), '[]'::json),
   'active_clients', coalesce((
     select json_agg(distinct cname order by cname)
     from (
@@ -348,6 +407,7 @@ select json_build_object(
       'id', r.id,
       'name', r.name,
       'category', r.category,
+      'item_type', coalesce(r.item_type, 'drink'),
       'image_url', r.image_url,
       'price', p.price,
       'ingredients', r.ingredients,
@@ -360,13 +420,20 @@ select json_build_object(
     where (r.is_public is not false or r.owner = b.owner or p.price is not null)
       and (lower(coalesce(b.kind, '')) in ('home', 'casa') or p.price is not null)
       and not exists (
+        select 1 from unnest(coalesce(r.tags, '{}'::text[])) tg
+        where tg like '__bar:%' and tg <> ('__bar:' || b.id::text)
+      )
+      and not ('__avail:0' = any(coalesce(r.tags, '{}'::text[])))
+      and not exists (
         select 1 from jsonb_array_elements(coalesce(r.ingredients, '[]'::jsonb)) i
         where trim(coalesce(i->>'n', '')) <> ''
           and lower(unaccent(trim(i->>'n'))) not in ('gelo', 'agua', 'agua gelada', 'agua filtrada', 'agua mineral')
           and lower(unaccent(trim(i->>'n'))) not like 'gelo %'
           and not exists (
             select 1 from bar_items bi
-            where bi.bar_id = b.id and bi.in_stock
+            where bi.bar_id = b.id
+              and bi.in_stock
+              and (bi.qty is null or bi.qty > 0)
               and (
                 lower(unaccent(trim(bi.name))) = lower(unaccent(trim(i->>'n')))
                 or lower(unaccent(trim(bi.name))) like lower(unaccent(trim(i->>'n'))) || ' %'
@@ -376,9 +443,64 @@ select json_build_object(
               )
           )
       )
+      and not (
+        jsonb_array_length(coalesce(r.ingredients, '[]'::jsonb)) = 0
+        and exists (
+          select 1 from bar_items bi
+          where bi.bar_id = b.id
+            and (
+              lower(unaccent(trim(bi.name))) = lower(unaccent(trim(r.name)))
+              or lower(unaccent(trim(bi.name))) like lower(unaccent(trim(r.name))) || ' %'
+              or lower(unaccent(trim(r.name))) like lower(unaccent(trim(bi.name))) || ' %'
+            )
+        )
+        and not exists (
+          select 1 from bar_items bi
+          where bi.bar_id = b.id
+            and bi.in_stock
+            and (bi.qty is null or bi.qty > 0)
+            and (
+              lower(unaccent(trim(bi.name))) = lower(unaccent(trim(r.name)))
+              or lower(unaccent(trim(bi.name))) like lower(unaccent(trim(r.name))) || ' %'
+              or lower(unaccent(trim(r.name))) like lower(unaccent(trim(bi.name))) || ' %'
+            )
+        )
+      )
   ), '[]'::json)
 )
 from bars b where b.id = p_bar $$;
+
+drop policy if exists table_calls_staff on table_calls;
+create policy table_calls_staff on table_calls for all using (is_bar_staff(bar_id)) with check (is_bar_staff(bar_id));
+
+create or replace function call_waiter(
+  p_bar uuid,
+  p_table text default null,
+  p_client text default 'Cliente',
+  p_kind text default 'waiter',
+  p_note text default null
+) returns uuid
+language plpgsql security definer set search_path=public,extensions as $$
+declare
+  v_id uuid;
+  v_kind text := case when lower(coalesce(p_kind, '')) = 'bill' then 'bill' else 'waiter' end;
+begin
+  if not exists (select 1 from bars where id = p_bar) then
+    raise exception 'Bar não encontrado.';
+  end if;
+  insert into table_calls(bar_id, table_label, client_name, kind, note, status)
+  values (
+    p_bar,
+    nullif(left(trim(coalesce(p_table, '')), 60), ''),
+    coalesce(nullif(left(trim(coalesce(p_client, '')), 50), ''), 'Cliente'),
+    v_kind,
+    nullif(left(trim(coalesce(p_note, '')), 140), ''),
+    'open'
+  )
+  returning id into v_id;
+  return v_id;
+end $$;
+grant execute on function call_waiter(uuid, text, text, text, text) to anon, authenticated;
 
 create or replace function get_table_tab_state(p_bar uuid, p_table text) returns json
 language sql security definer set search_path=public,extensions as $$
@@ -551,10 +673,29 @@ begin
 
   select price into pr from bar_prices where bar_id = p_bar and recipe_id = p_recipe;
   select name into rname from recipes where id = p_recipe;
-  if b.kind not in ('home', 'casa') and pr is null then raise exception 'Drink indisponível'; end if;
+  if b.kind not in ('home', 'casa') and pr is null then raise exception 'Item indisponível'; end if;
 
-  insert into orders(bar_id, recipe_id, client_name, customer_name, recipe_name, qty, note, price, unit_price, table_label, table_tab_id)
-  values(p_bar, p_recipe, left(trim(p_name), 40), left(trim(p_name), 40), rname, p_qty, left(p_note, 140), pr, pr, v_table, p_tab_id)
+  insert into orders(bar_id, recipe_id, client_name, customer_name, recipe_name, qty, note, price, unit_price, table_label, table_tab_id, station)
+  values(
+    p_bar,
+    p_recipe,
+    left(trim(p_name), 40),
+    left(trim(p_name), 40),
+    rname,
+    p_qty,
+    left(p_note, 140),
+    pr,
+    pr,
+    v_table,
+    p_tab_id,
+    (
+      select case
+        when coalesce(r.item_type, '') = 'petisco' or '__type:petisco' = any(coalesce(r.tags, '{}'::text[])) then 'cozinha'
+        else 'bar'
+      end
+      from recipes r where r.id = p_recipe
+    )
+  )
   returning id into oid;
   return oid;
 end $$;
@@ -624,6 +765,10 @@ exception when others then null;
 end $$;
 do $$ begin
   alter publication supabase_realtime add table table_tabs;
+exception when others then null;
+end $$;
+do $$ begin
+  alter publication supabase_realtime add table table_calls;
 exception when others then null;
 end $$;
 do $$ begin
@@ -1171,10 +1316,127 @@ Coe para copo alto com gelo.', 'Agave terroso com maracujá intenso.', 'Combina�
 ('Cachaça com Guaraná e Limão', 'Refrescantes', '[{"n":"Cachaça","q":"50 ml"},{"n":"Guaraná","q":"completar"},{"n":"Limão","q":"15 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Misture cachaça e limão no copo com gelo e complete com Guaraná.', 'Misture cachaça e limão no copo com gelo e complete com Guaraná.', 'Refrescante, brasileiro e pronto em segundos.', 'Versão longa e leve da cachaça com limão.', 'Copo alto', 'Direto no copo', 'Gomo de limão', false, array['Fácil','Refrescante','Longo']::text[], 'cachaca com guarana e limao'),
 ('Saquê Soda de Groselha e Morango', 'Doces & Frutados', '[{"n":"Saquê","q":"60 ml"},{"n":"Xarope de groselha","q":"20 ml"},{"n":"Morango","q":"3 unid"},{"n":"Água com gás","q":"completar"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Macere leve os morangos com xarope de groselha.
 Adicione gelo, saquê e complete com água com gás.', 'Macere leve os morangos com xarope de groselha.
-Adicione gelo, saquê e complete com água com gás.', 'Leve, doce e super frutado.', 'Opção refrescante com saquê.', 'Copo alto', 'Direto no copo', 'Morango', false, array['Doce','Com soda','Frutado']::text[], 'saque soda de groselha e morango')
+Adicione gelo, saquê e complete com água com gás.', 'Leve, doce e super frutado.', 'Opção refrescante com saquê.', 'Copo alto', 'Direto no copo', 'Morango', false, array['Doce','Com soda','Frutado']::text[], 'saque soda de groselha e morango'),
+('Espresso Tônica Clássico', 'Refrescantes', '[{"n":"Café espresso","q":"50 ml"},{"n":"Água tônica","q":"150 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Encha o copo de gelo, despeje a água tônica e finalize derramando o café espresso devagar por cima para criar camadas.', 'Encha o copo de gelo, despeje a água tônica e finalize derramando o café espresso devagar por cima para criar camadas.', 'Fresco, borbulhante e sofisticado: o encontro perfeito entre café espresso e tônica.', 'Tendência mundial em cafeterias e bares modernos.', 'Copo alto', 'Montado em camadas', 'Casca de laranja', false, array['Refrescante','Amargo','Fácil']::text[], 'espresso tonica classico'),
+('Espresso Tônica com Laranja', 'Cítricos', '[{"n":"Café espresso","q":"50 ml"},{"n":"Água tônica","q":"150 ml"},{"n":"Laranja","q":"2 rodelas"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Coloque rodelas de laranja e gelo no copo.
+Complete com água tônica e adicione o espresso gelado por cima.', 'Coloque rodelas de laranja e gelo no copo.
+Complete com água tônica e adicione o espresso gelado por cima.', 'Notas cítricas de laranja que equilibram o amargor do café e da tônica.', 'Versão cítrica adorada em tardes quentes.', 'Taça Gin', 'Montado em camadas', 'Meia lua de laranja', false, array['Refrescante','Ácido','Charmoso']::text[], 'espresso tonica com laranja'),
+('Café Gelado com Leite Condensado', 'Doces & Frutados', '[{"n":"Café espresso","q":"60 ml"},{"n":"Leite condensado","q":"30 ml"},{"n":"Leite","q":"100 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Coloque o leite condensado no fundo do copo com gelo.
+Adicione o leite bem gelado e finalize com o café espresso.', 'Coloque o leite condensado no fundo do copo com gelo.
+Adicione o leite bem gelado e finalize com o café espresso.', 'Inspirado no famoso café vietnamita: doce, cremoso e revigorante.', 'Sucesso absoluto para quem ama café doce e gelado.', 'Copo alto', 'Montado em camadas', 'Canela em pó', false, array['Doce','Fácil','Refrescante']::text[], 'cafe gelado com leite condensado'),
+('Café Cremoso com Vodka e Leite Condensado', 'Doces & Frutados', '[{"n":"Vodka","q":"50 ml"},{"n":"Café espresso","q":"50 ml"},{"n":"Leite condensado","q":"30 ml"},{"n":"Creme de leite","q":"30 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Bata vodka, café espresso resfriado, leite condensado e creme de leite na coqueteleira com bastante gelo.
+Coe para um copo baixo com gelo.', 'Bata vodka, café espresso resfriado, leite condensado e creme de leite na coqueteleira com bastante gelo.
+Coe para um copo baixo com gelo.', 'Coquetel aveludado de café com toque adocicado e espuma cremosa.', 'Alternativa acessível e irresistível ao Espresso Martini cremoso.', 'Copo baixo', 'Batido', 'Grãos de café', true, array['Doce','Charmoso','Curto']::text[], 'cafe cremoso com vodka e leite condensado'),
+('Espresso com Doce de Leite e Rum', 'Doces & Frutados', '[{"n":"Rum","q":"50 ml"},{"n":"Café espresso","q":"45 ml"},{"n":"Doce de leite","q":"25 g"},{"n":"Leite","q":"60 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Dissolva o doce de leite no café espresso quente, adicione rum, leite e muito gelo na coqueteleira e bata forte.
+Coe para o copo.', 'Dissolva o doce de leite no café espresso quente, adicione rum, leite e muito gelo na coqueteleira e bata forte.
+Coe para o copo.', 'Sabor intenso de café com doce de leite cremoso e rum.', 'Combinação de sobremesa em forma de coquetel.', 'Taça Coupe', 'Batido', 'Fio de doce de leite', true, array['Doce','Charmoso']::text[], 'espresso com doce de leite e rum'),
+('Mocha Gelado com Vodka', 'Doces & Frutados', '[{"n":"Vodka","q":"50 ml"},{"n":"Café espresso","q":"50 ml"},{"n":"Calda de chocolate","q":"25 ml"},{"n":"Leite","q":"90 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Decore a borda interna com calda de chocolate.
+Bata vodka, café, leite e chocolate com gelo e sirva no copo.', 'Decore a borda interna com calda de chocolate.
+Bata vodka, café, leite e chocolate com gelo e sirva no copo.', 'Café gelado achocolatado com toque marcante de vodka.', 'Clássico das cafeterias em versão coquetel de bar.', 'Copo alto', 'Batido', 'Calda de chocolate', true, array['Doce','Fácil']::text[], 'mocha gelado com vodka'),
+('Whisky Coffee Cremoso', 'Fortes', '[{"n":"Whisky","q":"50 ml"},{"n":"Café espresso","q":"50 ml"},{"n":"Leite condensado","q":"25 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Bata whisky, café espresso e leite condensado com gelo na coqueteleira e sirva em copo baixo com gelo novo.', 'Bata whisky, café espresso e leite condensado com gelo na coqueteleira e sirva em copo baixo com gelo novo.', 'Intenso, aromático e macio no paladar.', 'Versão gelada e prática do clássico Irish Coffee.', 'Copo baixo', 'Batido', 'Café em grãos', true, array['Forte','Doce','Curto']::text[], 'whisky coffee cremoso'),
+('Cachaça com Café e Leite Condensado', 'Doces & Frutados', '[{"n":"Cachaça","q":"50 ml"},{"n":"Café espresso","q":"45 ml"},{"n":"Leite condensado","q":"30 ml"},{"n":"Canela","q":"1 pitada"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Bata cachaça, café espresso, leite condensado e gelo.
+Sirva com uma pitada de canela por cima.', 'Bata cachaça, café espresso, leite condensado e gelo.
+Sirva com uma pitada de canela por cima.', 'Toque brasileiro com cachaça, café passado na hora e canela.', 'Receita mineira de bar muito elogiada no pós-jantar.', 'Copo baixo', 'Batido', 'Canela em pó', true, array['Doce','Forte','Fácil']::text[], 'cachaca com cafe e leite condensado'),
+('Affogato de Rum com Sorvete', 'Doces & Frutados', '[{"n":"Rum","q":"40 ml"},{"n":"Café espresso","q":"40 ml"},{"n":"Sorvete de baunilha","q":"2 bolas"}]'::jsonb, 'Coloque o sorvete de baunilha na taça.
+Despeje o rum e o café espresso quente por cima na hora de servir.', 'Coloque o sorvete de baunilha na taça.
+Despeje o rum e o café espresso quente por cima na hora de servir.', 'Drink sobremesa italiano com sorvete de baunilha, rum e espresso.', 'Sucesso absoluto como sobremesa de bar.', 'Taça sobremesa', 'Montado', 'Chocolate ralado', false, array['Doce','Charmoso','Fácil']::text[], 'affogato de rum com sorvete'),
+('Espresso Soda com Limão', 'Refrescantes', '[{"n":"Café espresso","q":"50 ml"},{"n":"Água com gás","q":"140 ml"},{"n":"Limão","q":"15 ml"},{"n":"Xarope de açúcar","q":"15 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Misture limão, xarope de açúcar e gelo.
+Complete com água com gás e despeje o café espresso por cima.', 'Misture limão, xarope de açúcar e gelo.
+Complete com água com gás e despeje o café espresso por cima.', 'Refrescante, cítrico e zero álcool com energia do café.', 'Inspirado no café siciliano com gás.', 'Copo alto', 'Montado em camadas', 'Rodela de limão', false, array['Refrescante','Com soda','Ácido']::text[], 'espresso soda com limao'),
+('Gin Espresso Tônica', 'Aperitivos', '[{"n":"Gin","q":"45 ml"},{"n":"Café espresso","q":"40 ml"},{"n":"Água tônica","q":"140 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Coloque gelo na taça, adicione gin e água tônica.
+Finalize derramando o espresso devagar sobre o gelo.', 'Coloque gelo na taça, adicione gin e água tônica.
+Finalize derramando o espresso devagar sobre o gelo.', 'Botânicos do gin, bolhas da tônica e torra elegante do café.', 'Assinatura moderna de bares autorais.', 'Taça Gin', 'Montado em camadas', 'Zest de laranja', false, array['Aperitivo','Amargo','Charmoso']::text[], 'gin espresso tonica'),
+('Café Gelado de Caramelo', 'Doces & Frutados', '[{"n":"Café espresso","q":"50 ml"},{"n":"Calda de caramelo","q":"25 ml"},{"n":"Leite","q":"120 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Passe calda de caramelo nas paredes do copo, adicione gelo, leite e finalize com café espresso.', 'Passe calda de caramelo nas paredes do copo, adicione gelo, leite e finalize com café espresso.', 'Iced caramel macchiato cremoso e refrescante.', 'Favorito sem álcool para qualquer hora.', 'Copo alto', 'Montado em camadas', 'Fio de caramelo', false, array['Doce','Fácil','Refrescante']::text[], 'cafe gelado de caramelo'),
+('Café Gelado com Chantilly e Chocolate', 'Doces & Frutados', '[{"n":"Café espresso","q":"50 ml"},{"n":"Leite","q":"100 ml"},{"n":"Calda de chocolate","q":"20 ml"},{"n":"Chantilly","q":"cobrir"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Misture café, leite e calda de chocolate com gelo e finalize com chantilly generoso.', 'Misture café, leite e calda de chocolate com gelo e finalize com chantilly generoso.', 'Cremoso, gelado e com cobertura de chantilly.', 'Clássico de cafeteria que vende muito em bares.', 'Copo alto', 'Montado', 'Chantilly e calda', false, array['Doce','Charmoso','Fácil']::text[], 'cafe gelado com chantilly e chocolate'),
+('Batida de Morango com Leite Condensado', 'Doces & Frutados', '[{"n":"Vodka","q":"50 ml"},{"n":"Morango","q":"5 unid"},{"n":"Leite condensado","q":"40 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Bata vodka, morangos, leite condensado e gelo na coqueteleira (ou liquidificador) até ficar bem cremoso.', 'Bata vodka, morangos, leite condensado e gelo na coqueteleira (ou liquidificador) até ficar bem cremoso.', 'Batida clássica brasileira de morango, doce e super cremosa.', 'Uma das bebidas mais pedidas em festas e bares no Brasil.', 'Copo alto', 'Batido', 'Morango na borda', true, array['Doce','Frutado','Fácil']::text[], 'batida de morango com leite condensado'),
+('Batida de Maracujá Cremosa', 'Tropicais', '[{"n":"Vodka","q":"50 ml"},{"n":"Maracujá","q":"1 polpa"},{"n":"Leite condensado","q":"40 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Bata vodka, polpa de maracujá, leite condensado e gelo com vigor.
+Coe para o copo.', 'Bata vodka, polpa de maracujá, leite condensado e gelo com vigor.
+Coe para o copo.', 'Equilíbrio irresistível entre o azedinho do maracujá e a doçura do leite condensado.', 'Campeã de vendas de baixíssimo custo.', 'Copo baixo', 'Batido', 'Sementes de maracujá', true, array['Tropical','Doce','Ácido']::text[], 'batida de maracuja cremosa'),
+('Batida de Coco Clássica', 'Tropicais', '[{"n":"Cachaça","q":"50 ml"},{"n":"Leite de coco","q":"50 ml"},{"n":"Leite condensado","q":"40 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Bata cachaça, leite de coco, leite condensado e gelo até espumar bem.', 'Bata cachaça, leite de coco, leite condensado e gelo até espumar bem.', 'Cremosa, tropical e com sabor autêntico de coco.', 'Tradição praiana e de boteco no Brasil inteiro.', 'Copo baixo', 'Batido', 'Coco ralado', true, array['Tropical','Doce','Clássico']::text[], 'batida de coco classica'),
+('Batida de Abacaxi Cremosa', 'Tropicais', '[{"n":"Cachaça","q":"50 ml"},{"n":"Abacaxi","q":"3 pedaços"},{"n":"Leite condensado","q":"40 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Macere bem o abacaxi, adicione cachaça, leite condensado e gelo.
+Bata vigorosamente e coe.', 'Macere bem o abacaxi, adicione cachaça, leite condensado e gelo.
+Bata vigorosamente e coe.', 'Tropical, cremosa e refrescante com abacaxi natural.', 'Clássico brasileiro que agrada todos os públicos.', 'Copo alto', 'Batido', 'Fatia de abacaxi', true, array['Tropical','Doce','Fácil']::text[], 'batida de abacaxi cremosa'),
+('Batida de Limão Cremosa', 'Cítricos', '[{"n":"Cachaça","q":"50 ml"},{"n":"Limão","q":"30 ml"},{"n":"Leite condensado","q":"40 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Bata cachaça, suco de limão fresco, leite condensado e gelo na coqueteleira até ficar espesso como mousse.', 'Bata cachaça, suco de limão fresco, leite condensado e gelo na coqueteleira até ficar espesso como mousse.', 'Lembra torta de limão no copo: cítrica, cremosa e super rápida.', 'Feita com apenas 3 ingredientes baratos de estoque.', 'Copo baixo', 'Batido', 'Raspas de limão', true, array['Ácido','Doce','Fácil']::text[], 'batida de limao cremosa'),
+('Caipiroska de Limão com Leite Condensado', 'Cítricos', '[{"n":"Vodka","q":"50 ml"},{"n":"Limão","q":"1 unid"},{"n":"Leite condensado","q":"35 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Macere o limão em cubos sem esmagar demais a casca.
+Adicione leite condensado, vodka e gelo e bata bem.', 'Macere o limão em cubos sem esmagar demais a casca.
+Adicione leite condensado, vodka e gelo e bata bem.', 'Caipiroska cremosa com textura aveludada.', 'Uma das variações mais pedidas da caipiroska.', 'Copo baixo', 'Batido', 'Rodela de limão', true, array['Doce','Ácido','Fácil']::text[], 'caipiroska de limao com leite condensado'),
+('Caipiroska de Morango Cremosa', 'Doces & Frutados', '[{"n":"Vodka","q":"50 ml"},{"n":"Morango","q":"4 unid"},{"n":"Leite condensado","q":"35 ml"},{"n":"Limão","q":"10 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Macere os morangos com o limão.
+Adicione leite condensado, vodka e gelo e bata forte.', 'Macere os morangos com o limão.
+Adicione leite condensado, vodka e gelo e bata forte.', 'Morango fresco equilibrado com limão e cremosidade do leite condensado.', 'Clássico garantido em qualquer balcão.', 'Copo baixo', 'Batido', 'Morango fatiado', true, array['Doce','Frutado','Charmoso']::text[], 'caipiroska de morango cremosa'),
+('Batida de Manga Cremosa', 'Tropicais', '[{"n":"Rum","q":"50 ml"},{"n":"Manga","q":"4 pedaços"},{"n":"Leite condensado","q":"35 ml"},{"n":"Limão","q":"10 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Bata manga madura, rum, leite condensado, limão e gelo até ficar homogêneo e cremoso.', 'Bata manga madura, rum, leite condensado, limão e gelo até ficar homogêneo e cremoso.', 'Textura aveludada de manga com rum tropical.', 'Excelente opção de verão.', 'Copo alto', 'Batido', 'Fatia de manga', true, array['Tropical','Doce','Frutado']::text[], 'batida de manga cremosa'),
+('Batida de Uva com Vodka', 'Doces & Frutados', '[{"n":"Vodka","q":"50 ml"},{"n":"Uva","q":"8 unid"},{"n":"Leite condensado","q":"35 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Macere as uvas, adicione vodka, leite condensado e gelo, bata bem e coe.', 'Macere as uvas, adicione vodka, leite condensado e gelo, bata bem e coe.', 'Frutada, aromática e cremosa com uvas frescas.', 'Surpreende quem busca sabores diferentes de batida.', 'Copo baixo', 'Batido', 'Uvas no palito', true, array['Doce','Frutado','Fácil']::text[], 'batida de uva com vodka'),
+('Batida de Kiwi Cremosa', 'Tropicais', '[{"n":"Saquê","q":"60 ml"},{"n":"Kiwi","q":"1 unid"},{"n":"Leite condensado","q":"35 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Macere o kiwi sem casca, junte saquê, leite condensado e gelo e agite bem.', 'Macere o kiwi sem casca, junte saquê, leite condensado e gelo e agite bem.', 'Leve, verde vibrante e suavemente cítrica com saquê.', 'Combinação deliciosa de bar oriental e brasileiro.', 'Copo baixo', 'Batido', 'Fatia de kiwi', true, array['Tropical','Doce','Frutado']::text[], 'batida de kiwi cremosa'),
+('Espanhola de Vinho e Abacaxi', 'Doces & Frutados', '[{"n":"Vinho tinto","q":"100 ml"},{"n":"Abacaxi","q":"3 pedaços"},{"n":"Leite condensado","q":"40 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Bata o abacaxi com vinho tinto, leite condensado e gelo.
+Coe e sirva em taça ou copo alto.', 'Bata o abacaxi com vinho tinto, leite condensado e gelo.
+Coe e sirva em taça ou copo alto.', 'Clássica espanhola brasileira: cor roxa linda, doce e refrescante.', 'Ícone dos bares e festas populares brasileiras.', 'Taça vinho', 'Batido', 'Triângulo de abacaxi', true, array['Doce','Clássico','Frutado']::text[], 'espanhola de vinho e abacaxi'),
+('Espanhola de Morango', 'Doces & Frutados', '[{"n":"Vinho tinto","q":"100 ml"},{"n":"Morango","q":"4 unid"},{"n":"Leite condensado","q":"40 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Bata vinho tinto, morangos, leite condensado e gelo e sirva bem gelado.', 'Bata vinho tinto, morangos, leite condensado e gelo e sirva bem gelado.', 'Versão de morango da tradicional espanhola de vinho.', 'Rende muito e tem ótimo custo-benefício.', 'Taça vinho', 'Batido', 'Morango fresco', true, array['Doce','Frutado','Fácil']::text[], 'espanhola de morango'),
+('Drink Sensação (Morango e Chocolate)', 'Doces & Frutados', '[{"n":"Vodka","q":"50 ml"},{"n":"Morango","q":"4 unid"},{"n":"Leite condensado","q":"35 ml"},{"n":"Calda de chocolate","q":"25 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Espalhe calda de chocolate por dentro do copo.
+Bata vodka, morangos, leite condensado e gelo e despeje no copo.', 'Espalhe calda de chocolate por dentro do copo.
+Bata vodka, morangos, leite condensado e gelo e despeje no copo.', 'Visual incrível e sabor fiel ao bombom de morango com chocolate.', 'Campeão de fotos no Instagram dos clientes.', 'Taça Gin', 'Batido', 'Morango com calda de chocolate', true, array['Doce','Charmoso','Frutado']::text[], 'drink sensacao (morango e chocolate)'),
+('Drink Prestígio (Coco e Chocolate)', 'Doces & Frutados', '[{"n":"Rum","q":"50 ml"},{"n":"Leite de coco","q":"45 ml"},{"n":"Leite condensado","q":"35 ml"},{"n":"Calda de chocolate","q":"25 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Decore o copo com calda de chocolate.
+Bata rum, leite de coco, leite condensado e gelo e despeje no copo.', 'Decore o copo com calda de chocolate.
+Bata rum, leite de coco, leite condensado e gelo e despeje no copo.', 'Coco cremoso com chocolate e rum em um drink sobremesa irresistível.', 'Perfeito para quem prefere drinks doces e cremosos.', 'Copo alto', 'Batido', 'Coco ralado e chocolate', true, array['Doce','Tropical','Charmoso']::text[], 'drink prestigio (coco e chocolate)'),
+('Drink de Doce de Leite Cremoso', 'Doces & Frutados', '[{"n":"Vodka","q":"50 ml"},{"n":"Doce de leite","q":"35 g"},{"n":"Creme de leite","q":"40 ml"},{"n":"Leite","q":"50 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Bata todos os ingredientes vigorosamente com gelo até ficar aveludado.
+Coe para o copo.', 'Bata todos os ingredientes vigorosamente com gelo até ficar aveludado.
+Coe para o copo.', 'Drink sobremesa ultra cremoso de doce de leite.', 'Conquista na primeira goleada quem ama doces.', 'Taça Coupe', 'Batido', 'Canela em pó', true, array['Doce','Charmoso']::text[], 'drink de doce de leite cremoso'),
+('Batida de Chocolate com Rum', 'Doces & Frutados', '[{"n":"Rum","q":"50 ml"},{"n":"Chocolate","q":"25 g"},{"n":"Leite condensado","q":"35 ml"},{"n":"Leite","q":"80 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Misture o chocolate com leite e leite condensado, adicione rum e gelo e bata bem.', 'Misture o chocolate com leite e leite condensado, adicione rum e gelo e bata bem.', 'Cremoso de chocolate com notas quentes de rum.', 'Simples, barato e muito pedido em noites frescas.', 'Copo baixo', 'Batido', 'Chocolate ralado', true, array['Doce','Fácil']::text[], 'batida de chocolate com rum'),
+('Milkshake Alcoólico de Baunilha e Whisky', 'Doces & Frutados', '[{"n":"Whisky","q":"50 ml"},{"n":"Sorvete de baunilha","q":"2 bolas"},{"n":"Leite","q":"60 ml"},{"n":"Calda de caramelo","q":"20 ml"}]'::jsonb, 'Bata whisky, sorvete de baunilha e leite até ficar cremoso.
+Sirva em copo decorado com calda de caramelo.', 'Bata whisky, sorvete de baunilha e leite até ficar cremoso.
+Sirva em copo decorado com calda de caramelo.', 'Milkshake adulto de baunilha, caramelo e whisky.', 'Clássico das hamburguerias e gastrobares.', 'Copo alto', 'Batido', 'Calda de caramelo', true, array['Doce','Charmoso']::text[], 'milkshake alcoolico de baunilha e whisky'),
+('Milkshake de Morango com Vodka', 'Doces & Frutados', '[{"n":"Vodka","q":"50 ml"},{"n":"Sorvete de baunilha","q":"2 bolas"},{"n":"Calda de morango","q":"30 ml"},{"n":"Leite","q":"60 ml"}]'::jsonb, 'Bata sorvete, vodka, calda de morango e leite até atingir textura cremosa.', 'Bata sorvete, vodka, calda de morango e leite até atingir textura cremosa.', 'Sobremesa gelada e divertida com vodka e calda de morango.', 'Sucesso em bares com petiscos e lanches.', 'Copo alto', 'Batido', 'Calda de morango', true, array['Doce','Frutado','Fácil']::text[], 'milkshake de morango com vodka'),
+('Capeta de Cachaça com Chocolate', 'Fortes', '[{"n":"Cachaça","q":"50 ml"},{"n":"Leite condensado","q":"35 ml"},{"n":"Chocolate","q":"15 g"},{"n":"Canela","q":"1 pitada"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Bata cachaça, leite condensado, chocolate, canela e gelo até ficar cremoso e homogêneo.', 'Bata cachaça, leite condensado, chocolate, canela e gelo até ficar cremoso e homogêneo.', 'Clássico energizante das praias baianas com cachaça, chocolate e canela.', 'Famoso em todo o litoral do Brasil.', 'Copo baixo', 'Batido', 'Canela em pó', true, array['Forte','Doce','Clássico']::text[], 'capeta de cachaca com chocolate'),
+('Creme de Maracujá com Gin', 'Tropicais', '[{"n":"Gin","q":"50 ml"},{"n":"Suco de maracujá","q":"60 ml"},{"n":"Leite condensado","q":"30 ml"},{"n":"Creme de leite","q":"30 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Bata todos os ingredientes com gelo na coqueteleira e coe para uma taça gelada.', 'Bata todos os ingredientes com gelo na coqueteleira e coe para uma taça gelada.', 'Mousse líquido de maracujá com toque aromático de gin.', 'Receita rápida com ingredientes de mercado.', 'Taça Coupe', 'Batido', 'Polpa de maracujá', true, array['Tropical','Doce','Charmoso']::text[], 'creme de maracuja com gin'),
+('Piña Colada com Leite Condensado', 'Tropicais', '[{"n":"Rum","q":"50 ml"},{"n":"Suco de abacaxi","q":"90 ml"},{"n":"Leite de coco","q":"40 ml"},{"n":"Leite condensado","q":"30 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Bata rum, suco de abacaxi, leite de coco, leite condensado e gelo até espumar.', 'Bata rum, suco de abacaxi, leite de coco, leite condensado e gelo até espumar.', 'Versão brasileira ainda mais cremosa da clássica Piña Colada.', 'Usa ingredientes fáceis de achar em qualquer mercado.', 'Copo alto', 'Batido', 'Fatia de abacaxi', true, array['Tropical','Doce','Clássico']::text[], 'pina colada com leite condensado'),
+('Vodka com Energético e Limão', 'Refrescantes', '[{"n":"Vodka","q":"50 ml"},{"n":"Energético","q":"completar"},{"n":"Limão","q":"15 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Encha o copo de gelo, coloque a vodka, esprema o limão e complete com energético.', 'Encha o copo de gelo, coloque a vodka, esprema o limão e complete com energético.', 'Clássico de balada com toque cítrico que corta o excesso de doce.', 'O combo mais pedido em casas noturnas.', 'Copo alto', 'Direto no copo', 'Rodela de limão', false, array['Fácil','Longo','Refrescante']::text[], 'vodka com energetico e limao'),
+('Whisky com Energético e Laranja', 'Fortes', '[{"n":"Whisky","q":"50 ml"},{"n":"Energético","q":"completar"},{"n":"Laranja","q":"1 rodela"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Coloque bastante gelo, a rodela de laranja, o whisky e complete com energético.', 'Coloque bastante gelo, a rodela de laranja, o whisky e complete com energético.', 'Potente, aromático e com frescor cítrico da laranja.', 'Clássico de camarote e balada.', 'Copo alto', 'Direto no copo', 'Meia lua de laranja', false, array['Forte','Fácil','Longo']::text[], 'whisky com energetico e laranja'),
+('Cachaça Tropical com Energético', 'Tropicais', '[{"n":"Cachaça","q":"50 ml"},{"n":"Energético","q":"completar"},{"n":"Maracujá","q":"1/2 polpa"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Coloque polpa de maracujá e gelo no copo.
+Adicione cachaça e complete com energético gelado.', 'Coloque polpa de maracujá e gelo no copo.
+Adicione cachaça e complete com energético gelado.', 'Brasileiro, vibrante e com excelente margem de lucro.', 'Alternativa criativa e econômica ao Gin Tropical.', 'Copo alto', 'Direto no copo', 'Sementes de maracujá', false, array['Tropical','Fácil','Longo']::text[], 'cachaca tropical com energetico'),
+('Gin com Guaraná e Limão', 'Refrescantes', '[{"n":"Gin","q":"50 ml"},{"n":"Guaraná","q":"completar"},{"n":"Limão","q":"15 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Encha o copo de gelo, adicione gin e limão espremido e complete com Guaraná gelado.', 'Encha o copo de gelo, adicione gin e limão espremido e complete com Guaraná gelado.', 'Leve, docinho e refrescante com toque brasileiro do guaraná.', 'Ótima opção para quem acha água tônica muito amarga.', 'Taça Gin', 'Direto no copo', 'Rodela de limão', false, array['Refrescante','Fácil','Longo']::text[], 'gin com guarana e limao'),
+('Vodka com Guaraná e Morango', 'Doces & Frutados', '[{"n":"Vodka","q":"50 ml"},{"n":"Guaraná","q":"completar"},{"n":"Morango","q":"3 unid"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Macere leve os morangos no copo com gelo.
+Adicione vodka e complete com Guaraná.', 'Macere leve os morangos no copo com gelo.
+Adicione vodka e complete com Guaraná.', 'Frutado, gaseificado e super fácil de beber.', 'Drink rápido e econômico para alta demanda.', 'Copo alto', 'Direto no copo', 'Morango fatiado', false, array['Doce','Frutado','Fácil']::text[], 'vodka com guarana e morango'),
+('Whisky com Guaraná e Limão', 'Refrescantes', '[{"n":"Whisky","q":"50 ml"},{"n":"Guaraná","q":"completar"},{"n":"Limão","q":"15 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Coloque gelo, whisky e limão no copo e complete com Guaraná.', 'Coloque gelo, whisky e limão no copo e complete com Guaraná.', 'Highball brasileiro suave e aromático.', 'Clássico das reuniões e bares descontraídos.', 'Copo alto', 'Direto no copo', 'Gomo de limão', false, array['Fácil','Longo','Refrescante']::text[], 'whisky com guarana e limao'),
+('Gin com Água de Coco e Limão', 'Tropicais', '[{"n":"Gin","q":"50 ml"},{"n":"Água de coco","q":"completar"},{"n":"Limão","q":"15 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Coloque bastante gelo, adicione gin e limão e complete com água de coco gelada.', 'Coloque bastante gelo, adicione gin e limão e complete com água de coco gelada.', 'Hidratante, leve e super refrescante.', 'Favorito de rooftops, praias e tardes ensolaradas.', 'Taça Gin', 'Direto no copo', 'Rodela de limão', false, array['Tropical','Refrescante','Fácil']::text[], 'gin com agua de coco e limao'),
+('Vodka com Água de Coco e Abacaxi', 'Tropicais', '[{"n":"Vodka","q":"50 ml"},{"n":"Água de coco","q":"120 ml"},{"n":"Suco de abacaxi","q":"60 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Misture vodka, suco de abacaxi e água de coco em copo alto cheio de gelo.', 'Misture vodka, suco de abacaxi e água de coco em copo alto cheio de gelo.', 'Tropical leve sem peso de creme.', 'Perfeito para dias quentes.', 'Copo alto', 'Direto no copo', 'Fatia de abacaxi', false, array['Tropical','Refrescante','Longo']::text[], 'vodka com agua de coco e abacaxi'),
+('Cachaça com Água de Coco e Maracujá', 'Tropicais', '[{"n":"Cachaça","q":"50 ml"},{"n":"Água de coco","q":"140 ml"},{"n":"Maracujá","q":"1/2 polpa"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Misture a polpa de maracujá com a cachaça sobre gelo e complete com água de coco.', 'Misture a polpa de maracujá com a cachaça sobre gelo e complete com água de coco.', 'Leve, natural e cheio de brasilidade.', 'Refrescância tropical imediata.', 'Copo alto', 'Direto no copo', 'Sementes de maracujá', false, array['Tropical','Refrescante','Fácil']::text[], 'cachaca com agua de coco e maracuja'),
+('Chá Gelado com Vodka e Limão', 'Refrescantes', '[{"n":"Vodka","q":"50 ml"},{"n":"Chá","q":"140 ml"},{"n":"Limão","q":"20 ml"},{"n":"Xarope de açúcar","q":"15 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Misture vodka, chá gelado, suco de limão e xarope de açúcar no copo com muito gelo.', 'Misture vodka, chá gelado, suco de limão e xarope de açúcar no copo com muito gelo.', 'Leve, cítrico e fácil de beber em tardes quentes.', 'Inspirado no John Daly clássico americano.', 'Copo alto', 'Direto no copo', 'Rodela de limão', false, array['Refrescante','Longo','Fácil']::text[], 'cha gelado com vodka e limao'),
+('Chá Gelado com Gin e Hortelã', 'Refrescantes', '[{"n":"Gin","q":"50 ml"},{"n":"Chá","q":"140 ml"},{"n":"Hortelã","q":"6 folhas"},{"n":"Mel","q":"15 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Dilua o mel no chá, bata suavemente a hortelã e sirva com gin e muito gelo.', 'Dilua o mel no chá, bata suavemente a hortelã e sirva com gin e muito gelo.', 'Botânico, herbal e suavemente adocicado com mel.', 'Excelente opção de baixo custo com chá.', 'Taça Gin', 'Direto no copo', 'Ramo de hortelã', false, array['Refrescante','Com hortelã','Charmoso']::text[], 'cha gelado com gin e hortela'),
+('Chá Gelado com Rum e Pêssego', 'Doces & Frutados', '[{"n":"Rum","q":"50 ml"},{"n":"Chá","q":"140 ml"},{"n":"Xarope de pêssego","q":"20 ml"},{"n":"Limão","q":"10 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Misture todos os ingredientes em copo alto com gelo e mexa suavemente.', 'Misture todos os ingredientes em copo alto com gelo e mexa suavemente.', 'Ice tea de pêssego turbinado com rum e limão.', 'Sucesso garantido em happy hours.', 'Copo alto', 'Direto no copo', 'Rodela de limão', false, array['Doce','Refrescante','Longo']::text[], 'cha gelado com rum e pessego'),
+('Tequila com Refrigerante de Limão', 'Cítricos', '[{"n":"Tequila","q":"50 ml"},{"n":"Refrigerante de limão","q":"completar"},{"n":"Limão","q":"15 ml"},{"n":"Sal","q":"borda"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Faça borda de sal no copo, coloque gelo, tequila, limão e complete com refrigerante de limão.', 'Faça borda de sal no copo, coloque gelo, tequila, limão e complete com refrigerante de limão.', 'Rápido, cítrico e refrescante ao estilo mexicano.', 'Alternativa descomplicada da Paloma.', 'Copo alto', 'Direto no copo', 'Gomo de limão', false, array['Ácido','Refrescante','Fácil']::text[], 'tequila com refrigerante de limao'),
+('Rum com Refrigerante de Limão e Hortelã', 'Refrescantes', '[{"n":"Rum","q":"50 ml"},{"n":"Refrigerante de limão","q":"completar"},{"n":"Hortelã","q":"8 folhas"},{"n":"Limão","q":"15 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Amasse levemente a hortelã com o limão, adicione gelo, rum e complete com refrigerante de limão.', 'Amasse levemente a hortelã com o limão, adicione gelo, rum e complete com refrigerante de limão.', 'Mojito expresso super refrescante e pronto em 20 segundos.', 'Perfeito para agilizar o atendimento em noite cheia.', 'Copo alto', 'Direto no copo', 'Ramo de hortelã', false, array['Refrescante','Com hortelã','Fácil']::text[], 'rum com refrigerante de limao e hortela'),
+('Gin com Suco de Uva e Tônica', 'Doces & Frutados', '[{"n":"Gin","q":"50 ml"},{"n":"Suco de uva","q":"60 ml"},{"n":"Água tônica","q":"completar"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Encha a taça de gelo, adicione gin e água tônica e despeje o suco de uva devagar para criar efeito degradê.', 'Encha a taça de gelo, adicione gin e água tônica e despeje o suco de uva devagar para criar efeito degradê.', 'Colorido, frutado e com toque seco da água tônica.', 'Fica lindo nas taças e usa ingredientes fáceis.', 'Taça Gin', 'Montado em camadas', 'Uvas no palito', false, array['Frutado','Charmoso','Refrescante']::text[], 'gin com suco de uva e tonica'),
+('Vodka com Coca-Cola e Limão', 'Refrescantes', '[{"n":"Vodka","q":"50 ml"},{"n":"Coca-Cola","q":"completar"},{"n":"Limão","q":"15 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Coloque gelo no copo, adicione vodka e limão e complete com Coca-Cola gelada.', 'Coloque gelo no copo, adicione vodka e limão e complete com Coca-Cola gelada.', 'Clássico direto, leve e refrescante.', 'Opção coringa para qualquer bar.', 'Copo alto', 'Direto no copo', 'Rodela de limão', false, array['Fácil','Longo','Refrescante']::text[], 'vodka com coca-cola e limao'),
+('Rum com Coca-Cola e Baunilha', 'Doces & Frutados', '[{"n":"Rum","q":"50 ml"},{"n":"Coca-Cola","q":"completar"},{"n":"Xarope de baunilha","q":"15 ml"},{"n":"Limão","q":"10 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Misture rum, xarope de baunilha e limão sobre gelo e complete com Coca-Cola.', 'Misture rum, xarope de baunilha e limão sobre gelo e complete com Coca-Cola.', 'Cuba Libre especial com notas cremosas de baunilha.', 'Transforma um clássico simples em assinatura da casa.', 'Copo alto', 'Direto no copo', 'Rodela de limão', false, array['Doce','Longo','Fácil']::text[], 'rum com coca-cola e baunilha'),
+('Cachaça com Coca-Cola e Limão (Cuba Brasileira)', 'Refrescantes', '[{"n":"Cachaça","q":"50 ml"},{"n":"Coca-Cola","q":"completar"},{"n":"Limão","q":"15 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Coloque gelo, cachaça e suco de limão no copo e complete com Coca-Cola.', 'Coloque gelo, cachaça e suco de limão no copo e complete com Coca-Cola.', 'Versão brasileira econômica e deliciosa da Cuba Libre.', 'Muito pedida em botecos e bares populares.', 'Copo alto', 'Direto no copo', 'Gomo de limão', false, array['Fácil','Refrescante','Longo']::text[], 'cachaca com coca-cola e limao (cuba brasileira)'),
+('Soda Italiana de Morango (Sem Álcool)', 'Refrescantes', '[{"n":"Xarope de morango","q":"35 ml"},{"n":"Água com gás","q":"completar"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Coloque o xarope de morango no fundo do copo, encha de gelo e complete devagar com água com gás.', 'Coloque o xarope de morango no fundo do copo, encha de gelo e complete devagar com água com gás.', 'Refrescante, bonita em camadas e sem álcool.', 'Campeã de margem de lucro em qualquer cardápio.', 'Copo alto', 'Montado em camadas', 'Morango na borda', false, array['Refrescante','Com soda','Doce','Fácil']::text[], 'soda italiana de morango (sem alcool)'),
+('Soda Italiana de Maçã Verde (Sem Álcool)', 'Refrescantes', '[{"n":"Xarope de maçã verde","q":"35 ml"},{"n":"Água com gás","q":"completar"},{"n":"Limão","q":"10 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Coloque o xarope de maçã verde e limão no fundo com gelo e complete com água com gás.', 'Coloque o xarope de maçã verde e limão no fundo com gelo e complete com água com gás.', 'Cor verde esmeralda vibrante, cítrica e refrescante.', 'A soda italiana mais famosa do Brasil.', 'Copo alto', 'Montado em camadas', 'Fatia de limão', false, array['Refrescante','Com soda','Ácido','Fácil']::text[], 'soda italiana de maca verde (sem alcool)'),
+('Soda Italiana de Maracujá (Sem Álcool)', 'Tropicais', '[{"n":"Xarope de maracujá","q":"35 ml"},{"n":"Água com gás","q":"completar"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Despeje o xarope de maracujá, adicione gelo até a borda e complete com água com gás.', 'Despeje o xarope de maracujá, adicione gelo até a borda e complete com água com gás.', 'Soda tropical aromática e borbulhante sem álcool.', 'Opção rápida para quem não bebe álcool.', 'Copo alto', 'Montado em camadas', 'Rodela de limão', false, array['Tropical','Com soda','Refrescante','Fácil']::text[], 'soda italiana de maracuja (sem alcool)'),
+('Soda Italiana de Melancia (Sem Álcool)', 'Refrescantes', '[{"n":"Xarope de melancia","q":"35 ml"},{"n":"Água com gás","q":"completar"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Coloque xarope de melancia, muito gelo e complete com água com gás.', 'Coloque xarope de melancia, muito gelo e complete com água com gás.', 'Leve, doce na medida e super verão.', 'Adorada por famílias e motoristas da rodada.', 'Copo alto', 'Montado em camadas', 'Folha de hortelã', false, array['Refrescante','Com soda','Frutado']::text[], 'soda italiana de melancia (sem alcool)'),
+('Soda Italiana de Framboesa (Sem Álcool)', 'Doces & Frutados', '[{"n":"Xarope de framboesa","q":"35 ml"},{"n":"Água com gás","q":"completar"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Coloque xarope de framboesa, gelo e complete com água com gás.', 'Coloque xarope de framboesa, gelo e complete com água com gás.', 'Vermelho rubi marcante, frutada e borbulhante.', 'Clássica soda italiana de frutas vermelhas.', 'Copo alto', 'Montado em camadas', 'Framboesa ou limão', false, array['Doce','Com soda','Frutado']::text[], 'soda italiana de framboesa (sem alcool)'),
+('Soda Italiana de Limão Siciliano (Sem Álcool)', 'Cítricos', '[{"n":"Xarope de limão","q":"35 ml"},{"n":"Água com gás","q":"completar"},{"n":"Hortelã","q":"5 folhas"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Coloque xarope de limão, hortelã e gelo e complete com água com gás.', 'Coloque xarope de limão, hortelã e gelo e complete com água com gás.', 'Cítrica, perfumada e ultra refrescante.', 'Favorita de dias quentes.', 'Copo alto', 'Direto no copo', 'Ramo de hortelã', false, array['Ácido','Com soda','Com hortelã']::text[], 'soda italiana de limao siciliano (sem alcool)'),
+('Soda Italiana de Hibisco (Sem Álcool)', 'Refrescantes', '[{"n":"Xarope de hibisco","q":"35 ml"},{"n":"Água com gás","q":"completar"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Despeje o xarope de hibisco no copo com gelo e complete com água com gás.', 'Despeje o xarope de hibisco no copo com gelo e complete com água com gás.', 'Floral, elegante e cor rosa intensa.', 'Visual sofisticado para quem escolhe drinks zero álcool.', 'Taça Gin', 'Montado em camadas', 'Casca de limão', false, array['Refrescante','Com soda','Charmoso']::text[], 'soda italiana de hibisco (sem alcool)'),
+('Soda Italiana Azul (Blue Curaçao Sem Álcool)', 'Tropicais', '[{"n":"Xarope de blue curaçao","q":"35 ml"},{"n":"Água com gás","q":"completar"},{"n":"Limão","q":"10 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Coloque xarope de blue curaçao, limão e gelo e complete com água com gás.', 'Coloque xarope de blue curaçao, limão e gelo e complete com água com gás.', 'Azul piscina chamativo com sabor cítrico de laranja.', 'Chama atenção em qualquer mesa.', 'Copo alto', 'Montado em camadas', 'Rodela de laranja', false, array['Tropical','Com soda','Charmoso']::text[], 'soda italiana azul (blue curacao sem alcool)'),
+('Soda Italiana de Groselha com Limão (Sem Álcool)', 'Doces & Frutados', '[{"n":"Xarope de groselha","q":"35 ml"},{"n":"Água com gás","q":"completar"},{"n":"Limão","q":"15 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Coloque xarope de groselha e limão com gelo e complete com água com gás.', 'Coloque xarope de groselha e limão com gelo e complete com água com gás.', 'Nostálgica, barata e deliciosa.', 'Sabor de infância repaginado para o bar.', 'Copo alto', 'Montado em camadas', 'Rodela de limão', false, array['Doce','Com soda','Fácil']::text[], 'soda italiana de groselha com limao (sem alcool)'),
+('Limonada Suíça Cremosa (Sem Álcool)', 'Cítricos', '[{"n":"Limão","q":"1 unid"},{"n":"Leite condensado","q":"40 ml"},{"n":"Água","q":"150 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Bata o limão com água gelada e coe rápido; misture com leite condensado e gelo.', 'Bata o limão com água gelada e coe rápido; misture com leite condensado e gelo.', 'Cremosa, cítrica e refrescante sem álcool.', 'Campeã de pedidos em bares e restaurantes.', 'Copo alto', 'Batido', 'Rodela de limão', true, array['Ácido','Doce','Refrescante']::text[], 'limonada suica cremosa (sem alcool)'),
+('Pink Lemonade da Casa (Sem Álcool)', 'Cítricos', '[{"n":"Limão","q":"30 ml"},{"n":"Morango","q":"3 unid"},{"n":"Açúcar","q":"2 colheres"},{"n":"Água com gás","q":"completar"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Macere morangos com açúcar e suco de limão.
+Adicione gelo e complete com água com gás.', 'Macere morangos com açúcar e suco de limão.
+Adicione gelo e complete com água com gás.', 'Limonada rosa natural com morangos frescos.', 'Clássico refrescante sem álcool com visual incrível.', 'Copo alto', 'Direto no copo', 'Morango e limão', false, array['Refrescante','Ácido','Com soda']::text[], 'pink lemonade da casa (sem alcool)'),
+('Mojito Virgem (Sem Álcool)', 'Refrescantes', '[{"n":"Limão","q":"25 ml"},{"n":"Hortelã","q":"10 folhas"},{"n":"Açúcar","q":"2 colheres"},{"n":"Água com gás","q":"completar"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Macere suavemente hortelã com açúcar e suco de limão.
+Encha de gelo e complete com água com gás.', 'Macere suavemente hortelã com açúcar e suco de limão.
+Encha de gelo e complete com água com gás.', 'Todo o frescor do Mojito tradicional em versão zero álcool.', 'Indispensável na carta de mocktails.', 'Copo alto', 'Direto no copo', 'Ramo de hortelã', false, array['Refrescante','Com hortelã','Com soda']::text[], 'mojito virgem (sem alcool)'),
+('Piña Colada Virgem (Sem Álcool)', 'Tropicais', '[{"n":"Suco de abacaxi","q":"120 ml"},{"n":"Leite de coco","q":"50 ml"},{"n":"Leite condensado","q":"30 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Bata todos os ingredientes com gelo até ficar bem cremoso e sirva no copo alto.', 'Bata todos os ingredientes com gelo até ficar bem cremoso e sirva no copo alto.', 'Cremosa, gelada e 100% tropical sem álcool.', 'Agrada adultos e crianças.', 'Copo alto', 'Batido', 'Fatia de abacaxi', true, array['Tropical','Doce','Fácil']::text[], 'pina colada virgem (sem alcool)'),
+('Coquetel de Frutas Cremoso (Sem Álcool)', 'Doces & Frutados', '[{"n":"Morango","q":"3 unid"},{"n":"Abacaxi","q":"2 pedaços"},{"n":"Leite condensado","q":"40 ml"},{"n":"Creme de leite","q":"30 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Bata as frutas com leite condensado, creme de leite e gelo até ficar aveludado.', 'Bata as frutas com leite condensado, creme de leite e gelo até ficar aveludado.', 'Clássico coquetel de frutas doce e encorpado sem álcool.', 'Tradição brasileira em eventos e bares.', 'Taça Gin', 'Batido', 'Morango', true, array['Doce','Frutado','Tropical']::text[], 'coquetel de frutas cremoso (sem alcool)'),
+('Tônica Cítrica de Laranja e Alecrim (Sem Álcool)', 'Refrescantes', '[{"n":"Água tônica","q":"completar"},{"n":"Laranja","q":"2 rodelas"},{"n":"Alecrim","q":"1 ramo"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Coloque gelo, laranja e alecrim batido na taça e complete com água tônica gelada.', 'Coloque gelo, laranja e alecrim batido na taça e complete com água tônica gelada.', 'Sensação de Gin Tônica elegante em versão zero álcool.', 'Sofisticado e pronto em segundos.', 'Taça Gin', 'Direto na taça', 'Ramo de alecrim', false, array['Refrescante','Charmoso','Fácil']::text[], 'tonica citrica de laranja e alecrim (sem alcool)'),
+('Tônica de Morango e Hortelã (Sem Álcool)', 'Refrescantes', '[{"n":"Água tônica","q":"completar"},{"n":"Morango","q":"3 unid"},{"n":"Hortelã","q":"6 folhas"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Coloque morangos fatiados, hortelã e gelo na taça e complete com água tônica.', 'Coloque morangos fatiados, hortelã e gelo na taça e complete com água tônica.', 'Refrescante, leve e aromático sem álcool.', 'Ótima opção para quem não consome bebidas alcoólicas.', 'Taça Gin', 'Direto na taça', 'Morango e hortelã', false, array['Refrescante','Com hortelã','Frutado']::text[], 'tonica de morango e hortela (sem alcool)'),
+('Chá Gelado de Limão e Hortelã (Sem Álcool)', 'Refrescantes', '[{"n":"Chá","q":"180 ml"},{"n":"Limão","q":"20 ml"},{"n":"Hortelã","q":"6 folhas"},{"n":"Açúcar","q":"1 colher"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Misture o chá gelado com limão e açúcar, adicione hortelã e sirva com bastante gelo.', 'Misture o chá gelado com limão e açúcar, adicione hortelã e sirva com bastante gelo.', 'Chá gelado artesanal leve e natural.', 'Baixo custo e ótima aceitação.', 'Copo alto', 'Direto no copo', 'Rodela de limão', false, array['Refrescante','Com hortelã','Fácil']::text[], 'cha gelado de limao e hortela (sem alcool)'),
+('Chocolate Gelado Cremoso (Sem Álcool)', 'Doces & Frutados', '[{"n":"Leite","q":"150 ml"},{"n":"Calda de chocolate","q":"30 ml"},{"n":"Leite condensado","q":"25 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Bata leite, calda de chocolate, leite condensado e gelo até espumar bem.', 'Bata leite, calda de chocolate, leite condensado e gelo até espumar bem.', 'Achocolatado de bar cremoso e gelado.', 'Adorado por quem pede opção doce sem álcool.', 'Copo alto', 'Batido', 'Calda de chocolate', true, array['Doce','Fácil']::text[], 'chocolate gelado cremoso (sem alcool)'),
+('Refresco de Maracujá com Água com Gás (Sem Álcool)', 'Tropicais', '[{"n":"Maracujá","q":"1 polpa"},{"n":"Açúcar","q":"2 colheres"},{"n":"Água com gás","q":"completar"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Misture a polpa de maracujá com açúcar no fundo do copo, adicione gelo e complete com água com gás.', 'Misture a polpa de maracujá com açúcar no fundo do copo, adicione gelo e complete com água com gás.', 'Natural, gaseificado e super refrescante.', 'Feito na hora com fruta fresca.', 'Copo alto', 'Direto no copo', 'Sementes de maracujá', false, array['Tropical','Com soda','Refrescante']::text[], 'refresco de maracuja com agua com gas (sem alcool)'),
+('Drink Tropical de Manga e Maracujá (Sem Álcool)', 'Tropicais', '[{"n":"Manga","q":"4 pedaços"},{"n":"Suco de maracujá","q":"80 ml"},{"n":"Xarope de açúcar","q":"15 ml"},{"n":"Água com gás","q":"completar"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Macere a manga com xarope, adicione suco de maracujá e gelo e complete com água com gás.', 'Macere a manga com xarope, adicione suco de maracujá e gelo e complete com água com gás.', 'Explosão tropical sem álcool com cor dourada incrível.', 'Ótima opção de mocktail autoral.', 'Taça Gin', 'Direto na taça', 'Fatia de manga', false, array['Tropical','Frutado','Com soda']::text[], 'drink tropical de manga e maracuja (sem alcool)'),
+('Maracujá com Leite Condensado e Mel (Sem Álcool)', 'Tropicais', '[{"n":"Maracujá","q":"1 polpa"},{"n":"Leite condensado","q":"35 ml"},{"n":"Mel","q":"10 ml"},{"n":"Leite","q":"100 ml"},{"n":"Gelo","q":"cubos"}]'::jsonb, 'Bata todos os ingredientes com gelo até ficar bem aerado e cremoso.', 'Bata todos os ingredientes com gelo até ficar bem aerado e cremoso.', 'Vitamina gourmet cremosa de maracujá com toque de mel.', 'Muito procurada por clientes que querem algo encorpado sem álcool.', 'Copo alto', 'Batido', 'Sementes de maracujá', true, array['Tropical','Doce']::text[], 'maracuja com leite condensado e mel (sem alcool)')
 )
-insert into recipes (owner, name, category, ingredients, steps, instructions, description, story, glass, technique, garnish, shaken, tags, author_nick, is_public, verified)
-select null, s.name, s.category, s.ingredients, s.steps, s.instructions, s.description, s.story, s.glass, s.technique, s.garnish, s.shaken, s.tags, 'Meu Bar', true, true
+insert into recipes (owner, name, category, ingredients, steps, instructions, description, story, glass, technique, garnish, shaken, tags, author_nick, is_public, verified, item_type)
+select null, s.name, s.category, s.ingredients, s.steps, s.instructions, s.description, s.story, s.glass, s.technique, s.garnish, s.shaken, s.tags, 'Meu Bar', true, true, 'drink'
 from seed s
 where not exists (
   select 1 from recipes r

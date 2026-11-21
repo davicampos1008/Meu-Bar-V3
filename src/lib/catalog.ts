@@ -762,6 +762,511 @@ export const PLACES_CATALOG = [
   { label: 'Goiânia, GO', lat: -16.6869, lon: -49.2648 },
 ];
 
+export const PETISCO_CATS = [
+  'Porções',
+  'Petiscos Fritos',
+  'Chapa & Grelhados',
+  'Lanches & Sanduíches',
+  'Tábuas & Frios',
+  'Sobremesas',
+];
+
+export const AVULSO_CATS = [
+  'Cervejas',
+  'Long Necks & Latas',
+  'Energéticos',
+  'Refrigerantes & Sucos',
+  'Águas & Tônicas',
+  'Doses & Garrafas',
+  'Combos',
+];
+
+export const STORE_AMENITIES = [
+  '🎵 Música ao vivo',
+  '🪑 Mesas externas',
+  '📶 Wi-Fi grátis',
+  '❄️ Ar-condicionado',
+  '🚗 Estacionamento',
+  '🐶 Pet friendly',
+  '🍹 Coquetelaria autoral',
+  '🍟 Cozinha / Petiscos',
+  '🎉 Eventos & Reservas',
+  '📺 Transmissão de jogos',
+  '🛵 Delivery',
+  '✨ Área VIP / Lounge',
+];
+
+export const STORE_PROFILE_TEMPLATES = [
+  {
+    id: 'sp-royal',
+    label: '✨ Royal Gold',
+    name_font: 'store-font-cinzel',
+    color_bg: '#08070a',
+    color_surface: '#141118',
+    color_accent: '#e5b84b',
+    color_ok: '#34d399',
+    color_text: '#f5efe2',
+    profile_config: {
+      bg_pattern: 'velvet',
+      bg_color_2: '#1d1609',
+      banner_height: 'lg' as const,
+      banner_overlay: 'gradient' as const,
+      logo_shape: 'double-ring',
+      logo_size: 'lg' as const,
+      card_style: 'bordered' as const,
+      top_ornament: 'victorian-corners',
+      side_detail: 'thin-gold',
+      badge_text: 'COQUETELARIA & LOUNGE',
+    },
+  },
+  {
+    id: 'sp-boteco',
+    label: '🍺 Boteco Raiz',
+    name_font: 'store-font-lobster',
+    color_bg: '#f5efe4',
+    color_surface: '#fffcf5',
+    color_accent: '#b47b2b',
+    color_ok: '#15803d',
+    color_text: '#1c1917',
+    profile_config: {
+      bg_pattern: 'parchment',
+      bg_color_2: '#eadfc8',
+      banner_height: 'md' as const,
+      banner_overlay: 'soft' as const,
+      logo_shape: 'circle',
+      logo_size: 'md' as const,
+      card_style: 'bordered' as const,
+      top_ornament: 'boteco-seal',
+      side_detail: 'vintage-arch',
+      badge_text: 'TRADIÇÃO & BOTECO',
+    },
+  },
+  {
+    id: 'sp-neon',
+    label: '⚡ Neon Club',
+    name_font: 'store-font-righteous',
+    color_bg: '#09090b',
+    color_surface: '#161121',
+    color_accent: '#ec4899',
+    color_ok: '#22d3ee',
+    color_text: '#fdf2f8',
+    profile_config: {
+      bg_pattern: 'grunge',
+      bg_color_2: '#2d0a24',
+      banner_height: 'lg' as const,
+      banner_overlay: 'gradient' as const,
+      logo_shape: 'glow',
+      logo_size: 'lg' as const,
+      card_style: 'neon' as const,
+      top_ornament: 'cyber-orbitals',
+      side_detail: 'neon-frame',
+      badge_text: 'NIGHT CLUB & BAR',
+    },
+  },
+  {
+    id: 'sp-tropical',
+    label: '🌴 Rooftop Tropical',
+    name_font: 'store-font-pacifico',
+    color_bg: '#0c1f1a',
+    color_surface: '#122b24',
+    color_accent: '#fb923c',
+    color_ok: '#34d399',
+    color_text: '#f0fdf4',
+    profile_config: {
+      bg_pattern: 'sunset-glow',
+      bg_color_2: '#3b1d14',
+      banner_height: 'lg' as const,
+      banner_overlay: 'gradient' as const,
+      logo_shape: 'rounded',
+      logo_size: 'md' as const,
+      card_style: 'glass' as const,
+      top_ornament: 'tropical-bar',
+      side_detail: 'bamboo-sides',
+      badge_text: 'ROOFTOP & SUNSET',
+    },
+  },
+  {
+    id: 'sp-speakeasy',
+    label: '🍸 Speakeasy',
+    name_font: 'store-font-playfair',
+    color_bg: '#0b0b0d',
+    color_surface: '#15151a',
+    color_accent: '#d6c39c',
+    color_ok: '#34d399',
+    color_text: '#f4f1ea',
+    profile_config: {
+      bg_pattern: 'chalkboard',
+      bg_color_2: '#1c1b22',
+      banner_height: 'md' as const,
+      banner_overlay: 'dark' as const,
+      logo_shape: 'double-ring',
+      logo_size: 'md' as const,
+      card_style: 'minimal' as const,
+      top_ornament: 'speakeasy-crest',
+      side_detail: 'double-hairline',
+      badge_text: 'SPEAKEASY BAR',
+    },
+  },
+  {
+    id: 'sp-clean',
+    label: '🌿 Editorial Claro',
+    name_font: 'store-font-cormorant',
+    color_bg: '#faf8f4',
+    color_surface: '#ffffff',
+    color_accent: '#1f2937',
+    color_ok: '#047857',
+    color_text: '#111827',
+    profile_config: {
+      bg_pattern: 'marble-light',
+      bg_color_2: '#eae5da',
+      banner_height: 'md' as const,
+      banner_overlay: 'soft' as const,
+      logo_shape: 'arch',
+      logo_size: 'md' as const,
+      card_style: 'elevated' as const,
+      top_ornament: 'classic-filigree',
+      side_detail: 'editorial-frame',
+      badge_text: 'GASTROBAR',
+    },
+  },
+];
+
+export const QR_DESIGN_TEMPLATES = [
+  {
+    id: 'tpl-qr-royal',
+    design_name: '✨ Royal Gold',
+    bg_color: '#0b090e',
+    bg_color_2: '#23190a',
+    bg_pattern: 'radial' as const,
+    card_color: '#16131c',
+    accent_color: '#e5b84b',
+    text_color: '#f8f2e4',
+    qr_fg_color: '#111111',
+    qr_bg_color: '#ffffff',
+    frame_style: 'gold' as const,
+    headline: 'CARDÁPIO DIGITAL',
+    subheadline: 'Aponte a câmera do celular e peça direto da sua mesa',
+    footer_text: 'Drinks feitos na hora · Petiscos · Bebidas',
+    show_logo: true,
+    show_name: true,
+    show_slogan: true,
+    show_table: true,
+    show_phone: true,
+    show_instagram: true,
+    show_wifi: false,
+    badge_text: 'ESCANEIE AQUI',
+  },
+  {
+    id: 'tpl-qr-boteco',
+    design_name: '🍺 Boteco Clássico',
+    bg_color: '#f5efe4',
+    bg_color_2: '#e4d5ba',
+    bg_pattern: 'gradient' as const,
+    card_color: '#fffcf5',
+    accent_color: '#a16207',
+    text_color: '#1c1917',
+    qr_fg_color: '#1c1917',
+    qr_bg_color: '#ffffff',
+    frame_style: 'vintage' as const,
+    headline: 'NOSSO CARDÁPIO',
+    subheadline: 'Escaneie o QR Code para ver drinks, porções e cervejas',
+    footer_text: 'Bom atendimento & bebida trincando',
+    show_logo: true,
+    show_name: true,
+    show_slogan: true,
+    show_table: true,
+    show_phone: true,
+    show_instagram: true,
+    show_wifi: true,
+    badge_text: 'PEÇA PELO CELULAR',
+  },
+  {
+    id: 'tpl-qr-neon',
+    design_name: '⚡ Neon Club',
+    bg_color: '#09090d',
+    bg_color_2: '#310a2a',
+    bg_pattern: 'gradient' as const,
+    card_color: '#14101f',
+    accent_color: '#ec4899',
+    text_color: '#fdf2f8',
+    qr_fg_color: '#111111',
+    qr_bg_color: '#ffffff',
+    frame_style: 'neon' as const,
+    headline: 'DRINKS & MENU',
+    subheadline: 'Escaneie e faça seu pedido sem fila no balcão',
+    footer_text: 'Peça pelo celular e receba o aviso quando ficar pronto',
+    show_logo: true,
+    show_name: true,
+    show_slogan: true,
+    show_table: true,
+    show_phone: false,
+    show_instagram: true,
+    show_wifi: true,
+    badge_text: 'MENU AO VIVO',
+  },
+  {
+    id: 'tpl-qr-clean',
+    design_name: '🤍 Minimalista Branco',
+    bg_color: '#ffffff',
+    bg_color_2: '#f3f4f6',
+    bg_pattern: 'solid' as const,
+    card_color: '#ffffff',
+    accent_color: '#111827',
+    text_color: '#111827',
+    qr_fg_color: '#111827',
+    qr_bg_color: '#ffffff',
+    frame_style: 'minimal' as const,
+    headline: 'CARDÁPIO',
+    subheadline: 'Aponte a câmera para acessar o cardápio digital',
+    footer_text: 'Obrigado pela preferência',
+    show_logo: true,
+    show_name: true,
+    show_slogan: true,
+    show_table: true,
+    show_phone: true,
+    show_instagram: true,
+    show_wifi: false,
+    badge_text: 'QR CODE',
+  },
+  {
+    id: 'tpl-qr-speakeasy',
+    design_name: '🍸 Speakeasy Escuro',
+    bg_color: '#0c0c0f',
+    bg_color_2: '#1b1b22',
+    bg_pattern: 'dots' as const,
+    card_color: '#141418',
+    accent_color: '#d4b475',
+    text_color: '#f5f2eb',
+    qr_fg_color: '#0f0f12',
+    qr_bg_color: '#f8f5ef',
+    frame_style: 'double' as const,
+    headline: 'COQUETELARIA',
+    subheadline: 'Acesse nossa carta de drinks autorais e clássicos',
+    footer_text: 'Aprecie com moderação',
+    show_logo: true,
+    show_name: true,
+    show_slogan: true,
+    show_table: true,
+    show_phone: true,
+    show_instagram: true,
+    show_wifi: false,
+    badge_text: 'CARTA DE DRINKS',
+  },
+  {
+    id: 'tpl-qr-tropical',
+    design_name: '🌴 Tropical Verão',
+    bg_color: '#0d221c',
+    bg_color_2: '#2d1c12',
+    bg_pattern: 'gradient' as const,
+    card_color: '#122c25',
+    accent_color: '#fb923c',
+    text_color: '#f0fdf4',
+    qr_fg_color: '#0d221c',
+    qr_bg_color: '#ffffff',
+    frame_style: 'rounded' as const,
+    headline: 'MENU DO BAR',
+    subheadline: 'Drinks gelados, petiscos e bebidas na sua mesa',
+    footer_text: 'Escaneie e aproveite!',
+    show_logo: true,
+    show_name: true,
+    show_slogan: true,
+    show_table: true,
+    show_phone: true,
+    show_instagram: true,
+    show_wifi: true,
+    badge_text: 'BEM-VINDO',
+  },
+];
+
+export const STARTER_KITS = [
+  {
+    id: 'kit-economico',
+    title: '⚡ Kit Inicial Rápido & Barato',
+    subtitle: 'O menor investimento para começar a vender drinks HOJE',
+    priceRange: '~R$ 60 a R$ 85 no mercado',
+    highlight: 'Libera caipirinhas, batidas cremosas, cuba/hi-fi e drinks sem álcool!',
+    ingredients: [
+      'Cachaça',
+      'Vodka',
+      'Limão',
+      'Açúcar',
+      'Leite condensado',
+      'Maracujá',
+      'Morango',
+      'Coca-Cola',
+      'Água com gás',
+      'Gelo',
+    ],
+  },
+  {
+    id: 'kit-gin-bar',
+    title: '🍸 Kit Gin, Vodka & Clássicos',
+    subtitle: 'Os campeão de vendas em bares e rooftops com alta margem',
+    priceRange: '~R$ 110 a R$ 150',
+    highlight: 'Libera Gin Tônicas variadas, Moscow Mule, Cosmopolitan e tropicais!',
+    ingredients: [
+      'Gin',
+      'Vodka',
+      'Água tônica',
+      'Energético',
+      'Limão',
+      'Laranja',
+      'Hortelã',
+      'Xarope de açúcar',
+      'Xarope de gengibre',
+      'Morango',
+      'Gelo',
+    ],
+  },
+  {
+    id: 'kit-cafe-cremoso',
+    title: '☕ Kit Café, Cremosos & Sem Álcool',
+    subtitle: 'Perfeito para diferenciar o cardápio com baixo custo (café + sobremesa + mocktails)',
+    priceRange: '~R$ 45 a R$ 70',
+    highlight: 'Libera cafés gelados, drinks com leite condensado, batidas e sodas italianas!',
+    ingredients: [
+      'Café espresso',
+      'Leite condensado',
+      'Leite',
+      'Creme de leite',
+      'Calda de chocolate',
+      'Água com gás',
+      'Xarope de morango',
+      'Limão',
+      'Hortelã',
+      'Gelo',
+    ],
+  },
+];
+
+export const STOCK_UNITS = [
+  { id: 'garrafa', label: 'Garrafa (ml)', short: 'garrafa', costLabel: 'Custo da garrafa (R$)', showSize: true, sizePlaceholder: 'ml (ex: 750)' },
+  { id: 'lata', label: 'Lata / Long neck (ml)', short: 'lata', costLabel: 'Custo da lata/un (R$)', showSize: true, sizePlaceholder: 'ml (ex: 350)' },
+  { id: 'litro', label: 'Litro (L)', short: 'L', costLabel: 'Custo por litro (R$/L)', showSize: false, sizePlaceholder: 'ml' },
+  { id: 'kg', label: 'Quilo (kg)', short: 'kg', costLabel: 'Custo por kg (R$/kg)', showSize: false, sizePlaceholder: 'g' },
+  { id: 'g', label: 'Gramas (g)', short: 'g', costLabel: 'Custo da embalagem (R$)', showSize: true, sizePlaceholder: 'g (ex: 395)' },
+  { id: 'unidade', label: 'Unidade (un)', short: 'un', costLabel: 'Custo por unidade (R$/un)', showSize: false, sizePlaceholder: '' },
+  { id: 'maco', label: 'Maço', short: 'maço', costLabel: 'Custo por maço (R$/maço)', showSize: false, sizePlaceholder: '' },
+  { id: 'bandeja', label: 'Bandeja / Caixa', short: 'bandeja', costLabel: 'Custo da bandeja/cx (R$)', showSize: false, sizePlaceholder: '' },
+  { id: 'pacote', label: 'Pacote / Saco', short: 'pacote', costLabel: 'Custo do pacote (R$)', showSize: false, sizePlaceholder: '' },
+  { id: 'pote', label: 'Pote / Vidro', short: 'pote', costLabel: 'Custo do pote (R$)', showSize: true, sizePlaceholder: 'ml/g' },
+] as const;
+
+export type StockUnitId = (typeof STOCK_UNITS)[number]['id'];
+
+export function getUnitMeta(unitId?: string | null) {
+  return STOCK_UNITS.find((u) => u.id === unitId) || STOCK_UNITS[0];
+}
+
+export function getDefaultUnitForIngredient(
+  name: string,
+  category?: string | null
+): { unit: StockUnitId; defaultSize?: number } {
+  const n = String(name || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toLowerCase();
+
+  // Ervas em maço
+  if (n.includes('hortela') || n.includes('alecrim') || n.includes('manjericao')) {
+    return { unit: 'maco' };
+  }
+  // Itens vendidos por unidade
+  if (
+    n.includes('abacaxi') ||
+    n.includes('melancia') ||
+    n === 'ovo' ||
+    n.includes('clara de ovo') ||
+    n.includes('agua de coco')
+  ) {
+    return { unit: 'unidade' };
+  }
+  // Frutas, açúcar, sal, gelo, chocolate em pó/barra, grãos -> kg
+  if (
+    n.includes('limao') ||
+    n.includes('laranja') ||
+    n.includes('morango') ||
+    n.includes('framboesa') ||
+    n.includes('maca') ||
+    n.includes('maracuja') ||
+    n.includes('kiwi') ||
+    n.includes('manga') ||
+    n.includes('uva') ||
+    n.includes('pepino') ||
+    n.includes('gengibre') ||
+    n.includes('pimenta') ||
+    n.includes('acucar') ||
+    n === 'sal' ||
+    n.includes('gelo') ||
+    n.includes('cafe em graos') ||
+    n.includes('chocolate')
+  ) {
+    return { unit: 'kg' };
+  }
+  // Especiarias / secos em pacote
+  if (
+    n.includes('canela') ||
+    n.includes('anis') ||
+    n.includes('noz-moscada') ||
+    n.includes('cravo') ||
+    n.includes('coco ralado') ||
+    n.includes('flores comestiveis') ||
+    n.includes('cha')
+  ) {
+    return { unit: 'pacote' };
+  }
+  // Potes / vidros / conservas / cremes
+  if (
+    n.includes('cereja') ||
+    n.includes('azeitona') ||
+    n.includes('cebola perola') ||
+    n.includes('doce de leite') ||
+    n.includes('mel') ||
+    n.includes('sorvete') ||
+    n.includes('chantilly') ||
+    n.includes('calda de ')
+  ) {
+    return { unit: 'pote' };
+  }
+  // Leite condensado / creme de leite / leite de coco -> caixa/lata (g/ml)
+  if (n.includes('leite condensado') || n.includes('creme de leite') || n.includes('creme de coco')) {
+    return { unit: 'bandeja' };
+  }
+  if (n.includes('leite de coco')) {
+    return { unit: 'garrafa', defaultSize: 200 };
+  }
+  // Latas / long necks / refrigerantes / tônicas
+  if (
+    n.includes('tonica') ||
+    n.includes('energetico') ||
+    n.includes('ginger beer') ||
+    n.includes('ginger ale') ||
+    n.includes('cerveja') ||
+    n.includes('coca-cola') ||
+    n.includes('guarana') ||
+    n.includes('refrigerante') ||
+    n.includes('soda') ||
+    n.includes('agua com gas')
+  ) {
+    return { unit: 'lata', defaultSize: 350 };
+  }
+  // Sucos e leite -> Litro
+  if (n.startsWith('suco de ') || n === 'leite' || n.includes('cafe espresso')) {
+    return { unit: 'litro' };
+  }
+  // Xaropes
+  if (n.includes('xarope') || n.includes('grenadine') || n.includes('orgeat') || n.includes('agua de rosas') || n.includes('essencia')) {
+    return { unit: 'garrafa', defaultSize: 700 };
+  }
+  // Categorias gerais
+  if (category === 'Guarnições') return { unit: 'kg' };
+  if (category === 'Destilados' || category === 'Licores' || category === 'Vinhos e aperitivos') {
+    return { unit: 'garrafa', defaultSize: 750 };
+  }
+  return { unit: 'garrafa', defaultSize: 750 };
+}
+
 export function allIngredientNames(): string[] {
   const out: string[] = [];
   const seen = new Set<string>();

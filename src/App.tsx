@@ -2,7 +2,6 @@ import type { RealtimeChannel, User } from '@supabase/supabase-js';
 import { useEffect, useRef, useState } from 'react';
 import { LoginScreen, OnboardingScreen } from './components/AuthAndOnboarding';
 import {
-  CashierView,
   MoreView,
   PricesView,
   QueueView,
@@ -16,7 +15,11 @@ import {
   JobsSection,
   ProfileSection,
 } from './components/CareersViews';
+import { CashierProView } from './components/CashierProView';
+import { CatalogItemsManager } from './components/CatalogItemsManager';
+import { ManagementProView, type ManagementSubTab } from './components/ManagementProView';
 import { MenuPage } from './components/MenuPage';
+import type { StudioTab } from './components/MenuStudio';
 import {
   CreateDrinkModal,
   MakeDrinkModal,
@@ -26,9 +29,15 @@ import {
 } from './components/Modals';
 import { OfflineIndicator, PWAInstallButton } from './components/PWAControls';
 import { BrandMark } from './components/SharedUI';
+import {
+  flushOfflineOrders,
+  loadOpenTableCalls,
+  playStationAlert,
+  resolveTableCall,
+} from './lib/opsUtils';
 import { EXTENDED_RECIPES } from './lib/recipesSeed';
 import { broadcastMenuUpdate, sb } from './lib/supabase';
-import { applyBarTheme, beep, getUnpricedAvailableDrinks, norm } from './lib/utils';
+import { applyBarTheme, getUnpricedAvailableDrinks, norm } from './lib/utils';
 import type {
   Bar,
   BarEntry,
@@ -40,6 +49,7 @@ import type {
   Recipe,
   ServiceRequest,
   StaffProfile,
+  TableCallAlert,
   TableTab,
   UserCoords,
 } from './types/meubar';
@@ -60,7 +70,9 @@ export default function App() {
   const [screenMode, setScreenMode] = useState<'bar' | 'seeker' | 'onboarding'>('seeker');
 
   const [tab, setTab] = useState<string>('recipes');
-  const [studioInitialTab, setStudioInitialTab] = useState<'store' | 'menu' | 'promos'>('menu');
+  const [studioInitialTab, setStudioInitialTab] = useState<StudioTab>('menu');
+  const [mgmtSubTab, setMgmtSubTab] = useState<ManagementSubTab>('dashboard');
+  const [queueStation, setQueueStation] = useState<'all' | 'bar' | 'cozinha' | 'garcom'>('all');
   const [seekerTab, setSeekerTab] = useState<'careers' | 'profile' | 'explore' | 'createbar'>('careers');
   const [careerMode, setCareerMode] = useState<'store' | 'personal'>('store');
 
@@ -69,9 +81,11 @@ export default function App() {
   const [prices, setPrices] = useState<Record<string, number>>({});
   const [orders, setOrders] = useState<Order[]>([]);
   const [tableTabs, setTableTabs] = useState<TableTab[]>([]);
+  const [tableCalls, setTableCalls] = useState<TableCallAlert[]>([]);
   const [settledIds, setSettledIds] = useState<Set<string>>(new Set());
   const [members, setMembers] = useState<BarMember[]>([]);
 
+  const [publicBars, setPublicBars] = useState<Bar[]>([]);
   const [jobs, setJobs] = useState<JobPost[]>([]);
   const [myApps, setMyApps] = useState<JobApplication[]>([]);
   const [receivedApps, setReceivedApps] = useState<JobApplication[]>([]);
@@ -284,14 +298,30 @@ export default function App() {
     currentBarId: string | null,
     managerFlag: boolean
   ) => {
-    const jr = await sb
+    let jr = await sb
       .from('job_posts')
-      .select('*, bars(name, handle, city, lat, lon)')
+      .select('*, bars(*)')
       .eq('is_open', true)
       .order('created_at', { ascending: false })
       .limit(80);
+    if (jr.error) {
+      jr = await sb
+        .from('job_posts')
+        .select('*, bars(name, handle, city, lat, lon)')
+        .eq('is_open', true)
+        .order('created_at', { ascending: false })
+        .limit(80);
+    }
     const openJobs = jr.error ? [] : (jr.data as JobPost[]) || [];
     setJobs(openJobs);
+
+    const pb = await sb.from('bars').select('*').order('created_at', { ascending: false }).limit(80);
+    if (!pb.error && pb.data) {
+      const nextPublic = pb.data as Bar[];
+      setPublicBars((prev) =>
+        JSON.stringify(prev) === JSON.stringify(nextPublic) ? prev : nextPublic
+      );
+    }
 
     const ar = await sb.from('job_applications').select('*').eq('applicant_id', uid);
     setMyApps(ar.error ? [] : (ar.data as JobApplication[]) || []);
@@ -354,7 +384,22 @@ export default function App() {
     await Promise.all([refreshOrders(bar.id), refreshTableTabs(bar.id)]);
     const mgr = barRole === 'owner' || barRole === 'dono' || barRole === 'gerente';
     await loadJobsAndRequests(uid, bar.id, mgr);
-    setTab('recipes');
+    if (barRole === 'cozinha') {
+      setQueueStation('cozinha');
+      setTab('queue');
+    } else if (barRole === 'garcom') {
+      setQueueStation('garcom');
+      setTab('queue');
+    } else if (barRole === 'barman') {
+      setQueueStation('bar');
+      setTab('queue');
+    } else if (barRole === 'caixa') {
+      setQueueStation('all');
+      setTab('cashier');
+    } else {
+      setQueueStation('all');
+      setTab('recipes');
+    }
     setScreenMode('bar');
   };
 
@@ -483,7 +528,14 @@ export default function App() {
           filter: 'bar_id=eq.' + activeBar.id,
         },
         (p) => {
-          if (p.eventType === 'INSERT') beep();
+          if (p.eventType === 'INSERT') {
+            playStationAlert(role === 'cozinha' ? 'cozinha' : 'bar');
+          } else if (
+            p.eventType === 'UPDATE' &&
+            (p.new as Order | undefined)?.status === 'ready'
+          ) {
+            playStationAlert('garcom');
+          }
           void refreshOrders(activeBar.id);
         }
       )
@@ -509,6 +561,63 @@ export default function App() {
       .subscribe();
 
     subRef.current = ch;
+
+    const syncOffline = async () => {
+      const sentCount = await flushOfflineOrders(activeBar.id);
+      if (sentCount > 0) {
+        showToast(`${sentCount} pedido(s) offline sincronizado(s) automaticamente!`);
+        void refreshOrders(activeBar.id);
+      }
+    };
+    void syncOffline();
+    const onOnline = () => void syncOffline();
+    window.addEventListener('online', onOnline);
+
+    // Carrega chamados abertos de mesa (Chamar Garçom / Pedir a Conta) e ouve em tempo real
+    void loadOpenTableCalls(activeBar.id).then((list) => setTableCalls(list));
+    const callCh = sb
+      .channel(`bar-calls-${activeBar.id}`)
+      .on('broadcast', { event: 'table_call' }, (msg) => {
+        const incoming = msg?.payload as TableCallAlert | undefined;
+        if (!incoming || !incoming.id) return;
+        playStationAlert('garcom');
+        showToast(
+          incoming.kind === 'bill'
+            ? `🧾 ${incoming.table_label || incoming.client_name} pediu a conta${incoming.note ? ` (${incoming.note})` : ''}!`
+            : `🙋 ${incoming.table_label || incoming.client_name} chamou o garçom!`
+        );
+        setTableCalls((prev) =>
+          prev.some((x) => x.id === incoming.id) ? prev : [incoming, ...prev]
+        );
+      })
+      .on('broadcast', { event: 'table_call_resolved' }, (msg) => {
+        const resolvedId = (msg?.payload as { id?: string } | undefined)?.id;
+        if (!resolvedId) return;
+        setTableCalls((prev) => prev.filter((x) => x.id !== resolvedId));
+      })
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'table_calls',
+          filter: 'bar_id=eq.' + activeBar.id,
+        },
+        (p) => {
+          if (p.eventType === 'INSERT') {
+            const c = p.new as TableCallAlert;
+            playStationAlert('garcom');
+            showToast(
+              c.kind === 'bill'
+                ? `🧾 ${c.table_label || c.client_name} pediu a conta!`
+                : `🙋 ${c.table_label || c.client_name} chamou o garçom!`
+            );
+          }
+          void loadOpenTableCalls(activeBar.id).then((list) => setTableCalls(list));
+        }
+      )
+      .subscribe();
+
     // Checagem silenciosa de 5 em 5 segundos para todas as telas do bar
     const poll = setInterval(
       () => void silentSyncBarData(activeBar.id, user.id, isManager),
@@ -517,10 +626,12 @@ export default function App() {
 
     return () => {
       clearInterval(poll);
+      window.removeEventListener('online', onOnline);
       void sb.removeChannel(ch);
+      void sb.removeChannel(callCh);
       subRef.current = null;
     };
-  }, [isMenuRoute, activeBar?.id, isManager, user?.id, screenMode]);
+  }, [isMenuRoute, activeBar?.id, isManager, user?.id, screenMode, role]);
 
   // Proteção do botão Voltar do Android (Capacitor APK + PWA/WebView)
   const navStateRef = useRef({
@@ -638,7 +749,9 @@ export default function App() {
           return;
         }
         if (st.screenMode === 'bar') {
-          if (['cashier', 'prices', 'studio', 'careers'].includes(st.tab)) {
+          if (
+            ['cashier', 'prices', 'studio', 'careers', 'catalog', 'management'].includes(st.tab)
+          ) {
             setTab('more');
             keepGuard();
             return;
@@ -761,6 +874,7 @@ export default function App() {
   const unpricedCount = activeBar
     ? getUnpricedAvailableDrinks(recipes, items, prices, activeBar).length
     : 0;
+  const actorName = profile.display_name || user.email?.split('@')[0] || 'Equipe';
 
   return (
     <>
@@ -772,8 +886,12 @@ export default function App() {
           userId={user.id}
           profile={profile}
           jobs={jobs}
+          bars={bars}
           userCoords={userCoords}
           hasExistingBars={bars.length > 0}
+          onPickBar={async (b, r) => {
+            await openBar(b, r, user.id);
+          }}
           onDetectCoords={() => detectCurrentCoords(true)}
           onGoSeeker={() => {
             applyBarTheme(null);
@@ -857,19 +975,84 @@ export default function App() {
               </div>
             )}
             {seekerTab === 'explore' && (
-              <ExploreBarsView jobs={jobs} userCoords={userCoords} />
+              <ExploreBarsView
+                jobs={jobs}
+                publicBars={[
+                  ...publicBars,
+                  ...bars
+                    .map((x) => x.bar)
+                    .filter((b) => !publicBars.some((pb) => pb.id === b.id)),
+                ]}
+                myApps={myApps}
+                profile={profile}
+                userId={user.id}
+                userCoords={userCoords}
+                onRefreshJobs={() => loadJobsAndRequests(user.id, null, false)}
+                onGoProfile={() => setSeekerTab('profile')}
+                onToast={showToast}
+              />
             )}
             {seekerTab === 'createbar' && (
               <div>
                 <h1>Meu bar</h1>
-                <p className="mu">Modo profissional sem bar ativo.</p>
+                <p className="mu">
+                  Entre direto em um dos seus bares conectados ou crie/solicite acesso a um novo bar.
+                </p>
+
+                {bars.length > 0 && (
+                  <div className="panel" style={{ marginBottom: 14 }}>
+                    <h2 style={{ marginTop: 0 }}>🏪 Meus bares conectados ({bars.length})</h2>
+                    <p className="mu text-[12px] mb-2">
+                      Toque em um bar para entrar direto no painel operacional.
+                    </p>
+                    <div className="list">
+                      {bars.map((x) => (
+                        <div key={x.bar.id} className="item">
+                          <div className="row" style={{ gap: 10 }}>
+                            {x.bar.logo_url ? (
+                              <img
+                                src={x.bar.logo_url}
+                                alt={x.bar.name}
+                                className="w-10 h-10 rounded-full object-cover border border-white/15 shrink-0"
+                              />
+                            ) : (
+                              <div className="w-10 h-10 rounded-full bg-white/5 border border-white/10 flex items-center justify-center text-lg shrink-0">
+                                🍸
+                              </div>
+                            )}
+                            <div>
+                              <b>{x.bar.name}</b>
+                              <small>
+                                {x.bar.handle ? `@${x.bar.handle} · ` : ''}
+                                {x.role === 'owner' ? 'Dono' : x.role}
+                                {x.bar.city ? ` · ${x.bar.city}` : ''}
+                              </small>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            className="b sm"
+                            onClick={() => void openBar(x.bar, x.role, user.id)}
+                          >
+                            Entrar →
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 <div className="panel">
+                  <h2 style={{ marginTop: 0 }}>➕ Novo bar ou conectar por @</h2>
+                  <p className="mu text-[12px] mb-3">
+                    Crie um novo estabelecimento ou entre em outra loja usando @handle e senha de serviço.
+                  </p>
                   <button
                     type="button"
                     className="b full"
                     onClick={() => setScreenMode('onboarding')}
                   >
-                    Criar ou entrar em um bar
+                    Criar bar ou entrar com @ + senha
                   </button>
                 </div>
               </div>
@@ -958,6 +1141,10 @@ export default function App() {
                 hasPricing={hasPricing}
                 onItemsChange={setItems}
                 onGoPrices={() => setTab('prices')}
+                onOpenCompras={() => {
+                  setMgmtSubTab('compras');
+                  setTab('management');
+                }}
                 onToast={showToast}
               />
             )}
@@ -965,19 +1152,76 @@ export default function App() {
             {tab === 'queue' && (
               <QueueView
                 bar={activeBar}
+                role={role}
+                actorName={actorName}
                 orders={orders}
                 recipes={recipes}
-                onBarUpdated={setActiveBar}
+                items={items}
+                prices={prices}
+                tableTabs={tableTabs}
+                tableCalls={tableCalls}
+                defaultStation={queueStation}
+                onItemsChange={setItems}
+                onResolveCall={async (callId) => {
+                  setTableCalls((prev) => prev.filter((x) => x.id !== callId));
+                  await resolveTableCall(activeBar.id, callId);
+                  showToast('Chamado marcado como atendido!');
+                }}
+                onBarUpdated={(updated) => {
+                  setActiveBar(updated);
+                  setBars((prev) =>
+                    prev.map((x) => (x.bar.id === updated.id ? { ...x, bar: updated } : x))
+                  );
+                }}
                 onRefreshOrders={() => refreshOrders(activeBar.id)}
+                onRefreshTableTabs={() => refreshTableTabs(activeBar.id)}
+                onRecipesUpdated={async () => {
+                  const r = await sb.from('recipes').select('*').order('name');
+                  if (!r.error && r.data) setRecipes(dedupeRecipes(r.data as Recipe[]));
+                }}
+                onGoStock={() => setTab('stock')}
+                onOpenCatalog={() => setTab('catalog')}
+                onToast={showToast}
+              />
+            )}
+
+            {tab === 'catalog' && (
+              <CatalogItemsManager
+                bar={activeBar}
+                userId={user.id}
+                recipes={recipes}
+                prices={prices}
+                onChanged={async () => {
+                  const [rRec, rPr] = await Promise.all([
+                    sb.from('recipes').select('*').order('name'),
+                    sb.from('bar_prices').select('recipe_id, price').eq('bar_id', activeBar.id),
+                  ]);
+                  if (!rRec.error && rRec.data) {
+                    setRecipes(dedupeRecipes(rRec.data as Recipe[]));
+                  }
+                  if (!rPr.error && rPr.data) {
+                    const prMap: Record<string, number> = {};
+                    (rPr.data as { recipe_id: string; price: number }[]).forEach((x) => {
+                      prMap[x.recipe_id] = Number(x.price);
+                    });
+                    setPrices(prMap);
+                  }
+                }}
+                onToast={showToast}
+                onBack={() => setTab('more')}
               />
             )}
 
             {tab === 'cashier' && (
-              <CashierView
+              <CashierProView
                 bar={activeBar}
+                role={role}
+                actorName={actorName}
                 orders={orders}
                 tableTabs={tableTabs}
+                tableCalls={tableCalls}
                 recipes={recipes}
+                items={items}
                 prices={prices}
                 hasPricing={hasPricing}
                 settledIds={settledIds}
@@ -986,8 +1230,42 @@ export default function App() {
                   ids.forEach((id) => next.add(id));
                   setSettledIds(next);
                 }}
+                onBarUpdated={(updated) => {
+                  setActiveBar(updated);
+                  setBars((prev) =>
+                    prev.map((x) => (x.bar.id === updated.id ? { ...x, bar: updated } : x))
+                  );
+                }}
                 onRefreshOrders={() => refreshOrders(activeBar.id)}
                 onRefreshTableTabs={() => refreshTableTabs(activeBar.id)}
+                onResolveCall={async (callId) => {
+                  setTableCalls((prev) => prev.filter((x) => x.id !== callId));
+                  await resolveTableCall(activeBar.id, callId);
+                  showToast('Chamado marcado como atendido!');
+                }}
+                onGoManagement={(st) => {
+                  if (st) setMgmtSubTab(st);
+                  setTab('management');
+                }}
+                onBackMore={() => setTab('more')}
+                onToast={showToast}
+              />
+            )}
+
+            {tab === 'management' && (
+              <ManagementProView
+                bar={activeBar}
+                role={role}
+                actorName={actorName}
+                items={items}
+                recipes={recipes}
+                initialSubTab={mgmtSubTab}
+                onBarUpdated={(updated) => {
+                  setActiveBar(updated);
+                  setBars((prev) =>
+                    prev.map((x) => (x.bar.id === updated.id ? { ...x, bar: updated } : x))
+                  );
+                }}
                 onBackMore={() => setTab('more')}
                 onToast={showToast}
               />
@@ -999,7 +1277,12 @@ export default function App() {
                 items={items}
                 recipes={recipes}
                 prices={prices}
-                onBarUpdated={setActiveBar}
+                onBarUpdated={(updated) => {
+                  setActiveBar(updated);
+                  setBars((prev) =>
+                    prev.map((x) => (x.bar.id === updated.id ? { ...x, bar: updated } : x))
+                  );
+                }}
                 onPricesUpdated={setPrices}
                 onItemsChange={setItems}
                 onGoStock={() => setTab('stock')}
@@ -1018,7 +1301,12 @@ export default function App() {
                 initialTab={studioInitialTab}
                 userCoords={userCoords}
                 onDetectCoords={() => detectCurrentCoords(true)}
-                onBarUpdated={setActiveBar}
+                onBarUpdated={(updated) => {
+                  setActiveBar(updated);
+                  setBars((prev) =>
+                    prev.map((x) => (x.bar.id === updated.id ? { ...x, bar: updated } : x))
+                  );
+                }}
                 onGoPrices={() => setTab('prices')}
                 onBackMore={() => setTab('more')}
                 onToast={showToast}
@@ -1070,14 +1358,27 @@ export default function App() {
                 canEditMenu={canEditMenu}
                 hasPricing={hasPricing}
                 unpricedCount={unpricedCount}
-                onBarUpdated={setActiveBar}
+                onBarUpdated={(updated) => {
+                  setActiveBar(updated);
+                  setBars((prev) =>
+                    prev.map((x) => (x.bar.id === updated.id ? { ...x, bar: updated } : x))
+                  );
+                }}
                 onOpenQr={() => setShowQr(true)}
                 onOpenShakers={() => setShowShakers(true)}
                 onOpenCreateDrink={(edit) => setCreateDrinkMode(edit)}
+                onOpenStation={(st) => {
+                  setQueueStation(st);
+                  setTab('queue');
+                }}
                 onNavigate={(nextTab, cMode) => {
                   if (nextTab === 'studio') setStudioInitialTab('menu');
                   if (cMode) setCareerMode(cMode);
                   setTab(nextTab);
+                }}
+                onOpenManagement={(st) => {
+                  setMgmtSubTab(st);
+                  setTab('management');
                 }}
                 onOpenSwitchBar={() => setShowSwitchBar(true)}
               />
@@ -1106,15 +1407,28 @@ export default function App() {
               className={`bnav-btn ${tab === 'queue' ? 'on' : ''}`}
               onClick={() => setTab('queue')}
             >
-              <span className="ico">🔔</span>
+              <span className="ico">
+                {role === 'cozinha' ? '🍳' : role === 'garcom' ? '🍽️' : '🔔'}
+              </span>
               <span>
-                Fila{queueCount > 0 ? ` (${queueCount})` : ''}
+                {role === 'cozinha'
+                  ? 'Cozinha'
+                  : role === 'garcom'
+                    ? 'Garçom'
+                    : role === 'barman'
+                      ? 'Barman'
+                      : 'Fila'}
+                {queueCount > 0 ? ` (${queueCount})` : ''}
               </span>
             </button>
             <button
               type="button"
               className={`bnav-btn ${
-                ['more', 'cashier', 'studio', 'careers', 'prices'].includes(tab) ? 'on' : ''
+                ['more', 'cashier', 'studio', 'careers', 'prices', 'catalog', 'management'].includes(
+                  tab
+                )
+                  ? 'on'
+                  : ''
               }`}
               onClick={() => setTab('more')}
             >
@@ -1170,7 +1484,17 @@ export default function App() {
               onItemsChange={setItems}
               onGoPrices={() => setTab('prices')}
               onGoStock={() => setTab('stock')}
-              onBarUpdated={(updated) => setActiveBar(updated)}
+              onGoQrStudio={() => {
+                setShowQr(false);
+                setStudioInitialTab('qr');
+                setTab('studio');
+              }}
+              onBarUpdated={(updated) => {
+                setActiveBar(updated);
+                setBars((prev) =>
+                  prev.map((x) => (x.bar.id === updated.id ? { ...x, bar: updated } : x))
+                );
+              }}
               onClose={() => setShowQr(false)}
               onToast={showToast}
             />
