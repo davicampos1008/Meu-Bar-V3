@@ -19,6 +19,7 @@ import {
 } from './components/CareersViews';
 import { CashierProView } from './components/CashierProView';
 import { CatalogItemsManager } from './components/CatalogItemsManager';
+import { DeliveryProView } from './components/DeliveryProView';
 import { ManagementProView, type ManagementSubTab } from './components/ManagementProView';
 import { MenuPage } from './components/MenuPage';
 import type { StudioTab } from './components/MenuStudio';
@@ -43,6 +44,7 @@ import {
 import {
   flushOfflineOrders,
   loadOpenTableCalls,
+  parseDeliveryOrderMeta,
   playStationAlert,
   resolveTableCall,
 } from './lib/opsUtils';
@@ -83,6 +85,7 @@ export default function App() {
   const params = new URLSearchParams(window.location.search);
   const menuBarParam = params.get('bar');
   const mesaParam = params.get('mesa');
+  const modeParam = params.get('mode');
   const isMenuRoute =
     Boolean(menuBarParam) || window.location.pathname.endsWith('/menu.html');
 
@@ -710,6 +713,22 @@ export default function App() {
         if (!resolvedId) return;
         setTableCalls((prev) => prev.filter((x) => x.id !== resolvedId));
       })
+      .on('broadcast', { event: 'bar_ops_sync' }, () => {
+        void sb
+          .from('bars')
+          .select('*')
+          .eq('id', activeBar.id)
+          .single()
+          .then((r) => {
+            if (!r.error && r.data) {
+              const fresh = r.data as Bar;
+              setActiveBar(fresh);
+              setBars((prev) =>
+                prev.map((x) => (x.bar.id === fresh.id ? { ...x, bar: fresh } : x))
+              );
+            }
+          });
+      })
       .on(
         'postgres_changes',
         {
@@ -882,6 +901,7 @@ export default function App() {
           if (
             [
               'cashier',
+              'delivery',
               'prices',
               'studio',
               'careers',
@@ -965,7 +985,7 @@ export default function App() {
     return (
       <>
         <OfflineIndicator />
-        <MenuPage barId={menuBarParam || ''} mesa={mesaParam} />
+        <MenuPage barId={menuBarParam || ''} mesa={mesaParam} initialMode={modeParam} />
       </>
     );
   }
@@ -1363,6 +1383,7 @@ export default function App() {
                 bar={activeBar}
                 role={role}
                 actorName={actorName}
+                members={members}
                 orders={orders}
                 recipes={recipes}
                 items={items}
@@ -1418,6 +1439,26 @@ export default function App() {
                 }}
                 onToast={showToast}
                 onBack={() => setTab('more')}
+              />
+            )}
+
+            {tab === 'delivery' && (
+              <DeliveryProView
+                bar={activeBar}
+                role={role}
+                actorName={actorName}
+                orders={orders}
+                recipes={recipes}
+                prices={prices}
+                onBarUpdated={(updated) => {
+                  setActiveBar(updated);
+                  setBars((prev) =>
+                    prev.map((x) => (x.bar.id === updated.id ? { ...x, bar: updated } : x))
+                  );
+                }}
+                onRefreshOrders={() => refreshOrders(activeBar.id)}
+                onBackMore={() => setTab('more')}
+                onToast={showToast}
               />
             )}
 
@@ -1631,6 +1672,14 @@ export default function App() {
                   isProPlan={planStatus.isPro}
                   isPlatformAdmin={isPlatformAdmin}
                   unreadAdminAlerts={unreadAdminAlerts}
+                  activeDeliveryCount={
+                    new Set(
+                      orders
+                        .filter((o) => o.status !== 'done')
+                        .map((o) => parseDeliveryOrderMeta(o)?.code)
+                        .filter(Boolean)
+                    ).size
+                  }
                   supportWhatsAppHref={supportWhatsAppHref}
                   onBarUpdated={(updated) => {
                     setActiveBar(updated);

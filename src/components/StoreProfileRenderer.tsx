@@ -4,6 +4,7 @@ import type { Bar, JobPost, StoreProfileConfig } from '../types/meubar';
 import {
   buildMenuBackgroundStyle,
   getLogoShapeStyle,
+  getLogoSizePx,
   SideDetailWrapper,
   TopOrnamentView,
 } from './MenuVisualRenderer';
@@ -57,7 +58,7 @@ export const StoreProfileRenderer: React.FC<StoreProfileRendererProps> = ({
           ? 'h-36'
           : 'h-44';
 
-  const logoPx = cfg.logo_size === 'lg' ? 88 : cfg.logo_size === 'sm' ? 54 : 72;
+  const logoPx = getLogoSizePx(cfg.logo_size);
 
   const getCardStyle = (): React.CSSProperties => {
     const base: React.CSSProperties = {
@@ -66,20 +67,34 @@ export const StoreProfileRenderer: React.FC<StoreProfileRendererProps> = ({
       borderColor: `${accent}33`,
     };
     if (cfg.card_style === 'bordered') {
-      return { ...base, border: `1.5px solid ${accent}` };
+      return { ...base, border: `2px solid ${accent}` };
     }
     if (cfg.card_style === 'elevated') {
       return {
         ...base,
         border: `1px solid ${accent}33`,
-        boxShadow: '0 14px 28px rgba(0,0,0,0.42)',
+        boxShadow: '0 14px 28px rgba(0,0,0,0.46)',
       };
     }
     if (cfg.card_style === 'neon') {
       return {
         ...base,
         border: `1.5px solid ${accent}`,
-        boxShadow: `0 0 18px ${accent}44, inset 0 0 10px ${accent}14`,
+        boxShadow: `0 0 18px ${accent}55, inset 0 0 10px ${accent}1a`,
+      };
+    }
+    if (cfg.card_style === 'ticket') {
+      return {
+        ...base,
+        border: `2px dashed ${accent}aa`,
+        borderRadius: '10px',
+      };
+    }
+    if (cfg.card_style === 'soft-pill') {
+      return {
+        ...base,
+        border: `1.5px solid ${accent}55`,
+        borderRadius: '24px',
       };
     }
     if (cfg.card_style === 'minimal') {

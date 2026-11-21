@@ -17,7 +17,9 @@ import {
 import {
   autoDeductStockForOrder,
   getActiveHappyHours,
+  getDeliveryConfig,
   logBarAudit,
+  parseDeliveryOrderMeta,
   playStationAlert,
 } from '../lib/opsUtils';
 import { broadcastMenuUpdate, sb } from '../lib/supabase';
@@ -35,7 +37,7 @@ import {
   recipeTags,
   suggestedPrice,
 } from '../lib/utils';
-import type { Bar, BarItem, Order, Recipe, TableCallAlert, TableTab } from '../types/meubar';
+import type { Bar, BarItem, BarMember, Order, Recipe, TableCallAlert, TableTab } from '../types/meubar';
 import { PWAInstallButton } from './PWAControls';
 import { RecipeTile } from './SharedUI';
 import { BarmanStationView, KitchenStationView, WaiterStationView } from './StationViews';
@@ -1217,6 +1219,7 @@ export const QueueView: React.FC<{
   bar: Bar;
   role?: string | null;
   actorName?: string;
+  members?: BarMember[];
   orders: Order[];
   recipes: Recipe[];
   items?: BarItem[];
@@ -1237,6 +1240,7 @@ export const QueueView: React.FC<{
   bar,
   role,
   actorName = 'Equipe',
+  members = [],
   orders,
   recipes,
   items = [],
@@ -1326,13 +1330,15 @@ export const QueueView: React.FC<{
 
   active.forEach((o) => {
     const rName = o.recipe_name || recipeNameById.get(o.recipe_id) || 'Drink';
-    const key = `${o.recipe_id || rName}|${o.status || 'pending'}|${o.note || ''}`;
+    const dlv = parseDeliveryOrderMeta(o);
+    const displayNote = dlv ? dlv.cleanItemNote : o.note || '';
+    const key = `${o.recipe_id || rName}|${o.status || 'pending'}|${displayNote}`;
     if (!map[key]) {
       map[key] = {
         key,
         recipeName: rName,
         status: o.status,
-        note: o.note || '',
+        note: displayNote,
         qty: 0,
         orders: [],
         names: [],
@@ -1342,7 +1348,11 @@ export const QueueView: React.FC<{
     map[key].qty += o.qty || 1;
     map[key].orders.push(o);
     const client = (o.client_name || o.customer_name || 'Cliente').trim();
-    const label = o.table_label ? `${client} (${o.table_label})` : client;
+    const label = dlv
+      ? `${dlv.mode === 'pickup' ? '🛍️ RETIRADA' : '🛵 DELIVERY'} #${dlv.code} · ${client}`
+      : o.table_label
+        ? `${client} (${o.table_label})`
+        : client;
     if (!map[key].names.some((x) => norm(x) === norm(label))) map[key].names.push(label);
   });
 
@@ -1526,6 +1536,7 @@ export const QueueView: React.FC<{
           bar={bar}
           role={role}
           actorName={actorName}
+          members={members}
           orders={orders}
           recipes={recipes}
           items={items}
@@ -2558,6 +2569,7 @@ export const MoreView: React.FC<{
   isProPlan?: boolean;
   isPlatformAdmin?: boolean;
   unreadAdminAlerts?: number;
+  activeDeliveryCount?: number;
   supportWhatsAppHref?: string | null;
   onBarUpdated: (bar: Bar) => void;
   onOpenQr: () => void;
@@ -2590,6 +2602,7 @@ export const MoreView: React.FC<{
   isProPlan = true,
   isPlatformAdmin = false,
   unreadAdminAlerts = 0,
+  activeDeliveryCount = 0,
   supportWhatsAppHref = null,
   onBarUpdated,
   onOpenQr,
@@ -2605,6 +2618,7 @@ export const MoreView: React.FC<{
   onOpenLegal,
 }) => {
   const open = bar.accepting_orders !== false;
+  const deliveryCfg = getDeliveryConfig(bar);
   const { prefs: alertPrefs } = useAlertPrefs();
   const alertSummary = getAlertPrefsSummary(alertPrefs, isPlatformAdmin);
   const showLowStockAlerts = alertPrefs.allEnabled && alertPrefs.lowStock;
@@ -2804,6 +2818,31 @@ export const MoreView: React.FC<{
             </div>
           </div>
         )}
+
+        <button
+          type="button"
+          className="menu-row-item"
+          onClick={() => onNavigate('delivery')}
+        >
+          <div className="menu-row-text">
+            <div className="menu-row-title">
+              🛵 Delivery & Motoboys
+              {activeDeliveryCount > 0 ? (
+                <span className="badge-warn !bg-sky-500/25 !text-sky-200 ml-1.5">
+                  {activeDeliveryCount} ativo(s)
+                </span>
+              ) : deliveryCfg.enabled ? (
+                <span className="badge-warn !bg-emerald-500/20 !text-emerald-300 ml-1.5">
+                  ATIVO
+                </span>
+              ) : null}
+            </div>
+            <div className="menu-row-sub">
+              App externo de pedidos (0% comissão), fila de entrega e despacho p/ motoboy no WhatsApp
+            </div>
+          </div>
+          <span className="menu-row-chev">›</span>
+        </button>
 
         <button
           type="button"

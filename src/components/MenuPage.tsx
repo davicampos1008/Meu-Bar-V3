@@ -6,8 +6,12 @@ import {
 } from '../lib/alertPrefs';
 import { ALL_TAGS, CATS } from '../lib/catalog';
 import {
+  cleanWhatsAppDigits,
+  DELIVERY_PAYMENT_LABELS,
+  formatDeliveryOrderNote,
   getActiveHappyHours,
   getBarOpsData,
+  getDeliveryConfig,
   getEffectiveItemPrice,
   sendTableCall,
 } from '../lib/opsUtils';
@@ -37,6 +41,8 @@ import type {
   Bar,
   BarItem,
   ClientOrderLocal,
+  DeliveryPaymentOption,
+  DeliveryStage,
   ItemType,
   MenuBlockId,
   PartnerAdBanner,
@@ -84,13 +90,45 @@ interface TableServerState {
   members?: string[];
 }
 
-export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
-  barId,
-  mesa,
-}) => {
+interface DeliveryCartItem {
+  id: string;
+  recipe: MenuItem;
+  qty: number;
+  unitPrice: number;
+  note: string;
+}
+
+interface LocalDeliveryOrder {
+  code: string;
+  mode: 'delivery' | 'pickup';
+  orderIds: string[];
+  clientName: string;
+  phone: string;
+  address: string;
+  payment: string;
+  changeFor: string;
+  subtotal: number;
+  fee: number;
+  total: number;
+  items: { name: string; qty: number; price: number }[];
+  createdAt: string;
+  d: string;
+}
+
+export const MenuPage: React.FC<{
+  barId: string;
+  mesa?: string | null;
+  initialMode?: string | null;
+}> = ({ barId, mesa, initialMode }) => {
   const cleanMesa = (mesa || '').trim();
   const isTableQr = Boolean(cleanMesa);
   const tableStorageKey = `table_tab_${barId}_${norm(cleanMesa)}`;
+  const deliveryOrdersStorageKey = `meubar_dlv_orders_${barId}`;
+  const wantsDeliveryInitially =
+    !isTableQr && (initialMode === 'delivery' || initialMode === 'pickup');
+  const [customerMode, setCustomerMode] = useState<'salon' | 'delivery'>(
+    wantsDeliveryInitially ? 'delivery' : 'salon'
+  );
 
   const [loading, setLoading] = useState(true);
   const [errTitle, setErrTitle] = useState('');
@@ -133,6 +171,73 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
   const [hhTick, setHhTick] = useState(0);
   const [saasConfig, setSaasConfig] = useState<PlatformSaaSConfig>(() => getCachedPlatformConfig());
   const [partnerAds, setPartnerAds] = useState<PartnerAdBanner[]>(() => getCachedPartnerAds());
+
+  // Direct Delivery & Pickup state
+  const [deliveryCart, setDeliveryCart] = useState<DeliveryCartItem[]>([]);
+  const [showDeliveryCart, setShowDeliveryCart] = useState(false);
+  const [showDeliveryTracker, setShowDeliveryTracker] = useState(false);
+  const [deliveryFulfillment, setDeliveryFulfillment] = useState<'delivery' | 'pickup'>(
+    initialMode === 'pickup' ? 'pickup' : 'delivery'
+  );
+  const [dlvName, setDlvName] = useState(() => {
+    try {
+      return localStorage.getItem('meubar_dlv_name') || localStorage.getItem('nm') || '';
+    } catch {
+      return '';
+    }
+  });
+  const [dlvPhone, setDlvPhone] = useState(() => {
+    try {
+      return localStorage.getItem('meubar_dlv_phone') || '';
+    } catch {
+      return '';
+    }
+  });
+  const [dlvStreet, setDlvStreet] = useState(() => {
+    try {
+      return localStorage.getItem('meubar_dlv_street') || '';
+    } catch {
+      return '';
+    }
+  });
+  const [dlvNumber, setDlvNumber] = useState(() => {
+    try {
+      return localStorage.getItem('meubar_dlv_number') || '';
+    } catch {
+      return '';
+    }
+  });
+  const [dlvNeighborhood, setDlvNeighborhood] = useState(() => {
+    try {
+      return localStorage.getItem('meubar_dlv_hood') || '';
+    } catch {
+      return '';
+    }
+  });
+  const [dlvComplement, setDlvComplement] = useState('');
+  const [dlvPayment, setDlvPayment] = useState<DeliveryPaymentOption>('maquininha_credito');
+  const [dlvChangeFor, setDlvChangeFor] = useState('');
+  const [dlvErr, setDlvErr] = useState('');
+  const [dlvSending, setDlvSending] = useState(false);
+  const [myDeliveries, setMyDeliveries] = useState<LocalDeliveryOrder[]>(() => {
+    try {
+      const raw = localStorage.getItem(deliveryOrdersStorageKey);
+      const parsed: LocalDeliveryOrder[] = raw ? JSON.parse(raw) : [];
+      return parsed.filter((x) => x.d === today());
+    } catch {
+      return [];
+    }
+  });
+  const [dlvOrderStatuses, setDlvOrderStatuses] = useState<Record<string, string>>({});
+
+  const saveMyDeliveries = (next: LocalDeliveryOrder[]) => {
+    setMyDeliveries(next);
+    try {
+      localStorage.setItem(deliveryOrdersStorageKey, JSON.stringify(next));
+    } catch {
+      // ignore
+    }
+  };
 
   useEffect(() => {
     const id = setInterval(() => setHhTick((t) => t + 1), 30000);
@@ -475,11 +580,20 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
     if (!bar) return;
     const id = setInterval(async () => {
       const activeIds = mine.filter((o) => o.status !== 'done').map((o) => o.id);
-      if (!activeIds.length) return;
-      const res = await sb.rpc('order_status', { p_ids: activeIds });
+      const dlvIds = myDeliveries.flatMap((d) => d.orderIds);
+      const allIds = Array.from(new Set([...activeIds, ...dlvIds]));
+      if (!allIds.length) return;
+      const res = await sb.rpc('order_status', { p_ids: allIds });
       if (!res.data) return;
 
       const statusRows = res.data as { id: string; status: string }[];
+      const stMap: Record<string, string> = {};
+      statusRows.forEach((r) => {
+        stMap[r.id] = r.status;
+      });
+      setDlvOrderStatuses((prev) => ({ ...prev, ...stMap }));
+
+      if (!activeIds.length) return;
       let changed = false;
       const freshReady: ClientOrderLocal[] = [];
 
@@ -508,7 +622,7 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
     }, 5000);
 
     return () => clearInterval(id);
-  }, [bar, mine]);
+  }, [bar, mine, myDeliveries]);
 
   const menuNavRef = useRef({
     readyAlert,
@@ -650,8 +764,16 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
   }
 
   const priced = bar.kind !== 'home' && bar.kind !== 'casa';
+  const deliveryCfg = getDeliveryConfig(bar);
+  const isDeliveryMode = !isTableQr && customerMode === 'delivery';
   const totalCount = mine.reduce((s, o) => s + o.qty, 0);
   const totalPay = mine.reduce((s, o) => s + o.qty * (o.price || 0), 0);
+  const deliveryCartCount = deliveryCart.reduce((s, it) => s + it.qty, 0);
+  const deliveryCartSubtotal =
+    Math.round(deliveryCart.reduce((s, it) => s + it.qty * it.unitPrice, 0) * 100) / 100;
+  const deliveryFeeApplied =
+    deliveryFulfillment === 'pickup' ? 0 : Math.max(0, Number(deliveryCfg.delivery_fee || 0));
+  const deliveryCartTotal = Math.round((deliveryCartSubtotal + deliveryFeeApplied) * 100) / 100;
 
   if (isTableQr && (!name || !tableSession)) {
     const enterTableMenu = async () => {
@@ -820,7 +942,7 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
     );
   }
 
-  if (!isTableQr && !name) {
+  if (!isTableQr && !isDeliveryMode && !name) {
     const enterMenu = async () => {
       const n = gateInput.trim();
       if (n.length < 2) {
@@ -893,8 +1015,17 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
           disabled={checkingName}
           onClick={() => void enterMenu()}
         >
-          {checkingName ? 'Verificando…' : 'Ver cardápio'}
+          {checkingName ? 'Verificando…' : 'Ver cardápio no bar'}
         </button>
+        {deliveryCfg.enabled && (
+          <button
+            type="button"
+            className="b g mt-2.5"
+            onClick={() => setCustomerMode('delivery')}
+          >
+            🛵 Pedir Delivery / Retirada
+          </button>
+        )}
         {gateErr && <p className="err">{gateErr}</p>}
       </div>
     );
@@ -1045,6 +1176,161 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
     saveMine(next);
     setSelectedRecipe(null);
     showToast(`Pedido enviado, ${name}!`);
+  };
+
+  const handleAddToDeliveryCart = (recipe: MenuItem, orderQty: number, orderNote: string) => {
+    const priceInfo = getItemFinalPrice(recipe);
+    const unitPrice = Number(priceInfo.finalPrice ?? recipe.price ?? 0);
+    const hhNote = priceInfo.happyHourName ? `[${priceInfo.happyHourName}]` : '';
+    const cleanObs = [hhNote, orderNote.trim()].filter(Boolean).join(' · ');
+
+    setDeliveryCart((prev) => [
+      ...prev,
+      {
+        id: 'ci_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+        recipe,
+        qty: orderQty,
+        unitPrice,
+        note: cleanObs,
+      },
+    ]);
+    setSelectedRecipe(null);
+    showToast(`🛍️ ${orderQty}× ${recipe.name} adicionado à sacola!`);
+  };
+
+  const handleSubmitDeliveryCheckout = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setDlvErr('');
+    if (!deliveryCfg.enabled) {
+      setDlvErr('O delivery deste estabelecimento está pausado no momento.');
+      return;
+    }
+    if (deliveryCart.length === 0) {
+      setDlvErr('Adicione pelo menos 1 item na sacola.');
+      return;
+    }
+    const cleanName = dlvName.trim();
+    const cleanPhone = dlvPhone.trim();
+    if (cleanName.length < 2) {
+      setDlvErr('Informe seu nome completo.');
+      return;
+    }
+    if (cleanPhone.replace(/\D+/g, '').length < 10) {
+      setDlvErr('Informe um WhatsApp válido com DDD para contato da entrega.');
+      return;
+    }
+    if (
+      deliveryFulfillment === 'delivery' &&
+      deliveryCfg.min_order_value > 0 &&
+      deliveryCartSubtotal < deliveryCfg.min_order_value
+    ) {
+      setDlvErr(
+        `O pedido mínimo para entrega é ${money(deliveryCfg.min_order_value)} (faltam ${money(
+          deliveryCfg.min_order_value - deliveryCartSubtotal
+        )}).`
+      );
+      return;
+    }
+    const fullAddress =
+      deliveryFulfillment === 'pickup'
+        ? 'Retirada no balcão'
+        : [
+            dlvStreet.trim(),
+            dlvNumber.trim() ? `nº ${dlvNumber.trim()}` : '',
+            dlvNeighborhood.trim(),
+            dlvComplement.trim() ? `(${dlvComplement.trim()})` : '',
+          ]
+            .filter(Boolean)
+            .join(', ');
+
+    if (deliveryFulfillment === 'delivery' && (!dlvStreet.trim() || !dlvNeighborhood.trim())) {
+      setDlvErr('Informe Rua/Avenida e Bairro para a entrega.');
+      return;
+    }
+
+    const orderCode = String(Math.floor(1000 + Math.random() * 9000));
+    const tableLabel = `${deliveryFulfillment === 'pickup' ? 'RETIRADA' : 'DELIVERY'} #${orderCode}`;
+    const paymentLabel = DELIVERY_PAYMENT_LABELS[dlvPayment] || 'Combinar na entrega';
+
+    setDlvSending(true);
+    try {
+      const insertedIds: string[] = [];
+      for (const item of deliveryCart) {
+        const structuredNote = formatDeliveryOrderNote(
+          {
+            code: orderCode,
+            mode: deliveryFulfillment,
+            phone: cleanPhone,
+            address: fullAddress,
+            payment: paymentLabel,
+            changeFor: dlvPayment === 'dinheiro' ? dlvChangeFor.trim() : '',
+            fee: deliveryFeeApplied,
+          },
+          item.note
+        );
+        let res = await sb.rpc('place_order', {
+          p_bar: barId,
+          p_name: cleanName,
+          p_recipe: item.recipe.id,
+          p_qty: item.qty,
+          p_note: structuredNote,
+          p_table: tableLabel,
+          p_tab_id: null,
+        });
+        if (res.error && String(res.error.message || '').includes('place_order')) {
+          res = await sb.rpc('place_order', {
+            p_bar: barId,
+            p_name: cleanName,
+            p_recipe: item.recipe.id,
+            p_qty: item.qty,
+            p_note: structuredNote,
+          });
+        }
+        if (res.error) {
+          setDlvErr(res.error.message || 'Erro ao enviar pedido de delivery.');
+          return;
+        }
+        if (res.data) insertedIds.push(String(res.data));
+      }
+
+      try {
+        localStorage.setItem('meubar_dlv_name', cleanName);
+        localStorage.setItem('meubar_dlv_phone', cleanPhone);
+        if (dlvStreet.trim()) localStorage.setItem('meubar_dlv_street', dlvStreet.trim());
+        if (dlvNumber.trim()) localStorage.setItem('meubar_dlv_number', dlvNumber.trim());
+        if (dlvNeighborhood.trim()) localStorage.setItem('meubar_dlv_hood', dlvNeighborhood.trim());
+      } catch {
+        // ignore
+      }
+
+      const newOrder: LocalDeliveryOrder = {
+        code: orderCode,
+        mode: deliveryFulfillment,
+        orderIds: insertedIds,
+        clientName: cleanName,
+        phone: cleanPhone,
+        address: fullAddress,
+        payment: paymentLabel,
+        changeFor: dlvPayment === 'dinheiro' ? dlvChangeFor.trim() : '',
+        subtotal: deliveryCartSubtotal,
+        fee: deliveryFeeApplied,
+        total: deliveryCartTotal,
+        items: deliveryCart.map((c) => ({
+          name: c.recipe.name,
+          qty: c.qty,
+          price: c.unitPrice,
+        })),
+        createdAt: new Date().toISOString(),
+        d: today(),
+      };
+      saveMyDeliveries([newOrder, ...myDeliveries]);
+      setDeliveryCart([]);
+      setShowDeliveryCart(false);
+      setShowDeliveryTracker(true);
+      showToast(`🛵 Pedido #${orderCode} enviado para ${bar.name}!`);
+    } finally {
+      setDlvSending(false);
+    }
   };
 
   const handleSendStaffCall = async (kind: 'waiter' | 'bill', customNote: string) => {
@@ -1406,29 +1692,76 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
           </div>
         )}
 
-        {/* BOTÕES RÁPIDOS DE ATENDIMENTO: CHAMAR GARÇOM & PEDIR A CONTA */}
-        <div className="grid grid-cols-2 gap-2 mb-3">
-          <button
-            type="button"
-            className="b g sm !py-2.5"
-            onClick={() => {
-              setCallNote('');
-              setCallModal('waiter');
-            }}
-          >
-            🙋 Chamar Garçom
-          </button>
-          <button
-            type="button"
-            className="b sm !py-2.5"
-            onClick={() => {
-              setCallNote('Trazer maquininha (Crédito/Débito)');
-              setCallModal('bill');
-            }}
-          >
-            🧾 Pedir a Conta
-          </button>
-        </div>
+        {/* BOTÕES RÁPIDOS: DELIVERY DIRETO OU ATENDIMENTO NO SALÃO */}
+        {isDeliveryMode ? (
+          <div className="panel !border-[var(--ac)]/50 bg-[var(--ac)]/10 mb-3 space-y-2">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <div>
+                <b className="text-sm text-[var(--txt)]">
+                  🛵 Delivery Direto — {bar.name}
+                </b>
+                <p className="mu text-xs !mt-0.5 !mb-0">
+                  {deliveryCfg.enabled ? (
+                    <>
+                      Taxa: <b>{money(deliveryCfg.delivery_fee)}</b> · Mínimo:{' '}
+                      <b>{money(deliveryCfg.min_order_value)}</b> · Prazo:{' '}
+                      <b>{deliveryCfg.eta_minutes}</b>
+                      {deliveryCfg.allow_pickup ? ' · Retirada grátis' : ''}
+                    </>
+                  ) : (
+                    'Delivery pausado no momento pelo estabelecimento.'
+                  )}
+                </p>
+                {deliveryCfg.areas_note && (
+                  <p className="mu text-[11px] !mt-0.5 !mb-0">📍 {deliveryCfg.areas_note}</p>
+                )}
+              </div>
+              <div className="flex gap-1.5 flex-wrap">
+                {myDeliveries.length > 0 && (
+                  <button
+                    type="button"
+                    className="b ok sm"
+                    onClick={() => setShowDeliveryTracker(true)}
+                  >
+                    📦 Meus pedidos ({myDeliveries.length})
+                  </button>
+                )}
+                {!wantsDeliveryInitially && (
+                  <button
+                    type="button"
+                    className="b g sm"
+                    onClick={() => setCustomerMode('salon')}
+                  >
+                    🪑 Estou no bar
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 gap-2 mb-3">
+            <button
+              type="button"
+              className="b g sm !py-2.5"
+              onClick={() => {
+                setCallNote('');
+                setCallModal('waiter');
+              }}
+            >
+              🙋 Chamar Garçom
+            </button>
+            <button
+              type="button"
+              className="b sm !py-2.5"
+              onClick={() => {
+                setCallNote('Trazer maquininha (Crédito/Débito)');
+                setCallModal('bill');
+              }}
+            >
+              🧾 Pedir a Conta
+            </button>
+          </div>
+        )}
 
         <SideDetailWrapper sideDetail={design.side_detail} accent={accent}>
           {blockOrder.map((blockId) => {
@@ -1466,7 +1799,17 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
         })()}
       </div>
 
-      {mine.length > 0 && (
+      {isDeliveryMode && deliveryCart.length > 0 && (
+        <button type="button" className="cart" onClick={() => setShowDeliveryCart(true)}>
+          <span>
+            🛍️ Sacola ({deliveryCartCount}{' '}
+            {deliveryCartCount === 1 ? 'item' : 'itens'}) · Finalizar
+          </span>
+          <b>{money(deliveryCartSubtotal)}</b>
+        </button>
+      )}
+
+      {!isDeliveryMode && mine.length > 0 && (
         <button type="button" className="cart" onClick={() => setShowOrders(true)}>
           <span>
             🍸 {totalCount} {totalCount === 1 ? 'item pedido' : 'itens pedidos'}
@@ -1605,20 +1948,37 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
               ))}
             </select>
 
-            <button
-              type="button"
-              className="b full mt-4"
-              disabled={!bar.open || sending}
-              onClick={() => void handlePlaceOrder(selectedRecipe, qty, note)}
-            >
-              {sending
-                ? 'Enviando...'
-                : `Pedir${
-                    selectedPriceInfo?.finalPrice != null
-                      ? ` · ${money(selectedPriceInfo.finalPrice)}`
-                      : ''
-                  }`}
-            </button>
+            {isDeliveryMode ? (
+              <button
+                type="button"
+                className="b ok full mt-4"
+                disabled={!bar.open || !deliveryCfg.enabled}
+                onClick={() => handleAddToDeliveryCart(selectedRecipe, qty, note)}
+              >
+                {!deliveryCfg.enabled
+                  ? 'Delivery pausado no momento'
+                  : `🛍️ Adicionar à sacola${
+                      selectedPriceInfo?.finalPrice != null
+                        ? ` · ${money(selectedPriceInfo.finalPrice * qty)}`
+                        : ''
+                    }`}
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="b full mt-4"
+                disabled={!bar.open || sending}
+                onClick={() => void handlePlaceOrder(selectedRecipe, qty, note)}
+              >
+                {sending
+                  ? 'Enviando...'
+                  : `Pedir${
+                      selectedPriceInfo?.finalPrice != null
+                        ? ` · ${money(selectedPriceInfo.finalPrice)}`
+                        : ''
+                    }`}
+              </button>
+            )}
             {orderErr && <p className="err">{orderErr}</p>}
           </div>
         </div>
@@ -1794,6 +2154,358 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
                   ? '🧾 Enviar pedido de conta'
                   : '🙋 Chamar garçom agora'}
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* DRAWER SACOLA & CHECKOUT DE DELIVERY */}
+      {showDeliveryCart && (
+        <div className="ov !z-40">
+          <div className="w pb-10">
+            <div className="row sp mb-2">
+              <button
+                type="button"
+                className="b g sm"
+                onClick={() => setShowDeliveryCart(false)}
+              >
+                ← Continuar escolhendo
+              </button>
+              <span className="text-xs font-bold text-[var(--ac)]">🛵 Delivery Direto</span>
+            </div>
+
+            <h1 className="mt-2 mb-1">Sua Sacola</h1>
+            <p className="mu text-xs mb-3">
+              {bar.name} · Prazo estimado: <b>{deliveryCfg.eta_minutes}</b>
+            </p>
+
+            {deliveryCart.length === 0 ? (
+              <div className="empty">Sua sacola está vazia.</div>
+            ) : (
+              <form className="space-y-3" onSubmit={(e) => void handleSubmitDeliveryCheckout(e)}>
+                <div className="space-y-2">
+                  {deliveryCart.map((c) => (
+                    <div
+                      key={c.id}
+                      className="rounded-xl p-2.5 bg-[var(--sf2)] border border-[var(--bd)] flex items-center justify-between gap-2"
+                    >
+                      <div className="min-w-0">
+                        <div className="text-sm font-bold truncate">
+                          {c.qty}× {c.recipe.name}
+                        </div>
+                        {c.note && <div className="text-xs text-[var(--ac)]">{c.note}</div>}
+                        <div className="text-xs text-[var(--ok)] font-bold">
+                          {money(c.qty * c.unitPrice)}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          className="b g sm !px-2.5"
+                          onClick={() =>
+                            setDeliveryCart((prev) =>
+                              c.qty <= 1
+                                ? prev.filter((x) => x.id !== c.id)
+                                : prev.map((x) =>
+                                    x.id === c.id ? { ...x, qty: x.qty - 1 } : x
+                                  )
+                            )
+                          }
+                        >
+                          −
+                        </button>
+                        <button
+                          type="button"
+                          className="b g sm !px-2.5"
+                          onClick={() =>
+                            setDeliveryCart((prev) =>
+                              prev.map((x) => (x.id === c.id ? { ...x, qty: x.qty + 1 } : x))
+                            )
+                          }
+                        >
+                          +
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Entrega ou Retirada */}
+                {deliveryCfg.allow_pickup && (
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      className={`b sm ${deliveryFulfillment === 'delivery' ? '' : 'g'}`}
+                      onClick={() => setDeliveryFulfillment('delivery')}
+                    >
+                      🛵 Entrega ({money(deliveryCfg.delivery_fee)})
+                    </button>
+                    <button
+                      type="button"
+                      className={`b sm ${deliveryFulfillment === 'pickup' ? '' : 'g'}`}
+                      onClick={() => setDeliveryFulfillment('pickup')}
+                    >
+                      🛍️ Retirar no Balcão (Grátis)
+                    </button>
+                  </div>
+                )}
+
+                <div className="panel space-y-2">
+                  <div className="text-xs font-bold uppercase tracking-wider text-[var(--ac)]">
+                    1. Seus dados
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <div>
+                      <label className="!mt-0">Seu nome</label>
+                      <input
+                        value={dlvName}
+                        onChange={(e) => setDlvName(e.target.value)}
+                        placeholder="Ex: Maria Oliveira"
+                        maxLength={50}
+                      />
+                    </div>
+                    <div>
+                      <label className="!mt-0">Seu WhatsApp (com DDD)</label>
+                      <input
+                        value={dlvPhone}
+                        onChange={(e) => setDlvPhone(e.target.value)}
+                        placeholder="Ex: 11999998888"
+                        inputMode="tel"
+                        maxLength={20}
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {deliveryFulfillment === 'delivery' && (
+                  <div className="panel space-y-2">
+                    <div className="text-xs font-bold uppercase tracking-wider text-[var(--ac)]">
+                      2. Endereço de entrega
+                    </div>
+                    <div className="grid grid-cols-3 gap-2">
+                      <div className="col-span-2">
+                        <label className="!mt-0">Rua / Avenida</label>
+                        <input
+                          value={dlvStreet}
+                          onChange={(e) => setDlvStreet(e.target.value)}
+                          placeholder="Ex: Rua das Flores"
+                        />
+                      </div>
+                      <div>
+                        <label className="!mt-0">Número</label>
+                        <input
+                          value={dlvNumber}
+                          onChange={(e) => setDlvNumber(e.target.value)}
+                          placeholder="123"
+                        />
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <div>
+                        <label className="!mt-0">Bairro</label>
+                        <input
+                          value={dlvNeighborhood}
+                          onChange={(e) => setDlvNeighborhood(e.target.value)}
+                          placeholder="Ex: Centro"
+                        />
+                      </div>
+                      <div>
+                        <label className="!mt-0">Complemento / Referência</label>
+                        <input
+                          value={dlvComplement}
+                          onChange={(e) => setDlvComplement(e.target.value)}
+                          placeholder="Apto 12, portão azul..."
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                <div className="panel space-y-2">
+                  <div className="text-xs font-bold uppercase tracking-wider text-[var(--ac)]">
+                    {deliveryFulfillment === 'delivery'
+                      ? '3. Pagamento na entrega (presencial)'
+                      : '2. Pagamento na retirada'}
+                  </div>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {deliveryCfg.payment_methods.map((opt) => (
+                      <button
+                        key={opt}
+                        type="button"
+                        className={`b sm !text-xs ${dlvPayment === opt ? '' : 'g'}`}
+                        onClick={() => setDlvPayment(opt)}
+                      >
+                        {DELIVERY_PAYMENT_LABELS[opt]}
+                      </button>
+                    ))}
+                  </div>
+                  {dlvPayment === 'dinheiro' && (
+                    <div>
+                      <label className="!mt-1">Precisa de troco para quanto? (opcional)</label>
+                      <input
+                        value={dlvChangeFor}
+                        onChange={(e) => setDlvChangeFor(e.target.value)}
+                        placeholder="Ex: R$ 100,00 ou Sem troco"
+                      />
+                    </div>
+                  )}
+                </div>
+
+                <div className="pay">
+                  <div className="row sp text-xs">
+                    <span>Subtotal</span>
+                    <b>{money(deliveryCartSubtotal)}</b>
+                  </div>
+                  <div className="row sp text-xs mt-1">
+                    <span>
+                      {deliveryFulfillment === 'pickup' ? 'Retirada no balcão' : 'Taxa de entrega'}
+                    </span>
+                    <b>{deliveryFeeApplied > 0 ? money(deliveryFeeApplied) : 'Grátis'}</b>
+                  </div>
+                  <div className="row sp mt-2 pt-2 border-t border-white/10">
+                    <b>Total a pagar</b>
+                    <span className="tt">{money(deliveryCartTotal)}</span>
+                  </div>
+                </div>
+
+                {dlvErr && <p className="err">{dlvErr}</p>}
+
+                <button type="submit" className="b ok full" disabled={dlvSending}>
+                  {dlvSending
+                    ? 'Enviando pedido...'
+                    : `🛵 Enviar Pedido · ${money(deliveryCartTotal)}`}
+                </button>
+              </form>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ACOMPANHAR MEUS DELIVERIES AO VIVO */}
+      {showDeliveryTracker && (
+        <div className="ov !z-40">
+          <div className="w pb-10 space-y-3">
+            <button
+              type="button"
+              className="b g sm"
+              onClick={() => setShowDeliveryTracker(false)}
+            >
+              ← Voltar ao cardápio
+            </button>
+            <h1 className="!mt-2 !mb-0">📦 Acompanhar Delivery</h1>
+            <p className="mu text-xs !mt-0.5">
+              Atualizado automaticamente a cada 5 segundos com a cozinha e o motoboy do {bar.name}.
+            </p>
+
+            {myDeliveries.length === 0 ? (
+              <div className="empty">Você ainda não enviou pedidos de delivery hoje.</div>
+            ) : (
+              myDeliveries.map((d) => {
+                const disp = getBarOpsData(bar).delivery_dispatches?.[d.code];
+                const statuses = d.orderIds.map((id) => dlvOrderStatuses[id] || 'pending');
+                let stage: DeliveryStage = disp?.stage || 'received';
+                if (stage !== 'cancelled' && stage !== 'delivered') {
+                  if (statuses.length > 0 && statuses.every((s) => s === 'done')) {
+                    stage = 'delivered';
+                  } else if (stage !== 'out_for_delivery') {
+                    if (statuses.length > 0 && statuses.every((s) => s === 'ready' || s === 'done')) {
+                      stage = 'ready_for_courier';
+                    }
+                  }
+                }
+                const stepIdx =
+                  stage === 'delivered'
+                    ? 4
+                    : stage === 'out_for_delivery'
+                      ? 3
+                      : stage === 'ready_for_courier'
+                        ? 2
+                        : stage === 'preparing'
+                          ? 1
+                          : 0;
+                const steps =
+                  d.mode === 'pickup'
+                    ? ['Recebido', 'Preparando', 'Pronto p/ retirar', 'Retirado']
+                    : ['Recebido', 'Preparando', 'Pronto', 'Com Motoboy', 'Entregue'];
+                const barWa = cleanWhatsAppDigits(deliveryCfg.whatsapp_phone || bar.phone || '');
+
+                return (
+                  <div key={d.code} className="panel space-y-2.5 !border-[var(--ac)]/40">
+                    <div className="row sp">
+                      <div>
+                        <b className="text-base">
+                          {d.mode === 'pickup' ? '🛍️ Retirada' : '🛵 Delivery'} #{d.code}
+                        </b>
+                        <div className="text-xs text-[var(--mut)]">
+                          {new Date(d.createdAt).toLocaleTimeString('pt-BR', {
+                            hour: '2-digit',
+                            minute: '2-digit',
+                          })}{' '}
+                          · {d.address}
+                        </div>
+                      </div>
+                      <b className="text-[var(--ok)]">{money(d.total)}</b>
+                    </div>
+
+                    {/* Barra de progresso ao vivo */}
+                    <div className="grid grid-cols-5 gap-1">
+                      {steps.map((label, idx) => {
+                        const done = idx <= stepIdx;
+                        return (
+                          <div key={label} className="text-center">
+                            <div
+                              className={`h-1.5 rounded-full mb-1 ${
+                                done ? 'bg-emerald-400' : 'bg-white/15'
+                              }`}
+                            />
+                            <div
+                              className={`text-[10px] leading-tight ${
+                                done ? 'text-emerald-200 font-bold' : 'text-[var(--mut)]'
+                              }`}
+                            >
+                              {label}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {disp?.courier_name && stage === 'out_for_delivery' && (
+                      <div className="rounded-xl p-2 bg-emerald-500/15 border border-emerald-400/40 text-xs text-emerald-100 font-semibold">
+                        🛵 Motoboy <b>{disp.courier_name}</b> saiu para entregar seu pedido!
+                      </div>
+                    )}
+
+                    <div className="text-xs space-y-0.5 pt-1 border-t border-white/10">
+                      {d.items.map((it, idx) => (
+                        <div key={`${it.name}-${idx}`} className="row sp">
+                          <span>
+                            {it.qty}× {it.name}
+                          </span>
+                          <span>{money(it.qty * it.price)}</span>
+                        </div>
+                      ))}
+                      <div className="text-[11px] text-[var(--mut)] pt-1">
+                        Pagamento: <b>{d.payment}</b>
+                        {d.changeFor ? ` · Troco para ${d.changeFor}` : ''}
+                      </div>
+                    </div>
+
+                    {barWa && (
+                      <a
+                        href={`https://wa.me/${barWa}?text=${encodeURIComponent(
+                          `Olá ${bar.name}! Gostaria de falar sobre meu pedido de delivery #${d.code}.`
+                        )}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="b g sm full no-underline"
+                      >
+                        💬 Falar com {bar.name} no WhatsApp
+                      </a>
+                    )}
+                  </div>
+                );
+              })
+            )}
           </div>
         </div>
       )}

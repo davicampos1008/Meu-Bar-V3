@@ -16,6 +16,7 @@ import {
   NAME_FONTS,
   POS_OPTIONS,
   PRICE_STYLES,
+  QR_DESIGN_TEMPLATES,
   SECTION_STYLES,
   SIDE_DETAILS,
   STORE_AMENITIES,
@@ -154,10 +155,21 @@ export const StoreStudioView: React.FC<{
   const [selectedPreset, setSelectedPreset] = useState(bar.active_menu_preset || '');
   const [presetName, setPresetName] = useState('');
 
-  // --- Modo Canva ---
+  // --- Modo Canva (Cardápio, Perfil da Loja e Arte QR Code) ---
   const [canvaOpen, setCanvaOpen] = useState(false);
+  const [canvaTarget, setCanvaTarget] = useState<'menu' | 'store' | 'qr'>('menu');
+  const [canvaStoreSection, setCanvaStoreSection] = useState<'hero' | 'style' | 'info' | 'themes'>('hero');
+  const [canvaQrSection, setCanvaQrSection] = useState<'templates' | 'colors' | 'texts' | 'elements'>('templates');
+  const [canvaNewQrName, setCanvaNewQrName] = useState('');
   const [selectedBlock, setSelectedBlock] = useState<MenuBlockId>('header');
   const [draggedBlock, setDraggedBlock] = useState<MenuBlockId | null>(null);
+
+  const openCanva = (target?: 'menu' | 'store' | 'qr') => {
+    const resolved: 'menu' | 'store' | 'qr' =
+      target || (studioTab === 'store' ? 'store' : studioTab === 'qr' ? 'qr' : 'menu');
+    setCanvaTarget(resolved);
+    setCanvaOpen(true);
+  };
 
   useEffect(() => {
     if (!canvaOpen) return;
@@ -1041,7 +1053,7 @@ export const StoreStudioView: React.FC<{
           >
             {previewOpen ? '🙈 Ocultar prévia' : '👁️ Mostrar prévia'}
           </button>
-          <button type="button" className="b sm" onClick={() => setCanvaOpen(true)}>
+          <button type="button" className="b sm" onClick={() => openCanva()}>
             🖌️ Modo Canva
           </button>
         </div>
@@ -1110,8 +1122,13 @@ export const StoreStudioView: React.FC<{
             <div className="space-y-4">
               {/* Temas prontos do Perfil da Loja */}
               <div className="panel">
-                <h2>✨ Temas prontos para o Perfil da Loja</h2>
-                <p className="mu">
+                <div className="row sp flex-wrap gap-2">
+                  <h2 className="!m-0">✨ Temas prontos para o Perfil da Loja</h2>
+                  <button type="button" className="b sm" onClick={() => openCanva('store')}>
+                    🖌️ Editar Perfil no Canva
+                  </button>
+                </div>
+                <p className="mu mt-1.5">
                   Este perfil personalizado aparece para funcionários na aba <b>Bares próximos</b> e
                   nas vagas. Crie e alterne entre vários perfis!
                 </p>
@@ -1657,7 +1674,7 @@ export const StoreStudioView: React.FC<{
               <div className="panel">
                 <div className="row sp">
                   <h2 className="!mt-0">Layouts Salvos (Predefinições do QR)</h2>
-                  <button type="button" className="b sm" onClick={() => setCanvaOpen(true)}>
+                  <button type="button" className="b sm" onClick={() => openCanva('menu')}>
                     🖌️ Editar no Canva
                   </button>
                 </div>
@@ -2037,7 +2054,7 @@ export const StoreStudioView: React.FC<{
                   <button
                     type="button"
                     className="b g"
-                    onClick={() => setCanvaOpen(true)}
+                    onClick={() => openCanva('menu')}
                   >
                     🖌️ Modo Canva
                   </button>
@@ -2248,25 +2265,38 @@ export const StoreStudioView: React.FC<{
           )}
           {/* ================= ABA 4: ARTE DO QR CODE ================= */}
           {studioTab === 'qr' && (
-            <QrDesignerPanel
-              bar={liveBar}
-              design={qrDesign}
-              savedDesigns={qrDesigns}
-              activeDesignId={activeQrDesignId}
-              onChangeDesign={setQrDesign}
-              onSelectSaved={async (d) => {
-                setQrDesign(d);
-                setActiveQrDesignId(d.id);
-                await persistStudioUpdate(
-                  { active_qr_design: d.id },
-                  `Design de QR "${d.design_name}" ativado!`
-                );
-              }}
-              onSaveAsNew={handleSaveNewQrDesign}
-              onUpdateCurrent={handleUpdateCurrentQrDesign}
-              onDeleteSaved={handleDeleteQrDesign}
-              saving={saving}
-            />
+            <div className="space-y-3">
+              <div className="panel flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <div className="text-sm font-bold">🖌️ Editor visual da Placa QR Code</div>
+                  <div className="text-xs text-[var(--mut)]">
+                    Personalize cores, moldura, textos e elementos vendo a placa em tela cheia.
+                  </div>
+                </div>
+                <button type="button" className="b sm" onClick={() => openCanva('qr')}>
+                  🖌️ Editar QR no Canva
+                </button>
+              </div>
+              <QrDesignerPanel
+                bar={liveBar}
+                design={qrDesign}
+                savedDesigns={qrDesigns}
+                activeDesignId={activeQrDesignId}
+                onChangeDesign={setQrDesign}
+                onSelectSaved={async (d) => {
+                  setQrDesign(d);
+                  setActiveQrDesignId(d.id);
+                  await persistStudioUpdate(
+                    { active_qr_design: d.id },
+                    `Design de QR "${d.design_name}" ativado!`
+                  );
+                }}
+                onSaveAsNew={handleSaveNewQrDesign}
+                onUpdateCurrent={handleUpdateCurrentQrDesign}
+                onDeleteSaved={handleDeleteQrDesign}
+                saving={saving}
+              />
+            </div>
           )}
         </div>
 
@@ -2337,22 +2367,71 @@ export const StoreStudioView: React.FC<{
         )}
       </div>
 
-      {/* ================= MODO CANVA INTERATIVO (TEMPO REAL + ARRASTAR) ================= */}
+      {/* ================= MODO CANVA INTERATIVO (CARDÁPIO, PERFIL & QR CODE) ================= */}
       {canvaOpen && (
         <div className="canvas-modal">
           <div className="canvas-bar">
-            <div className="row">
+            <div className="row flex-wrap gap-2">
               <button type="button" className="b g sm" onClick={() => setCanvaOpen(false)}>
                 ← Fechar Canva
               </button>
-              <b className="text-sm">Modo Canva · Arraste os blocos ou a logo</b>
+              <div className="flex items-center gap-1 bg-black/30 p-1 rounded-xl border border-white/10">
+                <button
+                  type="button"
+                  className={`px-2.5 py-1 rounded-lg text-xs font-bold border-0 cursor-pointer transition ${
+                    canvaTarget === 'menu'
+                      ? 'bg-[var(--ac)] text-[#141115]'
+                      : 'bg-transparent text-[var(--fg)] opacity-75'
+                  }`}
+                  onClick={() => {
+                    setCanvaTarget('menu');
+                    setStudioTab('menu');
+                  }}
+                >
+                  🎨 Cardápio
+                </button>
+                <button
+                  type="button"
+                  className={`px-2.5 py-1 rounded-lg text-xs font-bold border-0 cursor-pointer transition ${
+                    canvaTarget === 'store'
+                      ? 'bg-[var(--ac)] text-[#141115]'
+                      : 'bg-transparent text-[var(--fg)] opacity-75'
+                  }`}
+                  onClick={() => {
+                    setCanvaTarget('store');
+                    setStudioTab('store');
+                  }}
+                >
+                  🏪 Perfil
+                </button>
+                <button
+                  type="button"
+                  className={`px-2.5 py-1 rounded-lg text-xs font-bold border-0 cursor-pointer transition ${
+                    canvaTarget === 'qr'
+                      ? 'bg-[var(--ac)] text-[#141115]'
+                      : 'bg-transparent text-[var(--fg)] opacity-75'
+                  }`}
+                  onClick={() => {
+                    setCanvaTarget('qr');
+                    setStudioTab('qr');
+                  }}
+                >
+                  📱 QR Code
+                </button>
+              </div>
             </div>
             <button
               type="button"
               className="b ok sm"
               disabled={saving}
               onClick={async () => {
-                await handleSaveCardapio();
+                if (canvaTarget === 'store') {
+                  await handleSaveStoreVisual();
+                } else if (canvaTarget === 'qr') {
+                  await handleUpdateCurrentQrDesign();
+                } else {
+                  await handleSaveCardapio();
+                }
                 setCanvaOpen(false);
               }}
             >
@@ -2362,15 +2441,43 @@ export const StoreStudioView: React.FC<{
 
           <div className="canvas-body">
             <div className="canvas-viewport">
-              <div className="canvas-phone-stage">{renderLiveMenuPreview(true)}</div>
+              <div className="canvas-phone-stage">
+                {canvaTarget === 'menu' && renderLiveMenuPreview(true)}
+
+                {canvaTarget === 'store' && (
+                  <StoreProfileRenderer bar={liveBar} profileConfig={storeProfileCfg} compact />
+                )}
+
+                {canvaTarget === 'qr' && (
+                  <div className="space-y-2.5">
+                    <div className="flex items-center gap-2 bg-black/35 border border-white/10 rounded-xl px-2.5 py-1.5">
+                      <span className="text-[11px] text-[var(--mut)] shrink-0">Testar mesa:</span>
+                      <input
+                        value={previewQrTable}
+                        onChange={(e) => setPreviewQrTable(e.target.value)}
+                        placeholder="Vazio = Cardápio geral (ex: Mesa 05)"
+                        className="!py-1 !text-xs flex-1 !bg-transparent !border-0"
+                      />
+                    </div>
+                    <QrPosterPreview
+                      bar={liveBar}
+                      design={qrDesign}
+                      qrUrl={menuUrl(bar.id, previewQrTable)}
+                      tableLabel={previewQrTable}
+                    />
+                  </div>
+                )}
+              </div>
             </div>
 
-            {/* Painel rápido contextual do bloco selecionado */}
+            {/* Painel rápido contextual conforme o modo ativo */}
             <div className="canvas-inspector">
-              <div className="row sp mb-2">
-                <span className="text-xs font-bold uppercase tracking-wider text-[var(--ac)]">
-                  Editando: {MENU_BLOCK_LABELS[selectedBlock]}
-                </span>
+              {canvaTarget === 'menu' && (
+                <>
+                  <div className="row sp mb-2">
+                    <span className="text-xs font-bold uppercase tracking-wider text-[var(--ac)]">
+                      Editando: {MENU_BLOCK_LABELS[selectedBlock]}
+                    </span>
                 <button
                   type="button"
                   className="lnk !p-0 text-xs"
@@ -2530,6 +2637,33 @@ export const StoreStudioView: React.FC<{
                       ))}
                     </select>
                   </div>
+                  <div>
+                    <label className="!mt-0">Cor fundo 1</label>
+                    <input
+                      type="color"
+                      value={colorBg}
+                      onChange={(e) => setColorBg(e.target.value)}
+                      className="!h-9 !p-1"
+                    />
+                  </div>
+                  <div>
+                    <label className="!mt-0">Cor fundo 2</label>
+                    <input
+                      type="color"
+                      value={design.bg_color_2 || '#1b1626'}
+                      onChange={(e) => setDesign({ ...design, bg_color_2: e.target.value })}
+                      className="!h-9 !p-1"
+                    />
+                  </div>
+                  <div>
+                    <label className="!mt-0">Cor destaque</label>
+                    <input
+                      type="color"
+                      value={colorAccent}
+                      onChange={(e) => setColorAccent(e.target.value)}
+                      className="!h-9 !p-1"
+                    />
+                  </div>
                 </div>
               )}
 
@@ -2643,6 +2777,636 @@ export const StoreStudioView: React.FC<{
                       onChange={(e) => setDesign({ ...design, footer_text: e.target.value })}
                     />
                   </div>
+                </div>
+              )}
+                </>
+              )}
+
+              {/* ========== INSPETOR CANVA: PERFIL DA LOJA ========== */}
+              {canvaTarget === 'store' && (
+                <div className="space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex flex-wrap gap-1.5">
+                      {(
+                        [
+                          { id: 'hero', label: '🖼️ Capa & Logo' },
+                          { id: 'style', label: '🎨 Cores & Estilo' },
+                          { id: 'info', label: '📝 Textos & Contatos' },
+                          { id: 'themes', label: '✨ Temas' },
+                        ] as const
+                      ).map((sec) => (
+                        <button
+                          key={sec.id}
+                          type="button"
+                          className={`chip !py-1 !px-2.5 !text-xs ${
+                            canvaStoreSection === sec.id ? 'on' : ''
+                          }`}
+                          onClick={() => setCanvaStoreSection(sec.id)}
+                        >
+                          {sec.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {canvaStoreSection === 'hero' && (
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                      <div>
+                        <label className="!mt-0">Selo do topo</label>
+                        <input
+                          value={storeProfileCfg.badge_text || ''}
+                          onChange={(e) =>
+                            setStoreProfileCfg({ ...storeProfileCfg, badge_text: e.target.value })
+                          }
+                          placeholder="Ex: BAR OFICIAL"
+                        />
+                      </div>
+                      <div>
+                        <label className="!mt-0">Fonte do nome</label>
+                        <select value={font} onChange={(e) => setFont(e.target.value)}>
+                          {NAME_FONTS.map((f) => (
+                            <option key={f.id} value={f.id}>
+                              {f.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="!mt-0">Altura da capa</label>
+                        <select
+                          value={storeProfileCfg.banner_height || 'md'}
+                          onChange={(e) =>
+                            setStoreProfileCfg({
+                              ...storeProfileCfg,
+                              banner_height: e.target.value as StoreProfileConfig['banner_height'],
+                            })
+                          }
+                        >
+                          <option value="sm">Compacta</option>
+                          <option value="md">Média</option>
+                          <option value="lg">Grande</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="!mt-0">Escurecer capa</label>
+                        <select
+                          value={storeProfileCfg.banner_overlay || 'gradient'}
+                          onChange={(e) =>
+                            setStoreProfileCfg({
+                              ...storeProfileCfg,
+                              banner_overlay: e.target.value as StoreProfileConfig['banner_overlay'],
+                            })
+                          }
+                        >
+                          <option value="gradient">Degradê suave</option>
+                          <option value="dark">Escuro elegante</option>
+                          <option value="soft">Claro / Sutil</option>
+                          <option value="none">Sem filtro</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="!mt-0">Formato da logo</label>
+                        <select
+                          value={storeProfileCfg.logo_shape || 'rounded'}
+                          onChange={(e) =>
+                            setStoreProfileCfg({ ...storeProfileCfg, logo_shape: e.target.value })
+                          }
+                        >
+                          {LOGO_SHAPES.map((s) => (
+                            <option key={s.id} value={s.id}>
+                              {s.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="!mt-0">Tamanho da logo</label>
+                        <select
+                          value={storeProfileCfg.logo_size || 'md'}
+                          onChange={(e) =>
+                            setStoreProfileCfg({
+                              ...storeProfileCfg,
+                              logo_size: e.target.value as StoreProfileConfig['logo_size'],
+                            })
+                          }
+                        >
+                          {LOGO_SIZES.map((sz) => (
+                            <option key={sz.id} value={sz.id}>
+                              {sz.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="!mt-0">Enfeite do topo</label>
+                        <select
+                          value={storeProfileCfg.top_ornament || 'none'}
+                          onChange={(e) =>
+                            setStoreProfileCfg({ ...storeProfileCfg, top_ornament: e.target.value })
+                          }
+                        >
+                          {TOP_ORNAMENTS.map((o) => (
+                            <option key={o.id} value={o.id}>
+                              {o.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="!mt-0">Detalhe lateral</label>
+                        <select
+                          value={storeProfileCfg.side_detail || 'none'}
+                          onChange={(e) =>
+                            setStoreProfileCfg({ ...storeProfileCfg, side_detail: e.target.value })
+                          }
+                        >
+                          {SIDE_DETAILS.map((sd) => (
+                            <option key={sd.id} value={sd.id}>
+                              {sd.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="!mt-0">Estilo dos cartões</label>
+                        <select
+                          value={storeProfileCfg.card_style || 'glass'}
+                          onChange={(e) =>
+                            setStoreProfileCfg({
+                              ...storeProfileCfg,
+                              card_style: e.target.value as StoreProfileConfig['card_style'],
+                            })
+                          }
+                        >
+                          {CARD_STYLES.map((cs) => (
+                            <option key={cs.id} value={cs.id}>
+                              {cs.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                  )}
+
+                  {canvaStoreSection === 'style' && (
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                      <div>
+                        <label className="!mt-0">Padrão de fundo</label>
+                        <select
+                          value={storeProfileCfg.bg_pattern || 'radial'}
+                          onChange={(e) =>
+                            setStoreProfileCfg({ ...storeProfileCfg, bg_pattern: e.target.value })
+                          }
+                        >
+                          {BG_PATTERNS.map((bp) => (
+                            <option key={bp.id} value={bp.id}>
+                              {bp.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="!mt-0">Cor de fundo</label>
+                        <input
+                          type="color"
+                          value={colorBg}
+                          onChange={(e) => setColorBg(e.target.value)}
+                          className="!h-9 !p-1"
+                        />
+                      </div>
+                      <div>
+                        <label className="!mt-0">Fundo secundário</label>
+                        <input
+                          type="color"
+                          value={storeProfileCfg.bg_color_2 || '#1b1626'}
+                          onChange={(e) =>
+                            setStoreProfileCfg({ ...storeProfileCfg, bg_color_2: e.target.value })
+                          }
+                          className="!h-9 !p-1"
+                        />
+                      </div>
+                      <div>
+                        <label className="!mt-0">Cor dos cartões</label>
+                        <input
+                          type="color"
+                          value={colorSurface}
+                          onChange={(e) => setColorSurface(e.target.value)}
+                          className="!h-9 !p-1"
+                        />
+                      </div>
+                      <div>
+                        <label className="!mt-0">Cor de destaque</label>
+                        <input
+                          type="color"
+                          value={colorAccent}
+                          onChange={(e) => setColorAccent(e.target.value)}
+                          className="!h-9 !p-1"
+                        />
+                      </div>
+                      <div>
+                        <label className="!mt-0">Cor do texto</label>
+                        <input
+                          type="color"
+                          value={colorText}
+                          onChange={(e) => setColorText(e.target.value)}
+                          className="!h-9 !p-1"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {canvaStoreSection === 'info' && (
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                      <div>
+                        <label className="!mt-0">Nome da loja</label>
+                        <input value={name} onChange={(e) => setName(e.target.value)} />
+                      </div>
+                      <div>
+                        <label className="!mt-0">Slogan</label>
+                        <input
+                          value={slogan}
+                          onChange={(e) => setSlogan(e.target.value)}
+                          placeholder="Frase curta da loja"
+                        />
+                      </div>
+                      <div>
+                        <label className="!mt-0">Horário</label>
+                        <input
+                          value={storeProfileCfg.opening_hours || ''}
+                          onChange={(e) =>
+                            setStoreProfileCfg({
+                              ...storeProfileCfg,
+                              opening_hours: e.target.value,
+                            })
+                          }
+                          placeholder="Ter a Dom · 18h às 02h"
+                        />
+                      </div>
+                      <div>
+                        <label className="!mt-0">WhatsApp</label>
+                        <input
+                          value={storeProfileCfg.whatsapp || ''}
+                          onChange={(e) =>
+                            setStoreProfileCfg({ ...storeProfileCfg, whatsapp: e.target.value })
+                          }
+                          placeholder="(11) 99999-9999"
+                        />
+                      </div>
+                      <div>
+                        <label className="!mt-0">Instagram</label>
+                        <input
+                          value={storeProfileCfg.instagram || ''}
+                          onChange={(e) =>
+                            setStoreProfileCfg({ ...storeProfileCfg, instagram: e.target.value })
+                          }
+                          placeholder="@seubar"
+                        />
+                      </div>
+                      <div>
+                        <label className="!mt-0">Sobre a loja</label>
+                        <input
+                          value={storeProfileCfg.about || ''}
+                          onChange={(e) =>
+                            setStoreProfileCfg({ ...storeProfileCfg, about: e.target.value })
+                          }
+                          placeholder="Conte sobre seu espaço"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {canvaStoreSection === 'themes' && (
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                      {STORE_PROFILE_TEMPLATES.map((tpl) => (
+                        <button
+                          key={tpl.id}
+                          type="button"
+                          className="rounded-xl p-2 text-left border cursor-pointer"
+                          style={{
+                            background: tpl.color_bg,
+                            borderColor: `${tpl.color_accent}66`,
+                            color: tpl.color_text,
+                          }}
+                          onClick={() => {
+                            setFont(tpl.name_font);
+                            setColorBg(tpl.color_bg);
+                            setColorSurface(tpl.color_surface);
+                            setColorAccent(tpl.color_accent);
+                            setColorOk(tpl.color_ok);
+                            setColorText(tpl.color_text);
+                            setStoreProfileCfg((prev) => ({ ...prev, ...tpl.profile_config }));
+                            onToast(`Tema "${tpl.label}" aplicado!`);
+                          }}
+                        >
+                          <div className="text-xs font-bold" style={{ color: tpl.color_accent }}>
+                            {tpl.label}
+                          </div>
+                          <div className="text-[10px] opacity-75 truncate">
+                            {tpl.profile_config.badge_text}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* ========== INSPETOR CANVA: ARTE DO QR CODE ========== */}
+              {canvaTarget === 'qr' && (
+                <div className="space-y-2.5">
+                  <div className="flex flex-wrap gap-1.5">
+                    {(
+                      [
+                        { id: 'templates', label: '✨ Modelos' },
+                        { id: 'colors', label: '🎨 Cores & Moldura' },
+                        { id: 'texts', label: '📝 Textos' },
+                        { id: 'elements', label: '👁️ Elementos' },
+                      ] as const
+                    ).map((sec) => (
+                      <button
+                        key={sec.id}
+                        type="button"
+                        className={`chip !py-1 !px-2.5 !text-xs ${
+                          canvaQrSection === sec.id ? 'on' : ''
+                        }`}
+                        onClick={() => setCanvaQrSection(sec.id)}
+                      >
+                        {sec.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {canvaQrSection === 'templates' && (
+                    <div className="space-y-2">
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                        {QR_DESIGN_TEMPLATES.map((tpl) => (
+                          <button
+                            key={tpl.id}
+                            type="button"
+                            className="rounded-xl p-2 text-left border cursor-pointer"
+                            style={{
+                              background: tpl.bg_color,
+                              borderColor:
+                                qrDesign.id === tpl.id
+                                  ? tpl.accent_color
+                                  : 'rgba(255,255,255,0.14)',
+                              color: tpl.text_color,
+                            }}
+                            onClick={() =>
+                              setQrDesign({
+                                ...tpl,
+                                id: qrDesign.id.startsWith('qr-') ? qrDesign.id : tpl.id,
+                                phone_text: qrDesign.phone_text,
+                                instagram_text: qrDesign.instagram_text,
+                                wifi_name: qrDesign.wifi_name,
+                                wifi_pass: qrDesign.wifi_pass,
+                                custom_note: qrDesign.custom_note,
+                              })
+                            }
+                          >
+                            <div className="text-xs font-bold" style={{ color: tpl.accent_color }}>
+                              {tpl.design_name}
+                            </div>
+                            <div className="text-[10px] opacity-75 truncate">{tpl.headline}</div>
+                          </button>
+                        ))}
+                      </div>
+                      <div className="flex gap-2">
+                        <input
+                          value={canvaNewQrName}
+                          onChange={(e) => setCanvaNewQrName(e.target.value)}
+                          placeholder="Salvar cópia como (ex: Placa Mesa VIP)"
+                          className="grow"
+                        />
+                        <button
+                          type="button"
+                          className="b g sm shrink-0"
+                          disabled={saving || !canvaNewQrName.trim()}
+                          onClick={async () => {
+                            await handleSaveNewQrDesign(canvaNewQrName.trim());
+                            setCanvaNewQrName('');
+                          }}
+                        >
+                          + Salvar novo
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {canvaQrSection === 'colors' && (
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                      <div>
+                        <label className="!mt-0">Padrão fundo</label>
+                        <select
+                          value={qrDesign.bg_pattern}
+                          onChange={(e) =>
+                            setQrDesign({
+                              ...qrDesign,
+                              bg_pattern: e.target.value as QrDesignConfig['bg_pattern'],
+                            })
+                          }
+                        >
+                          <option value="solid">Sólido</option>
+                          <option value="gradient">Degradê</option>
+                          <option value="radial">Brilho central</option>
+                          <option value="dots">Pontilhado</option>
+                          <option value="stripes">Listras</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="!mt-0">Moldura</label>
+                        <select
+                          value={qrDesign.frame_style}
+                          onChange={(e) =>
+                            setQrDesign({
+                              ...qrDesign,
+                              frame_style: e.target.value as QrDesignConfig['frame_style'],
+                            })
+                          }
+                        >
+                          <option value="none">Sem moldura</option>
+                          <option value="minimal">Minimalista</option>
+                          <option value="double">Linha dupla</option>
+                          <option value="gold">Dourada clássica</option>
+                          <option value="neon">Neon brilhante</option>
+                          <option value="vintage">Vintage</option>
+                          <option value="rounded">Arredondada</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="!mt-0">Fundo 1</label>
+                        <input
+                          type="color"
+                          value={qrDesign.bg_color || '#0b090e'}
+                          onChange={(e) => setQrDesign({ ...qrDesign, bg_color: e.target.value })}
+                          className="!h-9 !p-1"
+                        />
+                      </div>
+                      <div>
+                        <label className="!mt-0">Fundo 2</label>
+                        <input
+                          type="color"
+                          value={qrDesign.bg_color_2 || '#23190a'}
+                          onChange={(e) => setQrDesign({ ...qrDesign, bg_color_2: e.target.value })}
+                          className="!h-9 !p-1"
+                        />
+                      </div>
+                      <div>
+                        <label className="!mt-0">Destaque</label>
+                        <input
+                          type="color"
+                          value={qrDesign.accent_color || '#e5b84b'}
+                          onChange={(e) =>
+                            setQrDesign({ ...qrDesign, accent_color: e.target.value })
+                          }
+                          className="!h-9 !p-1"
+                        />
+                      </div>
+                      <div>
+                        <label className="!mt-0">Texto</label>
+                        <input
+                          type="color"
+                          value={qrDesign.text_color || '#f8f2e4'}
+                          onChange={(e) => setQrDesign({ ...qrDesign, text_color: e.target.value })}
+                          className="!h-9 !p-1"
+                        />
+                      </div>
+                      <div>
+                        <label className="!mt-0">Cartão mesa</label>
+                        <input
+                          type="color"
+                          value={qrDesign.card_color || '#16131c'}
+                          onChange={(e) => setQrDesign({ ...qrDesign, card_color: e.target.value })}
+                          className="!h-9 !p-1"
+                        />
+                      </div>
+                      <div>
+                        <label className="!mt-0">Fundo do QR</label>
+                        <input
+                          type="color"
+                          value={qrDesign.qr_bg_color || '#ffffff'}
+                          onChange={(e) =>
+                            setQrDesign({ ...qrDesign, qr_bg_color: e.target.value })
+                          }
+                          className="!h-9 !p-1"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {canvaQrSection === 'texts' && (
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                      <div>
+                        <label className="!mt-0">Selo topo</label>
+                        <input
+                          value={qrDesign.badge_text || ''}
+                          onChange={(e) => setQrDesign({ ...qrDesign, badge_text: e.target.value })}
+                          placeholder="CARDÁPIO DIGITAL"
+                        />
+                      </div>
+                      <div>
+                        <label className="!mt-0">Título principal</label>
+                        <input
+                          value={qrDesign.headline || ''}
+                          onChange={(e) => setQrDesign({ ...qrDesign, headline: e.target.value })}
+                          placeholder="APONTE A CÂMERA"
+                        />
+                      </div>
+                      <div>
+                        <label className="!mt-0">Subtítulo</label>
+                        <input
+                          value={qrDesign.subheadline || ''}
+                          onChange={(e) =>
+                            setQrDesign({ ...qrDesign, subheadline: e.target.value })
+                          }
+                          placeholder="Veja drinks, petiscos e faça seu pedido"
+                        />
+                      </div>
+                      <div>
+                        <label className="!mt-0">Telefone / WhatsApp</label>
+                        <input
+                          value={qrDesign.phone_text || ''}
+                          onChange={(e) => setQrDesign({ ...qrDesign, phone_text: e.target.value })}
+                          placeholder="(11) 99999-9999"
+                        />
+                      </div>
+                      <div>
+                        <label className="!mt-0">Instagram</label>
+                        <input
+                          value={qrDesign.instagram_text || ''}
+                          onChange={(e) =>
+                            setQrDesign({ ...qrDesign, instagram_text: e.target.value })
+                          }
+                          placeholder="@seubar"
+                        />
+                      </div>
+                      <div>
+                        <label className="!mt-0">Wi-Fi (rede)</label>
+                        <input
+                          value={qrDesign.wifi_name || ''}
+                          onChange={(e) => setQrDesign({ ...qrDesign, wifi_name: e.target.value })}
+                          placeholder="Wi-Fi do Bar"
+                        />
+                      </div>
+                      <div>
+                        <label className="!mt-0">Wi-Fi (senha)</label>
+                        <input
+                          value={qrDesign.wifi_pass || ''}
+                          onChange={(e) => setQrDesign({ ...qrDesign, wifi_pass: e.target.value })}
+                          placeholder="senha123"
+                        />
+                      </div>
+                      <div>
+                        <label className="!mt-0">Destaque / Recado</label>
+                        <input
+                          value={qrDesign.custom_note || ''}
+                          onChange={(e) =>
+                            setQrDesign({ ...qrDesign, custom_note: e.target.value })
+                          }
+                          placeholder="Happy Hour 18h às 20h"
+                        />
+                      </div>
+                      <div>
+                        <label className="!mt-0">Rodapé</label>
+                        <input
+                          value={qrDesign.footer_text || ''}
+                          onChange={(e) =>
+                            setQrDesign({ ...qrDesign, footer_text: e.target.value })
+                          }
+                          placeholder="Agradecemos a preferência!"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {canvaQrSection === 'elements' && (
+                    <div className="flex flex-wrap gap-1.5">
+                      {(
+                        [
+                          { key: 'show_logo', label: '🖼️ Logo da loja' },
+                          { key: 'show_name', label: '🏷️ Nome da loja' },
+                          { key: 'show_slogan', label: '💬 Slogan' },
+                          { key: 'show_table', label: '🪑 Etiqueta da mesa' },
+                          { key: 'show_phone', label: '📞 Telefone' },
+                          { key: 'show_instagram', label: '📸 Instagram' },
+                          { key: 'show_wifi', label: '📶 Wi-Fi' },
+                        ] as const
+                      ).map((opt) => {
+                        const active = Boolean(qrDesign[opt.key]);
+                        return (
+                          <button
+                            key={opt.key}
+                            type="button"
+                            className={`chip !py-1.5 !px-3 !text-xs ${active ? 'on' : ''}`}
+                            onClick={() => setQrDesign({ ...qrDesign, [opt.key]: !active })}
+                          >
+                            {active ? '✓ ' : ''}
+                            {opt.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               )}
             </div>

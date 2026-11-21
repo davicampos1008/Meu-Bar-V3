@@ -4,6 +4,9 @@ import type {
   BarItem,
   BarOperationalData,
   CashRegisterShift,
+  DeliveryConfig,
+  DeliveryDispatchRecord,
+  DeliveryPaymentOption,
   HappyHourRule,
   LoyaltyConfig,
   LoyaltyCustomerRecord,
@@ -1095,3 +1098,312 @@ export async function resolveTableCall(barId: string, callId: string): Promise<v
     // ignore
   }
 }
+
+/* ============================================================
+ * MULTI-GARÇOM (RESPONSÁVEL DA MESA & CLAIM) + DELIVERY DIRETO
+ * ============================================================ */
+export function tableOwnerKey(tableLabel?: string | null): string {
+  return norm(tableLabel || '');
+}
+
+export async function broadcastBarOpsSync(barId: string): Promise<void> {
+  try {
+    const ch = sb.channel(`bar-calls-${barId}`);
+    ch.subscribe((status) => {
+      if (status === 'SUBSCRIBED') {
+        void ch
+          .send({
+            type: 'broadcast',
+            event: 'bar_ops_sync',
+            payload: { at: Date.now() },
+          })
+          .finally(() => {
+            setTimeout(() => void sb.removeChannel(ch), 300);
+          });
+      }
+    });
+  } catch {
+    // ignore
+  }
+}
+
+export const DELIVERY_PAYMENT_LABELS: Record<DeliveryPaymentOption, string> = {
+  maquininha_credito: '💳 Maquininha Crédito',
+  maquininha_debito: '💳 Maquininha Débito',
+  pix_entrega: '💠 Pix na entrega',
+  dinheiro: '💵 Dinheiro',
+};
+
+export const DEFAULT_DELIVERY_CONFIG: DeliveryConfig = {
+  enabled: false,
+  allow_pickup: true,
+  delivery_fee: 8,
+  min_order_value: 20,
+  eta_minutes: '35-50 min',
+  areas_note: 'Consulte bairros atendidos ao finalizar o pedido.',
+  whatsapp_phone: '',
+  payment_methods: ['maquininha_credito', 'maquininha_debito', 'pix_entrega', 'dinheiro'],
+};
+
+export function getDeliveryConfig(bar?: Partial<Bar> | null): DeliveryConfig {
+  const ops = getBarOpsData(bar);
+  return {
+    ...DEFAULT_DELIVERY_CONFIG,
+    ...(ops.delivery_config || {}),
+    payment_methods:
+      ops.delivery_config?.payment_methods && ops.delivery_config.payment_methods.length > 0
+        ? ops.delivery_config.payment_methods
+        : DEFAULT_DELIVERY_CONFIG.payment_methods,
+  };
+}
+
+export function deliveryMenuUrl(barId: string, mode: 'delivery' | 'pickup' = 'delivery'): string {
+  if (typeof window === 'undefined') return `?bar=${encodeURIComponent(barId)}&mode=${mode}`;
+  const base = `${window.location.origin}${window.location.pathname}`;
+  return `${base}?bar=${encodeURIComponent(barId)}&mode=${mode}`;
+}
+
+export interface ParsedDeliveryMeta {
+  isDelivery: boolean;
+  code: string;
+  mode: 'delivery' | 'pickup';
+  phone: string;
+  address: string;
+  payment: string;
+  changeFor: string;
+  fee: number;
+  cleanItemNote: string;
+}
+
+function sanitizePipeField(v: string): string {
+  return String(v || '')
+    .replace(/[\r\n|[\]]+/g, ' ')
+    .trim();
+}
+
+export function formatDeliveryOrderNote(
+  meta: {
+    code: string;
+    mode: 'delivery' | 'pickup';
+    phone: string;
+    address: string;
+    payment: string;
+    changeFor?: string;
+    fee: number;
+  },
+  itemNote?: string
+): string {
+  const parts = [
+    `code=${sanitizePipeField(meta.code)}`,
+    `mode=${meta.mode}`,
+    `phone=${sanitizePipeField(meta.phone)}`,
+    `pay=${sanitizePipeField(meta.payment)}`,
+    `chg=${sanitizePipeField(meta.changeFor || '')}`,
+    `fee=${Number(meta.fee || 0).toFixed(2)}`,
+    `addr=${sanitizePipeField(meta.address)}`,
+  ];
+  const header = `[DLV|${parts.join('|')}]`;
+  const cleanObs = String(itemNote || '').trim();
+  return cleanObs ? `${header} ${cleanObs}` : header;
+}
+
+export function parseDeliveryOrderMeta(order: Pick<Order, 'note' | 'table_label' | 'id'>): ParsedDeliveryMeta | null {
+  const note = String(order.note || '');
+  const tableLabel = String(order.table_label || '').toUpperCase();
+  const match = note.match(/\[DLV\|([^\]]+)\]\s*(.*)/);
+  if (match) {
+    const kv: Record<string, string> = {};
+    match[1].split('|').forEach((pair) => {
+      const idx = pair.indexOf('=');
+      if (idx > 0) {
+        kv[pair.slice(0, idx)] = pair.slice(idx + 1);
+      }
+    });
+    const mode: 'delivery' | 'pickup' = kv.mode === 'pickup' ? 'pickup' : 'delivery';
+    return {
+      isDelivery: true,
+      code: kv.code || order.id.slice(0, 4).toUpperCase(),
+      mode,
+      phone: kv.phone || '',
+      address: kv.addr || (mode === 'pickup' ? 'Retirada no balcão' : ''),
+      payment: kv.pay || 'Combinar na entrega',
+      changeFor: kv.chg || '',
+      fee: Number(kv.fee || 0) || 0,
+      cleanItemNote: (match[2] || '').trim(),
+    };
+  }
+  if (tableLabel.startsWith('DELIVERY') || tableLabel.startsWith('RETIRADA')) {
+    const mode: 'delivery' | 'pickup' = tableLabel.startsWith('RETIRADA') ? 'pickup' : 'delivery';
+    const codeMatch = tableLabel.match(/#([A-Z0-9]+)/i);
+    return {
+      isDelivery: true,
+      code: codeMatch ? codeMatch[1] : order.id.slice(0, 4).toUpperCase(),
+      mode,
+      phone: '',
+      address: mode === 'pickup' ? 'Retirada no balcão' : 'Endereço informado no pedido',
+      payment: 'Combinar na entrega',
+      changeFor: '',
+      fee: 0,
+      cleanItemNote: note,
+    };
+  }
+  return null;
+}
+
+export function isDeliveryOrder(order: Pick<Order, 'note' | 'table_label' | 'id'>): boolean {
+  return parseDeliveryOrderMeta(order) !== null;
+}
+
+export function cleanWhatsAppDigits(phone: string): string {
+  const digits = String(phone || '').replace(/\D+/g, '');
+  if (!digits) return '';
+  return digits.startsWith('55') && digits.length >= 12 ? digits : `55${digits}`;
+}
+
+export function buildMapsSearchUrl(address: string, city?: string | null): string {
+  const q = [address, city].filter(Boolean).join(', ');
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(q)}`;
+}
+
+export interface DeliveryOrderGroup {
+  code: string;
+  mode: 'delivery' | 'pickup';
+  clientName: string;
+  phone: string;
+  address: string;
+  payment: string;
+  changeFor: string;
+  fee: number;
+  subtotal: number;
+  total: number;
+  createdAt: string;
+  orders: Order[];
+  dispatch?: DeliveryDispatchRecord;
+}
+
+export function buildMotoboyWhatsAppLink(
+  courierPhone: string,
+  bar: Pick<Bar, 'name' | 'city'>,
+  group: DeliveryOrderGroup,
+  recipeNames: Record<string, string>
+): string {
+  const digits = cleanWhatsAppDigits(courierPhone);
+  const itemsText = group.orders
+    .map((o) => `• ${o.qty || 1}x ${o.recipe_name || recipeNames[o.recipe_id] || 'Item'}`)
+    .join('\n');
+  const mapsUrl = buildMapsSearchUrl(group.address, bar.city);
+  const lines = [
+    `🛵 *NOVA ENTREGA — ${bar.name}*`,
+    `Pedido: *#${group.code}*`,
+    `Cliente: *${group.clientName}*${group.phone ? ` (${group.phone})` : ''}`,
+    `📍 Endereço: *${group.address}*`,
+    `🗺️ Rota Google Maps: ${mapsUrl}`,
+    '',
+    `📦 *Itens:*`,
+    itemsText,
+    '',
+    `💰 *Total a cobrar: ${money(group.total)}* (Taxa: ${money(group.fee)})`,
+    `💳 Pagamento: *${group.payment}*${group.changeFor ? ` · Levar troco para *${group.changeFor}*` : ''}`,
+  ];
+  return `https://wa.me/${digits}?text=${encodeURIComponent(lines.join('\n'))}`;
+}
+
+export function buildCustomerDeliveryWhatsAppLink(
+  customerPhone: string,
+  bar: Pick<Bar, 'name'>,
+  group: DeliveryOrderGroup,
+  statusText: string
+): string {
+  const digits = cleanWhatsAppDigits(customerPhone);
+  const msg = [
+    `Olá ${group.clientName}! 👋`,
+    `Atualização do seu pedido *#${group.code}* no *${bar.name}*:`,
+    `${statusText}`,
+    group.mode === 'delivery' ? `📍 Destino: ${group.address}` : '🛍️ Retirada no balcão',
+    `💰 Total: ${money(group.total)} (${group.payment})`,
+  ].join('\n');
+  return `https://wa.me/${digits}?text=${encodeURIComponent(msg)}`;
+}
+
+export function printDeliveryTicket(params: {
+  bar: Bar;
+  group: DeliveryOrderGroup;
+  recipeNames: Record<string, string>;
+}): boolean {
+  const { bar, group, recipeNames } = params;
+  const ops = getBarOpsData(bar);
+  const widthMm = ops.printer_width === '58mm' ? '58mm' : '80mm';
+  const nowStr = new Date().toLocaleString('pt-BR');
+  const itemsHtml = group.orders
+    .map((o) => {
+      const meta = parseDeliveryOrderMeta(o);
+      const name = o.recipe_name || recipeNames[o.recipe_id] || 'Item';
+      return `<div><b>${o.qty || 1}x ${escHtml(name)}</b>${meta?.cleanItemNote ? `<br/><small>Obs: ${escHtml(meta.cleanItemNote)}</small>` : ''}</div>`;
+    })
+    .join('');
+
+  const html = `<!doctype html><html><head><meta charset="utf-8"><style>
+    @page { size: ${widthMm} auto; margin: 2mm; }
+    body { font-family: 'Courier New', monospace; width: ${widthMm}; margin: 0 auto; color: #000; font-size: 12px; line-height: 1.35; }
+    .c { text-align: center; }
+    .b { font-weight: bold; }
+    .big { font-size: 16px; font-weight: bold; }
+    .row { display: flex; justify-content: space-between; }
+    .hr { border-top: 1px dashed #000; margin: 6px 0; }
+  </style></head><body>
+    <div class="c b">${escHtml(bar.name.toUpperCase())}</div>
+    <div class="c big">${group.mode === 'pickup' ? 'RETIRADA' : 'DELIVERY'} #${escHtml(group.code)}</div>
+    <div class="c">${escHtml(nowStr)}</div>
+    <div class="hr"></div>
+    <div class="b">Cliente: ${escHtml(group.clientName)}</div>
+    ${group.phone ? `<div>Tel: ${escHtml(group.phone)}</div>` : ''}
+    <div><b>Endereço:</b> ${escHtml(group.address)}</div>
+    ${group.dispatch?.courier_name ? `<div><b>Motoboy:</b> ${escHtml(group.dispatch.courier_name)}</div>` : ''}
+    <div class="hr"></div>
+    ${itemsHtml}
+    <div class="hr"></div>
+    <div class="row"><span>Subtotal</span><span>${escHtml(money(group.subtotal))}</span></div>
+    ${group.fee > 0 ? `<div class="row"><span>Taxa Entrega</span><span>${escHtml(money(group.fee))}</span></div>` : ''}
+    <div class="row big"><span>TOTAL</span><span>${escHtml(money(group.total))}</span></div>
+    <div style="margin-top:6px;"><b>Pagto:</b> ${escHtml(group.payment)}${group.changeFor ? ` (Troco p/ ${escHtml(group.changeFor)})` : ''}</div>
+    <div class="hr"></div>
+    <div class="c">Bom apetite!</div>
+  </body></html>`;
+
+  if (getConnectedBluetoothPrinter().connected) {
+    const btLines: Parameters<typeof buildEscPosBytes>[0] = [
+      { text: bar.name.toUpperCase(), align: 'center', bold: true },
+      {
+        text: `${group.mode === 'pickup' ? 'RETIRADA' : 'DELIVERY'} #${group.code}`,
+        align: 'center',
+        bold: true,
+        doubleSize: true,
+      },
+      { text: nowStr, align: 'center' },
+      { text: '', hr: true },
+      { text: `Cliente: ${group.clientName}`, bold: true },
+      ...(group.phone ? [{ text: `Tel: ${group.phone}` }] : []),
+      { text: `End: ${group.address}`, bold: true },
+      ...(group.dispatch?.courier_name ? [{ text: `Motoboy: ${group.dispatch.courier_name}` }] : []),
+      { text: '', hr: true },
+      ...group.orders.map((o) => ({
+        text: `${o.qty || 1}x ${o.recipe_name || recipeNames[o.recipe_id] || 'Item'}`,
+        bold: true,
+      })),
+      { text: '', hr: true },
+      { text: '', pair: ['Subtotal', money(group.subtotal)] },
+      ...(group.fee > 0 ? [{ text: '', pair: ['Entrega', money(group.fee)] as [string, string] }] : []),
+      { text: '', pair: ['TOTAL', money(group.total)], bold: true },
+      { text: `Pagto: ${group.payment}${group.changeFor ? ` (Troco p/ ${group.changeFor})` : ''}`, bold: true },
+      { text: '', hr: true },
+    ];
+    const bytes = buildEscPosBytes(btLines, widthMm);
+    void writeEscPosBluetooth(bytes).then((ok) => {
+      if (!ok) printHtmlViaIframe(html);
+    });
+    return true;
+  }
+
+  return printHtmlViaIframe(html);
+}
+

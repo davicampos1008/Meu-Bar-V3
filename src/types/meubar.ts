@@ -52,8 +52,8 @@ export interface StoreProfileConfig {
   banner_height?: 'sm' | 'md' | 'lg';
   banner_overlay?: 'dark' | 'gradient' | 'soft' | 'none';
   logo_shape?: string;
-  logo_size?: 'sm' | 'md' | 'lg';
-  card_style?: 'glass' | 'bordered' | 'elevated' | 'neon' | 'minimal';
+  logo_size?: 'xs' | 'sm' | 'md' | 'lg' | 'xl';
+  card_style?: 'glass' | 'bordered' | 'elevated' | 'neon' | 'minimal' | 'ticket' | 'soft-pill';
   top_ornament?: string;
   side_detail?: string;
   badge_text?: string;
@@ -296,6 +296,52 @@ export interface TableCallAlert {
   created_at: string;
 }
 
+export interface TableWaiterAssignment {
+  waiter_name: string;
+  assigned_at: string;
+  table_label: string;
+}
+
+export interface WaiterClaim {
+  waiter_name: string;
+  claimed_at: string;
+}
+
+export type DeliveryPaymentOption = 'maquininha_credito' | 'maquininha_debito' | 'pix_entrega' | 'dinheiro';
+
+export interface DeliveryCourier {
+  id: string;
+  name: string;
+  phone: string;
+  vehicle?: string;
+  active: boolean;
+}
+
+export interface DeliveryConfig {
+  enabled: boolean;
+  allow_pickup: boolean;
+  delivery_fee: number;
+  min_order_value: number;
+  eta_minutes: string;
+  areas_note?: string;
+  whatsapp_phone?: string;
+  payment_methods: DeliveryPaymentOption[];
+}
+
+export type DeliveryStage = 'received' | 'preparing' | 'ready_for_courier' | 'out_for_delivery' | 'delivered' | 'cancelled';
+
+export interface DeliveryDispatchRecord {
+  code: string;
+  stage: DeliveryStage;
+  courier_id?: string;
+  courier_name?: string;
+  courier_phone?: string;
+  dispatched_at?: string;
+  delivered_at?: string;
+  updated_by?: string;
+  updated_at: string;
+}
+
 export interface BarOperationalData {
   pix_key?: string;
   pix_merchant_name?: string;
@@ -314,6 +360,12 @@ export interface BarOperationalData {
   happy_hours?: HappyHourRule[];
   loyalty?: LoyaltyConfig;
   loyalty_customers?: LoyaltyCustomerRecord[];
+  table_waiters?: Record<string, TableWaiterAssignment>;
+  order_claims?: Record<string, WaiterClaim>;
+  call_claims?: Record<string, WaiterClaim>;
+  delivery_config?: DeliveryConfig;
+  delivery_couriers?: DeliveryCourier[];
+  delivery_dispatches?: Record<string, DeliveryDispatchRecord>;
 }
 
 export type BarPlanTier = 'free' | 'pro' | 'vip';

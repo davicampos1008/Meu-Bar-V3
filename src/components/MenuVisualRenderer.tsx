@@ -1,5 +1,5 @@
 import React from 'react';
-import { CREST_BASES, CREST_ICONS, CREST_ORNAMENTS, MENU_BLOCK_LABELS } from '../lib/catalog';
+import { CREST_ICONS, CREST_ORNAMENTS, MENU_BLOCK_LABELS } from '../lib/catalog';
 import {
   DEFAULT_MENU_DESIGN,
   getPromoAdjustedPrice,
@@ -19,98 +19,104 @@ export function buildMenuBackgroundStyle(
   const ac = colorAccent || '#e5a93c';
   switch (design.bg_pattern) {
     case 'solid':
-      return { background: c1 };
+      return { backgroundColor: c1, backgroundImage: 'none' };
     case 'aurora':
       return {
-        background: `radial-gradient(circle at 18% 12%, ${ac}30 0%, transparent 45%), radial-gradient(circle at 86% 24%, ${c2} 0%, transparent 55%), linear-gradient(165deg, ${c2} 0%, ${c1} 72%)`,
+        backgroundColor: c1,
+        backgroundImage: `radial-gradient(circle at 14% 12%, ${ac}4a 0%, transparent 48%), radial-gradient(circle at 86% 24%, ${c2} 0%, transparent 56%), radial-gradient(circle at 50% 92%, ${ac}2b 0%, transparent 52%), linear-gradient(160deg, ${c2} 0%, ${c1} 74%)`,
       };
     case 'sunset-glow':
       return {
-        background: `radial-gradient(circle at 50% 100%, ${ac}35 0%, transparent 55%), linear-gradient(180deg, ${c1} 0%, ${c2} 58%, ${ac}22 100%)`,
+        backgroundColor: c1,
+        backgroundImage: `radial-gradient(ellipse at 50% 100%, ${ac}58 0%, transparent 60%), linear-gradient(180deg, ${c1} 0%, ${c2} 52%, ${ac}36 100%)`,
       };
     case 'chalkboard':
       return {
         backgroundColor: c1,
-        backgroundImage: `radial-gradient(rgba(255,255,255,0.045) 1px, transparent 1px), radial-gradient(circle at 50% 0%, ${c2}aa 0%, ${c1} 76%)`,
-        backgroundSize: '20px 20px, 100% 100%',
+        backgroundImage: `radial-gradient(rgba(255,255,255,0.12) 1px, transparent 1px), radial-gradient(rgba(255,255,255,0.06) 1px, transparent 1px), radial-gradient(ellipse at 50% 15%, rgba(255,255,255,0.09) 0%, transparent 65%)`,
+        backgroundSize: '18px 18px, 31px 31px, 100% 100%',
+        backgroundPosition: '0 0, 9px 12px, 0 0',
       };
     case 'parchment':
       return {
         backgroundColor: c1,
-        backgroundImage: `radial-gradient(circle at 20% 20%, ${c2}88 0%, transparent 55%), radial-gradient(circle at 80% 80%, ${c2}88 0%, transparent 55%), repeating-linear-gradient(0deg, rgba(120,85,35,0.03) 0px, rgba(120,85,35,0.03) 1px, transparent 1px, transparent 4px)`,
+        backgroundImage: `radial-gradient(circle at 12% 14%, ${ac}28 0%, transparent 50%), radial-gradient(circle at 88% 86%, ${ac}24 0%, transparent 50%), repeating-linear-gradient(0deg, ${ac}1a 0px, ${ac}1a 1px, transparent 1px, transparent 6px)`,
       };
     case 'marble-light':
       return {
         backgroundColor: c1,
-        backgroundImage: `linear-gradient(125deg, ${c1} 0%, ${c2}55 45%, ${c1} 70%, ${c2}44 100%)`,
+        backgroundImage: `linear-gradient(125deg, transparent 0%, rgba(255,255,255,0.11) 24%, transparent 32%, ${ac}22 52%, transparent 60%, rgba(255,255,255,0.09) 80%, transparent 100%), linear-gradient(35deg, ${c2}66 0%, transparent 55%, ${ac}18 100%)`,
       };
     case 'grunge':
       return {
         backgroundColor: c1,
-        backgroundImage: `radial-gradient(circle at 15% 15%, ${ac}22 0%, transparent 42%), radial-gradient(circle at 85% 85%, ${c2}cc 0%, transparent 50%), repeating-radial-gradient(circle at 0 0, rgba(255,255,255,0.025) 0, rgba(255,255,255,0.025) 2px, transparent 2px, transparent 9px)`,
+        backgroundImage: `radial-gradient(circle at 16% 18%, ${ac}32 0%, transparent 45%), radial-gradient(circle at 84% 80%, ${c2}dd 0%, transparent 52%), repeating-radial-gradient(circle at 50% 50%, rgba(255,255,255,0.065) 0, rgba(255,255,255,0.065) 1.5px, transparent 1.5px, transparent 10px)`,
       };
     case 'velvet':
       return {
-        background: `radial-gradient(ellipse at 50% 10%, ${ac}24 0%, ${c2} 42%, ${c1} 85%)`,
+        backgroundColor: c1,
+        backgroundImage: `radial-gradient(ellipse at 50% 8%, ${ac}3c 0%, ${c2} 42%, ${c1} 88%), linear-gradient(90deg, rgba(0,0,0,0.38) 0%, transparent 25%, transparent 75%, rgba(0,0,0,0.38) 100%)`,
       };
     case 'carbon':
       return {
         backgroundColor: c1,
-        backgroundImage: `linear-gradient(27deg, ${c2}99 5px, transparent 5px), linear-gradient(207deg, ${c2}99 5px, transparent 5px), linear-gradient(27deg, ${ac}14 5px, transparent 5px), linear-gradient(207deg, ${ac}14 5px, transparent 5px)`,
+        backgroundImage: `linear-gradient(27deg, rgba(255,255,255,0.09) 5px, transparent 5px), linear-gradient(207deg, rgba(255,255,255,0.09) 5px, transparent 5px), linear-gradient(27deg, ${ac}26 5px, transparent 5px), linear-gradient(207deg, ${ac}26 5px, transparent 5px)`,
         backgroundSize: '18px 18px',
         backgroundPosition: '0 2px, 9px 7px, 0 11px, 9px -2px',
       };
     case 'diagonal':
       return {
         backgroundColor: c1,
-        backgroundImage: `repeating-linear-gradient(135deg, ${c2}66 0px, ${c2}66 12px, transparent 12px, transparent 28px)`,
+        backgroundImage: `repeating-linear-gradient(135deg, ${ac}24 0px, ${ac}24 10px, rgba(255,255,255,0.04) 10px, rgba(255,255,255,0.04) 12px, transparent 12px, transparent 28px)`,
       };
     case 'chevron':
       return {
         backgroundColor: c1,
-        backgroundImage: `linear-gradient(135deg, ${c2}55 25%, transparent 25%), linear-gradient(225deg, ${c2}55 25%, transparent 25%), linear-gradient(45deg, ${ac}16 25%, transparent 25%), linear-gradient(315deg, ${ac}16 25%, transparent 25%)`,
+        backgroundImage: `linear-gradient(135deg, ${ac}28 25%, transparent 25%), linear-gradient(225deg, ${ac}28 25%, transparent 25%), linear-gradient(45deg, rgba(255,255,255,0.08) 25%, transparent 25%), linear-gradient(315deg, rgba(255,255,255,0.08) 25%, transparent 25%)`,
         backgroundPosition: '12px 0, 12px 0, 0 0, 0 0',
         backgroundSize: '24px 24px',
       };
     case 'bamboo-lines':
       return {
         backgroundColor: c1,
-        backgroundImage: `repeating-linear-gradient(90deg, ${c2}66 0px, ${c2}66 2px, transparent 2px, transparent 22px), radial-gradient(circle at 50% 0%, ${ac}1f 0%, transparent 60%)`,
+        backgroundImage: `repeating-linear-gradient(90deg, ${ac}2c 0px, ${ac}2c 2px, rgba(255,255,255,0.05) 2px, rgba(255,255,255,0.05) 4px, transparent 4px, transparent 20px), radial-gradient(circle at 50% 0%, ${ac}26 0%, transparent 62%)`,
       };
     case 'grid':
       return {
         backgroundColor: c1,
-        backgroundImage: `linear-gradient(${ac}14 1px, transparent 1px), linear-gradient(90deg, ${ac}14 1px, transparent 1px)`,
-        backgroundSize: '26px 26px',
+        backgroundImage: `linear-gradient(${ac}2e 1px, transparent 1px), linear-gradient(90deg, ${ac}2e 1px, transparent 1px)`,
+        backgroundSize: '22px 22px',
       };
     case 'dots':
       return {
         backgroundColor: c1,
-        backgroundImage: `radial-gradient(${ac}28 1.5px, transparent 1.5px)`,
-        backgroundSize: '18px 18px',
+        backgroundImage: `radial-gradient(${ac}4f 2px, transparent 2px)`,
+        backgroundSize: '16px 16px',
       };
     case 'terrazzo':
       return {
         backgroundColor: c1,
-        backgroundImage: `radial-gradient(${ac}2b 2px, transparent 2px), radial-gradient(${c2}bb 2.5px, transparent 2.5px)`,
-        backgroundSize: '32px 32px, 24px 24px',
-        backgroundPosition: '0 0, 11px 14px',
+        backgroundImage: `radial-gradient(${ac}55 2.5px, transparent 2.5px), radial-gradient(rgba(255,255,255,0.22) 2px, transparent 2px), radial-gradient(${ac}2e 3.5px, transparent 3.5px)`,
+        backgroundSize: '30px 30px, 22px 22px, 44px 44px',
+        backgroundPosition: '0 0, 11px 14px, 20px 6px',
       };
     case 'checker':
       return {
         backgroundColor: c1,
-        backgroundImage: `linear-gradient(45deg, ${c2}44 25%, transparent 25%), linear-gradient(-45deg, ${c2}44 25%, transparent 25%), linear-gradient(45deg, transparent 75%, ${c2}44 75%), linear-gradient(-45deg, transparent 75%, ${c2}44 75%)`,
-        backgroundSize: '28px 28px',
-        backgroundPosition: '0 0, 0 14px, 14px -14px, -14px 0px',
+        backgroundImage: `linear-gradient(45deg, ${ac}22 25%, transparent 25%), linear-gradient(-45deg, ${ac}22 25%, transparent 25%), linear-gradient(45deg, transparent 75%, ${ac}22 75%), linear-gradient(-45deg, transparent 75%, ${ac}22 75%)`,
+        backgroundSize: '26px 26px',
+        backgroundPosition: '0 0, 0 13px, 13px -13px, -13px 0px',
       };
     case 'spotlight':
       return {
-        background: `radial-gradient(ellipse at 50% 0%, ${ac}3a 0%, ${c2}88 38%, ${c1} 80%)`,
+        backgroundColor: c1,
+        backgroundImage: `radial-gradient(ellipse 80% 45% at 50% 0%, ${ac}58 0%, ${c2}aa 42%, ${c1} 84%)`,
       };
     case 'radial':
     default:
       return {
-        background: `radial-gradient(circle at top, ${c2} 0%, ${c1} 60%)`,
+        backgroundColor: c1,
+        backgroundImage: `radial-gradient(circle at 50% 0%, ${ac}26 0%, ${c2} 32%, ${c1} 72%)`,
       };
   }
 }
@@ -162,7 +168,7 @@ export function getLogoShapeStyle(
         ...base,
         clipPath: 'polygon(28% 2%, 72% 2%, 98% 28%, 98% 72%, 72% 98%, 28% 98%, 2% 72%, 2% 28%)',
         border: `2px solid ${accent}`,
-        boxShadow: `0 0 18px ${accent}44`,
+        filter: `drop-shadow(0 0 8px ${accent}88)`,
       };
     case 'arch':
       return {
@@ -174,9 +180,9 @@ export function getLogoShapeStyle(
       return {
         ...base,
         borderRadius: '9999px',
-        border: `2px solid ${accent}`,
-        padding: '2px',
-        boxShadow: `0 0 0 2px ${accent}33`,
+        border: `2.5px solid ${accent}`,
+        padding: '3px',
+        boxShadow: `0 0 0 3px ${accent}44`,
       };
     case 'polaroid':
       return {
@@ -192,7 +198,7 @@ export function getLogoShapeStyle(
         ...base,
         borderRadius: '18px',
         border: `2px solid ${accent}`,
-        boxShadow: `0 0 22px ${accent}66`,
+        boxShadow: `0 0 24px ${accent}88`,
       };
     case 'none':
       return { ...base, borderRadius: '12px', border: 'none' };
@@ -529,16 +535,18 @@ export const SideDetailWrapper: React.FC<{
   let wrapperStyle: React.CSSProperties = { position: 'relative' };
   let showCorners = false;
   let showVictorianCorners = false;
+  let showBambooRails = false;
+  let showLaserRails = false;
 
   switch (sideDetail) {
     case 'double-hairline':
       wrapperStyle = {
         ...wrapperStyle,
-        border: `1px solid ${accent}88`,
-        outline: `1px solid ${accent}44`,
-        outlineOffset: '-6px',
-        padding: '14px',
-        borderRadius: '10px',
+        border: `2px solid ${accent}`,
+        outline: `1px solid ${accent}99`,
+        outlineOffset: '-7px',
+        padding: '15px',
+        borderRadius: '12px',
       };
       break;
     case 'gold-bars':
@@ -546,120 +554,111 @@ export const SideDetailWrapper: React.FC<{
         ...wrapperStyle,
         borderLeft: `6px solid ${accent}`,
         borderRight: `6px solid ${accent}`,
-        boxShadow: `inset 2px 0 0 ${accent}55, inset -2px 0 0 ${accent}55`,
-        paddingLeft: '14px',
-        paddingRight: '14px',
+        boxShadow: `inset 3px 0 0 ${accent}66, inset -3px 0 0 ${accent}66`,
+        padding: '6px 14px',
+        borderRadius: '8px',
       };
       break;
     case 'victorian-scroll':
       wrapperStyle = {
         ...wrapperStyle,
-        border: `1px solid ${accent}44`,
-        padding: '14px',
-        borderRadius: '12px',
+        border: `1.5px solid ${accent}99`,
+        padding: '16px',
+        borderRadius: '14px',
       };
       showVictorianCorners = true;
       break;
     case 'vintage-arch':
       wrapperStyle = {
         ...wrapperStyle,
-        border: `6px solid #181410`,
-        outline: `2px dashed ${accent}88`,
-        outlineOffset: '-10px',
-        padding: '14px',
-        borderRadius: '16px',
+        border: `3px solid ${accent}`,
+        outline: `2px dashed ${accent}bb`,
+        outlineOffset: '-9px',
+        padding: '16px',
+        borderRadius: '18px',
+        boxShadow: `inset 0 0 24px ${accent}22`,
       };
       break;
     case 'neon-frame':
       wrapperStyle = {
         ...wrapperStyle,
-        border: `2px solid ${accent}`,
-        boxShadow: `0 0 18px ${accent}55, inset 0 0 14px ${accent}22`,
-        padding: '12px',
-        borderRadius: '16px',
+        border: `2.5px solid ${accent}`,
+        boxShadow: `0 0 22px ${accent}99, inset 0 0 18px ${accent}44`,
+        padding: '14px',
+        borderRadius: '18px',
       };
       break;
     case 'thin-gold':
       wrapperStyle = {
         ...wrapperStyle,
-        borderLeft: `2px solid ${accent}66`,
-        borderRight: `2px solid ${accent}66`,
-        paddingLeft: '10px',
-        paddingRight: '10px',
+        borderLeft: `3px solid ${accent}`,
+        borderRight: `3px solid ${accent}`,
+        padding: '4px 12px',
       };
       break;
     case 'double-pillars':
       wrapperStyle = {
         ...wrapperStyle,
-        borderLeft: `4px double ${accent}99`,
-        borderRight: `4px double ${accent}99`,
-        paddingLeft: '12px',
-        paddingRight: '12px',
+        borderLeft: `6px double ${accent}`,
+        borderRight: `6px double ${accent}`,
+        padding: '4px 14px',
       };
       break;
     case 'ornate-brackets':
       wrapperStyle = {
         ...wrapperStyle,
-        borderLeft: `1px solid ${accent}44`,
-        borderRight: `1px solid ${accent}44`,
-        paddingLeft: '12px',
-        paddingRight: '12px',
+        borderLeft: `1.5px solid ${accent}88`,
+        borderRight: `1.5px solid ${accent}88`,
+        padding: '12px 14px',
       };
       showCorners = true;
       break;
     case 'dashed-stitch':
       wrapperStyle = {
         ...wrapperStyle,
-        borderLeft: `2px dashed ${accent}77`,
-        borderRight: `2px dashed ${accent}77`,
-        paddingLeft: '10px',
-        paddingRight: '10px',
+        borderLeft: `3px dashed ${accent}`,
+        borderRight: `3px dashed ${accent}`,
+        padding: '6px 13px',
       };
       break;
     case 'glow-rails':
       wrapperStyle = {
         ...wrapperStyle,
-        borderLeft: `2px solid ${accent}`,
-        borderRight: `2px solid ${accent}`,
-        boxShadow: `inset 8px 0 18px -12px ${accent}, inset -8px 0 18px -12px ${accent}`,
-        paddingLeft: '12px',
-        paddingRight: '12px',
+        borderLeft: `3px solid ${accent}`,
+        borderRight: `3px solid ${accent}`,
+        boxShadow: `inset 14px 0 22px -10px ${accent}cc, inset -14px 0 22px -10px ${accent}cc`,
+        padding: '6px 14px',
+        borderRadius: '10px',
       };
       break;
     case 'minimal-dots':
       wrapperStyle = {
         ...wrapperStyle,
-        borderLeft: `3px dotted ${accent}99`,
-        borderRight: `3px dotted ${accent}99`,
-        paddingLeft: '12px',
-        paddingRight: '12px',
+        borderLeft: `4px dotted ${accent}`,
+        borderRight: `4px dotted ${accent}`,
+        padding: '6px 14px',
       };
       break;
     case 'bamboo-sides':
       wrapperStyle = {
         ...wrapperStyle,
-        borderLeft: `5px solid ${accent}aa`,
-        borderRight: `5px solid ${accent}aa`,
-        borderRadius: '14px',
-        padding: '10px 14px',
+        padding: '8px 18px',
       };
+      showBambooRails = true;
       break;
     case 'laser-edges':
       wrapperStyle = {
         ...wrapperStyle,
-        borderLeft: `2px solid ${accent}`,
-        borderRight: `2px solid ${accent}`,
-        boxShadow: `-6px 0 18px -6px ${accent}, 6px 0 18px -6px ${accent}`,
-        paddingLeft: '12px',
-        paddingRight: '12px',
+        padding: '8px 16px',
       };
+      showLaserRails = true;
       break;
     case 'editorial-frame':
       wrapperStyle = {
         ...wrapperStyle,
-        border: `1px solid ${accent}66`,
-        padding: '14px',
-        borderRadius: '4px',
+        border: `2px solid ${accent}`,
+        padding: '15px',
+        borderRadius: '3px',
       };
       break;
     default:
@@ -668,22 +667,58 @@ export const SideDetailWrapper: React.FC<{
 
   return (
     <div style={wrapperStyle}>
+      {showBambooRails && (
+        <>
+          <span
+            className="pointer-events-none absolute top-1 bottom-1 left-0 w-2 rounded-full"
+            style={{
+              backgroundImage: `repeating-linear-gradient(180deg, ${accent} 0px, ${accent} 18px, transparent 18px, transparent 22px)`,
+              opacity: 0.9,
+            }}
+          />
+          <span
+            className="pointer-events-none absolute top-1 bottom-1 right-0 w-2 rounded-full"
+            style={{
+              backgroundImage: `repeating-linear-gradient(180deg, ${accent} 0px, ${accent} 18px, transparent 18px, transparent 22px)`,
+              opacity: 0.9,
+            }}
+          />
+        </>
+      )}
+      {showLaserRails && (
+        <>
+          <span
+            className="pointer-events-none absolute top-0 bottom-0 left-0 w-1.5 rounded-full"
+            style={{
+              background: `linear-gradient(180deg, transparent 0%, ${accent} 25%, #34d399 50%, ${accent} 75%, transparent 100%)`,
+              boxShadow: `0 0 14px ${accent}`,
+            }}
+          />
+          <span
+            className="pointer-events-none absolute top-0 bottom-0 right-0 w-1.5 rounded-full"
+            style={{
+              background: `linear-gradient(180deg, transparent 0%, ${accent} 25%, #34d399 50%, ${accent} 75%, transparent 100%)`,
+              boxShadow: `0 0 14px ${accent}`,
+            }}
+          />
+        </>
+      )}
       {showCorners && (
         <>
           <span
-            className="pointer-events-none absolute top-0 left-0 w-4 h-4 border-t-2 border-l-2"
+            className="pointer-events-none absolute top-0 left-0 w-6 h-6 border-t-[3px] border-l-[3px]"
             style={{ borderColor: accent }}
           />
           <span
-            className="pointer-events-none absolute top-0 right-0 w-4 h-4 border-t-2 border-r-2"
+            className="pointer-events-none absolute top-0 right-0 w-6 h-6 border-t-[3px] border-r-[3px]"
             style={{ borderColor: accent }}
           />
           <span
-            className="pointer-events-none absolute bottom-0 left-0 w-4 h-4 border-b-2 border-l-2"
+            className="pointer-events-none absolute bottom-0 left-0 w-6 h-6 border-b-[3px] border-l-[3px]"
             style={{ borderColor: accent }}
           />
           <span
-            className="pointer-events-none absolute bottom-0 right-0 w-4 h-4 border-b-2 border-r-2"
+            className="pointer-events-none absolute bottom-0 right-0 w-6 h-6 border-b-[3px] border-r-[3px]"
             style={{ borderColor: accent }}
           />
         </>
@@ -1352,46 +1387,124 @@ export const MenuPromoBanner: React.FC<{
   );
 };
 
-function getCrestBaseContainerStyle(baseId: string | undefined, accent: string): React.CSSProperties {
+function getCrestBasePedestalStyle(baseId: string | undefined, accent: string): React.CSSProperties {
   switch (baseId) {
+    case 'none':
+      return { padding: '0px', border: 'none', background: 'transparent' };
     case 'square':
-      return { borderRadius: '6px', border: `2px solid ${accent}` };
+      return {
+        padding: '7px',
+        borderRadius: '6px',
+        border: `2.5px solid ${accent}`,
+        outline: `1px solid ${accent}88`,
+        outlineOffset: '-5px',
+        background: `${accent}18`,
+        boxShadow: '0 6px 16px rgba(0,0,0,0.35)',
+      };
     case 'rounded':
-      return { borderRadius: '16px', border: `2px solid ${accent}` };
+      return {
+        padding: '7px',
+        borderRadius: '22px',
+        border: `2px solid ${accent}`,
+        background: `${accent}1c`,
+        boxShadow: `0 8px 20px rgba(0,0,0,0.35), inset 0 0 10px ${accent}22`,
+      };
     case 'ring':
       return {
+        padding: '8px',
         borderRadius: '9999px',
-        border: `3px double ${accent}`,
-        boxShadow: `0 0 14px ${accent}55`,
+        border: `4px double ${accent}`,
+        background: `${accent}18`,
+        boxShadow: `0 0 20px ${accent}77, inset 0 0 12px ${accent}33`,
       };
     case 'shield':
       return {
-        borderRadius: '12px 12px 28px 28px',
-        border: `2px solid ${accent}`,
-        boxShadow: `0 4px 14px ${accent}40`,
+        padding: '8px 10px 14px 10px',
+        borderRadius: '14px 14px 46% 46%',
+        border: `2.5px solid ${accent}`,
+        background: `linear-gradient(180deg, ${accent}38 0%, ${accent}14 100%)`,
+        boxShadow: `0 8px 20px ${accent}44`,
       };
     case 'starburst':
       return {
-        borderRadius: '18px 4px 18px 4px',
+        padding: '9px',
+        borderRadius: '18px',
         border: `2px solid ${accent}`,
-        boxShadow: `0 0 16px ${accent}55`,
+        background: `${accent}26`,
+        boxShadow: `0 0 22px ${accent}66`,
       };
     case 'crown':
       return {
+        padding: '8px',
+        marginTop: '10px',
         borderRadius: '9999px',
-        border: `2px solid ${accent}`,
-        boxShadow: `0 -4px 14px ${accent}44`,
+        border: `2.5px solid ${accent}`,
+        background: `radial-gradient(circle, ${accent}33 0%, ${accent}12 100%)`,
+        boxShadow: `0 -4px 18px ${accent}66`,
       };
     case 'ribbon':
       return {
-        borderRadius: '12px',
+        padding: '7px 7px 14px 7px',
+        borderRadius: '18px',
         border: `2px solid ${accent}`,
+        background: `${accent}1c`,
+        boxShadow: '0 6px 16px rgba(0,0,0,0.35)',
       };
-    case 'none':
-      return { border: 'none' };
     case 'circle':
     default:
-      return { borderRadius: '9999px', border: `2px solid ${accent}` };
+      return {
+        padding: '7px',
+        borderRadius: '9999px',
+        border: `2.5px solid ${accent}`,
+        background: `${accent}1a`,
+        boxShadow: `0 4px 14px ${accent}33`,
+      };
+  }
+}
+
+function getHeaderBorderInlineStyle(borderCls: string, accent: string): React.CSSProperties {
+  switch (borderCls) {
+    case 'crest-border-none':
+      return { border: 'none', boxShadow: 'none', outline: 'none' };
+    case 'crest-border-double':
+      return { border: `4px double ${accent}`, borderRadius: '14px' };
+    case 'crest-border-dashed':
+      return { border: `2.5px dashed ${accent}`, borderRadius: '14px' };
+    case 'crest-border-emblem':
+      return { border: `2.5px solid ${accent}`, borderRadius: '28px 8px 28px 8px' };
+    case 'crest-border-neon':
+      return {
+        border: `2px solid ${accent}`,
+        borderRadius: '16px',
+        boxShadow: `0 0 20px ${accent}88, inset 0 0 16px ${accent}33`,
+      };
+    case 'crest-border-royal':
+      return {
+        border: `3px ridge ${accent}`,
+        outline: `1.5px solid ${accent}99`,
+        outlineOffset: '4px',
+        borderRadius: '14px',
+      };
+    case 'crest-border-clean-glow':
+      return {
+        border: `1.5px solid ${accent}88`,
+        borderRadius: '16px',
+        boxShadow: '0 14px 32px rgba(0,0,0,0.5)',
+      };
+    case 'crest-border-minimal-line':
+      return {
+        border: 'none',
+        borderTop: `3.5px solid ${accent}`,
+        borderBottom: `3.5px solid ${accent}`,
+        borderRadius: '4px',
+      };
+    case 'crest-border-gold':
+    default:
+      return {
+        border: `2px solid ${accent}`,
+        borderRadius: '14px',
+        boxShadow: `inset 0 0 0 3px ${accent}26`,
+      };
   }
 }
 
@@ -1419,7 +1532,6 @@ export const MenuHeaderCard: React.FC<{
   };
 
   const baseId = bar.crest_base || 'circle';
-  const be = CREST_BASES.find((x) => x.id === baseId)?.emoji || '';
   const ie = CREST_ICONS.find((x) => x.id === (bar.crest_icon || 'glass'))?.emoji || '🍸';
   const oe = CREST_ORNAMENTS.find((x) => x.id === (bar.crest_ornament || 'none'))?.emoji || '';
 
@@ -1449,28 +1561,38 @@ export const MenuHeaderCard: React.FC<{
   };
 
   const hasBanner = Boolean(bar.banner_url);
+  const borderInline = getHeaderBorderInlineStyle(borderCls, accent);
   const frameStyle: React.CSSProperties = {
     background: surface,
     color: text,
-    border: borderCls === 'crest-border-none' ? 'none' : undefined,
-    backgroundImage: hasBanner ? `url('${bar.banner_url}')` : undefined,
-    backgroundSize: 'cover',
-    backgroundPosition: 'center',
     position: 'relative',
-    overflow: 'hidden',
+    ...borderInline,
   };
 
-  const crestBaseBox = getCrestBaseContainerStyle(baseId, accent);
+  const pedestalStyle = getCrestBasePedestalStyle(baseId, accent);
 
   return (
-    <div className={`crest-frame ${borderCls !== 'crest-border-none' ? borderCls : ''}`} style={frameStyle}>
+    <div className="crest-frame" style={frameStyle}>
       {hasBanner && (
         <div
-          className="pointer-events-none absolute inset-0"
-          style={{
-            background: `linear-gradient(180deg, rgba(11,10,13,.55), ${surface}ee)`,
-          }}
-        />
+          className="pointer-events-none absolute inset-0 overflow-hidden"
+          style={{ borderRadius: borderInline.borderRadius || '14px' }}
+        >
+          <div
+            className="absolute inset-0"
+            style={{
+              backgroundImage: `url('${bar.banner_url}')`,
+              backgroundSize: 'cover',
+              backgroundPosition: 'center',
+            }}
+          />
+          <div
+            className="absolute inset-0"
+            style={{
+              background: `linear-gradient(180deg, rgba(11,10,13,.52), ${surface}ee)`,
+            }}
+          />
+        </div>
       )}
       <div className="relative z-[1]">
         <TopOrnamentView id={design.top_ornament} accent={accent} />
@@ -1495,52 +1617,81 @@ export const MenuHeaderCard: React.FC<{
               justifyContent: 'center',
             }}
           >
+            {baseId === 'starburst' && (
+              <span
+                className="pointer-events-none absolute inset-0 rounded-2xl"
+                style={{
+                  transform: 'rotate(45deg) scale(0.94)',
+                  border: `2px solid ${accent}`,
+                  background: `${accent}24`,
+                  boxShadow: `0 0 18px ${accent}55`,
+                }}
+                aria-hidden
+              />
+            )}
+
             {baseId === 'crown' && (
               <span
-                className="pointer-events-none absolute -top-3.5 left-1/2 -translate-x-1/2 text-sm z-[3]"
+                className="pointer-events-none absolute -top-2.5 left-1/2 -translate-x-1/2 text-base z-[4] drop-shadow"
                 aria-hidden
               >
                 👑
               </span>
             )}
-            {bar.logo_url ? (
-              <img
-                key={bar.logo_url}
-                src={bar.logo_url}
-                alt={bar.name || 'Logo'}
+
+            <div
+              className="relative z-[2] inline-flex items-center justify-center transition-all"
+              style={pedestalStyle}
+            >
+              {bar.logo_url ? (
+                <img
+                  key={bar.logo_url}
+                  src={bar.logo_url}
+                  alt={bar.name || 'Logo'}
+                  style={{
+                    width: `${logoPx}px`,
+                    height: `${logoPx}px`,
+                    display: 'block',
+                    ...getLogoShapeStyle(design.logo_shape, accent),
+                  }}
+                  onError={(e) => {
+                    (e.currentTarget as HTMLImageElement).style.display = 'none';
+                  }}
+                />
+              ) : (
+                <div
+                  style={{
+                    width: `${logoPx}px`,
+                    height: `${logoPx}px`,
+                    background: `${accent}22`,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    fontSize: logoPx >= 80 ? '2rem' : '1.45rem',
+                    ...getLogoShapeStyle(design.logo_shape, accent),
+                  }}
+                >
+                  <span>{ie}</span>
+                </div>
+              )}
+            </div>
+
+            {baseId === 'ribbon' && (
+              <span
+                className="pointer-events-none absolute -bottom-2 left-1/2 -translate-x-1/2 px-2.5 py-0.5 rounded-sm text-[9px] font-extrabold uppercase tracking-widest whitespace-nowrap z-[4] shadow"
                 style={{
-                  width: `${logoPx}px`,
-                  height: `${logoPx}px`,
-                  ...getLogoShapeStyle(design.logo_shape, accent),
-                }}
-                onError={(e) => {
-                  (e.currentTarget as HTMLImageElement).style.display = 'none';
-                }}
-              />
-            ) : (
-              <div
-                style={{
-                  width: `${logoPx}px`,
-                  height: `${logoPx}px`,
-                  background: `${accent}22`,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  fontSize: logoPx >= 80 ? '2rem' : '1.45rem',
-                  ...crestBaseBox,
-                  ...(design.logo_shape && design.logo_shape !== 'rounded'
-                    ? getLogoShapeStyle(design.logo_shape, accent)
-                    : {}),
+                  background: accent,
+                  color: '#141115',
                 }}
               >
-                <span>{ie}</span>
-              </div>
+                ✦ OFICIAL ✦
+              </span>
             )}
 
             {/* Emblema / Ornamento do Brasão visível mesmo com logo própria */}
             {(oe || (bar.logo_url && (ie || baseId !== 'none'))) && (
               <span
-                className="pointer-events-none absolute -bottom-1.5 -right-2 px-1.5 py-0.5 rounded-full text-[11px] font-bold shadow-md flex items-center gap-0.5 z-[3]"
+                className="pointer-events-none absolute -bottom-1.5 -right-2 px-1.5 py-0.5 rounded-full text-[11px] font-bold shadow-md flex items-center gap-0.5 z-[5]"
                 style={{
                   background: surface,
                   border: `1.5px solid ${accent}`,
@@ -1549,7 +1700,6 @@ export const MenuHeaderCard: React.FC<{
               >
                 {oe && <span>{oe}</span>}
                 {bar.logo_url && <span>{ie}</span>}
-                {!bar.logo_url && be && <span>{be}</span>}
               </span>
             )}
           </div>
@@ -1558,7 +1708,7 @@ export const MenuHeaderCard: React.FC<{
         <div
           style={{
             textAlign: textAlignMap[bar.name_pos || 'left'] || 'left',
-            marginTop: '10px',
+            marginTop: baseId === 'ribbon' ? '14px' : '10px',
           }}
         >
           {mesa && (

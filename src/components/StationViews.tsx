@@ -1,15 +1,20 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { isAlertEnabled } from '../lib/alertPrefs';
 import {
+  broadcastBarOpsSync,
   canRoleDo,
   enqueueOfflineOrder,
   flushOfflineOrders,
   getBarOpsData,
   getEffectiveItemPrice,
   getOfflineQueuedOrders,
+  isDeliveryOrder,
   logBarAudit,
+  parseDeliveryOrderMeta,
   printCustomerBill,
   printKitchenOrBarTicket,
+  saveBarOpsData,
+  tableOwnerKey,
 } from '../lib/opsUtils';
 import { broadcastMenuUpdate, sb } from '../lib/supabase';
 import {
@@ -18,8 +23,18 @@ import {
   isRecipeManuallyUnavailable,
   makeDrink,
   money,
+  norm,
 } from '../lib/utils';
-import type { Bar, BarItem, ItemType, Order, Recipe, TableCallAlert, TableTab } from '../types/meubar';
+import type {
+  Bar,
+  BarItem,
+  BarMember,
+  ItemType,
+  Order,
+  Recipe,
+  TableCallAlert,
+  TableTab,
+} from '../types/meubar';
 
 function getOrderStation(order: Order, recipe?: Recipe | null): 'bar' | 'cozinha' {
   if (order.station === 'cozinha' || order.station === 'bar') return order.station;
@@ -35,7 +50,17 @@ function elapsedMinutes(iso?: string): number {
 
 function clientDisplay(o: Order): string {
   const who = o.client_name || o.customer_name || 'Cliente';
+  const dlv = parseDeliveryOrderMeta(o);
+  if (dlv) {
+    return `${dlv.mode === 'pickup' ? '🛍️ RETIRADA' : '🛵 DELIVERY'} #${dlv.code} · ${who}`;
+  }
   return o.table_label ? `${o.table_label} · ${who}` : who;
+}
+
+function cleanOrderNote(o: Order): string {
+  const dlv = parseDeliveryOrderMeta(o);
+  if (dlv) return dlv.cleanItemNote;
+  return String(o.note || '').trim();
 }
 
 /* ============================================================
@@ -241,8 +266,10 @@ export const BarmanStationView: React.FC<BarmanStationViewProps> = ({
                               ⏱ {mins}m
                             </span>
                           </div>
-                          {o.note && (
-                            <div className="text-xs text-[var(--ac)] mt-0.5">Obs: {o.note}</div>
+                          {cleanOrderNote(o) && (
+                            <div className="text-xs text-[var(--ac)] mt-0.5">
+                              Obs: {cleanOrderNote(o)}
+                            </div>
                           )}
                         </div>
                           <div className="flex items-center gap-1.5 flex-wrap">
@@ -539,9 +566,9 @@ export const KitchenStationView: React.FC<KitchenStationViewProps> = ({
                     </span>
                   </div>
 
-                  {o.note && (
+                  {cleanOrderNote(o) && (
                     <div className="mt-2 rounded-lg bg-black/30 px-2.5 py-1.5 text-xs text-[var(--ac)] font-semibold">
-                      📝 {o.note}
+                      📝 {cleanOrderNote(o)}
                     </div>
                   )}
 
@@ -661,6 +688,7 @@ interface WaiterStationViewProps {
   bar: Bar;
   role?: string | null;
   actorName?: string;
+  members?: BarMember[];
   orders: Order[];
   recipes: Recipe[];
   items: BarItem[];
@@ -678,6 +706,7 @@ export const WaiterStationView: React.FC<WaiterStationViewProps> = ({
   bar,
   role,
   actorName = 'Garçom',
+  members = [],
   orders,
   recipes,
   items,
@@ -691,6 +720,7 @@ export const WaiterStationView: React.FC<WaiterStationViewProps> = ({
   onToast,
 }) => {
   const [showNewOrder, setShowNewOrder] = useState(false);
+  const [waiterScope, setWaiterScope] = useState<'all' | 'mine' | 'free'>('all');
   const [orderTab, setOrderTab] = useState<ItemType>('drink');
   const [selectedTableLabel, setSelectedTableLabel] = useState('');
   const [clientName, setClientName] = useState('');
@@ -699,6 +729,7 @@ export const WaiterStationView: React.FC<WaiterStationViewProps> = ({
   const [qty, setQty] = useState(1);
   const [note, setNote] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [busyKey, setBusyKey] = useState<string | null>(null);
   const [offlineCount, setOfflineCount] = useState(() => getOfflineQueuedOrders(bar.id).length);
 
   // Transfer / Merge table modal
@@ -709,7 +740,34 @@ export const WaiterStationView: React.FC<WaiterStationViewProps> = ({
   const [targetTableLabel, setTargetTableLabel] = useState('');
   const [targetMergeTabId, setTargetMergeTabId] = useState('');
 
+  // Handoff table to another waiter modal
+  const [handoffTable, setHandoffTable] = useState<TableTab | null>(null);
+  const [handoffTargetName, setHandoffTargetName] = useState('');
+
   const ops = useMemo(() => getBarOpsData(bar), [bar]);
+  const tableWaiters = ops.table_waiters || {};
+  const orderClaims = ops.order_claims || {};
+  const callClaims = ops.call_claims || {};
+  const myNorm = norm(actorName);
+
+  const getTableOwner = (tableLabel?: string | null): string => {
+    const k = tableOwnerKey(tableLabel);
+    if (!k) return '';
+    return tableWaiters[k]?.waiter_name || '';
+  };
+
+  const staffSuggestions = useMemo(() => {
+    const set = new Set<string>();
+    if (actorName.trim()) set.add(actorName.trim());
+    members.forEach((m) => {
+      const n = (m.name || '').trim();
+      if (n) set.add(n);
+    });
+    Object.values(tableWaiters).forEach((tw) => {
+      if (tw?.waiter_name) set.add(tw.waiter_name);
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b, 'pt-BR'));
+  }, [actorName, members, tableWaiters]);
   const relevantModifiers = useMemo(
     () =>
       (ops.modifiers || []).filter(
@@ -741,13 +799,23 @@ export const WaiterStationView: React.FC<WaiterStationViewProps> = ({
     return m;
   }, [recipes]);
 
-  const readyToDeliver = useMemo(
+  const readyAll = useMemo(
     () => orders.filter((o) => o.status === 'ready'),
     [orders]
   );
 
+  const readyDeliveryCount = useMemo(
+    () => readyAll.filter((o) => isDeliveryOrder(o)).length,
+    [readyAll]
+  );
+
+  const readySalonOrders = useMemo(
+    () => readyAll.filter((o) => !isDeliveryOrder(o)),
+    [readyAll]
+  );
+
   const pendingInPrep = useMemo(
-    () => orders.filter((o) => o.status === 'pending'),
+    () => orders.filter((o) => o.status === 'pending' && !isDeliveryOrder(o)),
     [orders]
   );
 
@@ -755,6 +823,170 @@ export const WaiterStationView: React.FC<WaiterStationViewProps> = ({
     () => tableTabs.filter((t) => t.status === 'open'),
     [tableTabs]
   );
+
+  const assignTableWaiter = async (tableLabel: string, waiterName: string | null) => {
+    const k = tableOwnerKey(tableLabel);
+    if (!k) return;
+    setBusyKey(`tw_${k}`);
+    try {
+      const nextMap = { ...(getBarOpsData(bar).table_waiters || {}) };
+      if (waiterName && waiterName.trim()) {
+        nextMap[k] = {
+          waiter_name: waiterName.trim(),
+          table_label: tableLabel,
+          assigned_at: new Date().toISOString(),
+        };
+      } else {
+        delete nextMap[k];
+      }
+      await saveBarOpsData(bar, { table_waiters: nextMap }, onBarUpdated);
+      void broadcastBarOpsSync(bar.id);
+      if (waiterName) {
+        onToast(`Mesa ${tableLabel} atribuída para ${waiterName}!`);
+      } else {
+        onToast(`Mesa ${tableLabel} liberada para qualquer garçom.`);
+      }
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const toggleOrderClaim = async (order: Order, claim: boolean) => {
+    setBusyKey(`oc_${order.id}`);
+    try {
+      const nextClaims = { ...(getBarOpsData(bar).order_claims || {}) };
+      if (claim) {
+        nextClaims[order.id] = {
+          waiter_name: actorName,
+          claimed_at: new Date().toISOString(),
+        };
+      } else {
+        delete nextClaims[order.id];
+      }
+      await saveBarOpsData(bar, { order_claims: nextClaims }, onBarUpdated);
+      void broadcastBarOpsSync(bar.id);
+      if (claim) {
+        onToast(`Você assumiu a entrega de ${order.qty}x ${order.recipe_name || recipeMap[order.recipe_id]?.name || 'Item'}.`);
+      }
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const handleDeliverOrder = async (order: Order) => {
+    setBusyKey(`del_${order.id}`);
+    try {
+      await onSetOrderStatus(order.id, 'done');
+      const curClaims = getBarOpsData(bar).order_claims || {};
+      if (curClaims[order.id]) {
+        const nextClaims = { ...curClaims };
+        delete nextClaims[order.id];
+        await saveBarOpsData(bar, { order_claims: nextClaims }, onBarUpdated);
+        void broadcastBarOpsSync(bar.id);
+      }
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const toggleCallClaim = async (call: TableCallAlert, claim: boolean) => {
+    setBusyKey(`cc_${call.id}`);
+    try {
+      const nextClaims = { ...(getBarOpsData(bar).call_claims || {}) };
+      if (claim) {
+        nextClaims[call.id] = {
+          waiter_name: actorName,
+          claimed_at: new Date().toISOString(),
+        };
+      } else {
+        delete nextClaims[call.id];
+      }
+      await saveBarOpsData(bar, { call_claims: nextClaims }, onBarUpdated);
+      void broadcastBarOpsSync(bar.id);
+      if (claim) {
+        onToast(`Avisado à equipe: ${actorName} está indo atender ${call.table_label || call.client_name}!`);
+      }
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const handleResolveCallWithCleanup = async (callId: string) => {
+    if (onResolveCall) await onResolveCall(callId);
+    const curClaims = getBarOpsData(bar).call_claims || {};
+    if (curClaims[callId]) {
+      const nextClaims = { ...curClaims };
+      delete nextClaims[callId];
+      await saveBarOpsData(bar, { call_claims: nextClaims }, onBarUpdated);
+      void broadcastBarOpsSync(bar.id);
+    }
+  };
+
+  const shiftDistribution = useMemo(() => {
+    const counts: Record<string, number> = {};
+    let freeTables = 0;
+    openTabs.forEach((t) => {
+      const owner = getTableOwner(t.table_label);
+      if (!owner) {
+        freeTables++;
+      } else {
+        counts[owner] = (counts[owner] || 0) + 1;
+      }
+    });
+    return {
+      entries: Object.entries(counts).sort((a, b) => b[1] - a[1]),
+      freeTables,
+    };
+  }, [openTabs, tableWaiters]);
+
+  const myTabsCount = openTabs.filter((t) => norm(getTableOwner(t.table_label)) === myNorm).length;
+  const freeTabsCount = openTabs.filter((t) => !getTableOwner(t.table_label)).length;
+
+  const visibleTabs = useMemo(() => {
+    if (waiterScope === 'mine') {
+      return openTabs.filter((t) => norm(getTableOwner(t.table_label)) === myNorm);
+    }
+    if (waiterScope === 'free') {
+      return openTabs.filter((t) => !getTableOwner(t.table_label));
+    }
+    return openTabs;
+  }, [openTabs, waiterScope, tableWaiters, myNorm]);
+
+  const readyToDeliver = useMemo(() => {
+    if (waiterScope === 'mine') {
+      return readySalonOrders.filter((o) => {
+        const owner = getTableOwner(o.table_label);
+        const claim = orderClaims[o.id]?.waiter_name || '';
+        return norm(owner) === myNorm || norm(claim) === myNorm;
+      });
+    }
+    if (waiterScope === 'free') {
+      return readySalonOrders.filter((o) => {
+        const owner = getTableOwner(o.table_label);
+        const claim = orderClaims[o.id]?.waiter_name || '';
+        return !owner && !claim;
+      });
+    }
+    return readySalonOrders;
+  }, [readySalonOrders, waiterScope, tableWaiters, orderClaims, myNorm]);
+
+  const visibleCalls = useMemo(() => {
+    if (waiterScope === 'mine') {
+      return tableCalls.filter((c) => {
+        const owner = getTableOwner(c.table_label);
+        const claim = callClaims[c.id]?.waiter_name || '';
+        return norm(owner) === myNorm || norm(claim) === myNorm;
+      });
+    }
+    if (waiterScope === 'free') {
+      return tableCalls.filter((c) => {
+        const owner = getTableOwner(c.table_label);
+        const claim = callClaims[c.id]?.waiter_name || '';
+        return !owner && !claim;
+      });
+    }
+    return tableCalls;
+  }, [tableCalls, waiterScope, tableWaiters, callClaims, myNorm]);
 
   const availableCatalog = useMemo(() => {
     return filterRecipesForBar(recipes, bar.id)
@@ -850,6 +1082,21 @@ export const WaiterStationView: React.FC<WaiterStationViewProps> = ({
         return;
       }
 
+      // Modelo Híbrido Multi-Garçom: se a mesa ainda não tem responsável, assume automaticamente
+      if (selectedTableLabel && !getTableOwner(selectedTableLabel)) {
+        const k = tableOwnerKey(selectedTableLabel);
+        const nextMap = {
+          ...(getBarOpsData(bar).table_waiters || {}),
+          [k]: {
+            waiter_name: actorName,
+            table_label: selectedTableLabel,
+            assigned_at: new Date().toISOString(),
+          },
+        };
+        await saveBarOpsData(bar, { table_waiters: nextMap }, onBarUpdated);
+        void broadcastBarOpsSync(bar.id);
+      }
+
       onToast(
         `Pedido enviado para ${station === 'cozinha' ? '🍳 Cozinha' : '🍸 Bar'}: ${qty}x ${rec.name}`
       );
@@ -938,8 +1185,8 @@ export const WaiterStationView: React.FC<WaiterStationViewProps> = ({
           <div>
             <h3 className="!mb-0.5">🍽️ Central do Garçom — {bar.name}</h3>
             <p className="sub !mb-0">
-              Retire pedidos prontos do Bar e da Cozinha, acompanhe mesas abertas e lance novos
-              pedidos direto da mesa.
+              Operando como <b className="text-[var(--txt)]">{actorName}</b> · Modelo Híbrido
+              (Responsável da Mesa + Pegar 1º na fila livre).
             </p>
           </div>
           <div className="flex gap-1.5">
@@ -955,39 +1202,145 @@ export const WaiterStationView: React.FC<WaiterStationViewProps> = ({
             </button>
           </div>
         </div>
+
+        {/* Filtros Multi-Garçom: Minhas Mesas | Livres | Salão Todo */}
+        <div className="chips !flex-wrap !overflow-visible mt-3">
+          <button
+            type="button"
+            className={`chip ${waiterScope === 'mine' ? 'on' : ''}`}
+            onClick={() => setWaiterScope('mine')}
+          >
+            👤 Minhas mesas ({myTabsCount})
+          </button>
+          <button
+            type="button"
+            className={`chip ${waiterScope === 'free' ? 'on' : ''}`}
+            onClick={() => setWaiterScope('free')}
+          >
+            🆓 Livres / Sem garçom ({freeTabsCount})
+          </button>
+          <button
+            type="button"
+            className={`chip ${waiterScope === 'all' ? 'on' : ''}`}
+            onClick={() => setWaiterScope('all')}
+          >
+            👥 Salão todo ({openTabs.length})
+          </button>
+        </div>
+
+        {/* Distribuição ao vivo de mesas por garçom */}
+        {openTabs.length > 0 && (
+          <div className="mt-2.5 pt-2 border-t border-[var(--bd)] flex items-center gap-1.5 flex-wrap text-[11px] text-[var(--mut)]">
+            <span className="font-bold text-[var(--txt)]">Salão agora:</span>
+            {shiftDistribution.entries.map(([wName, cnt]) => (
+              <span
+                key={wName}
+                className={`px-2 py-0.5 rounded-md border ${
+                  norm(wName) === myNorm
+                    ? 'bg-emerald-500/15 border-emerald-400/40 text-emerald-200 font-bold'
+                    : 'bg-[var(--bg2)] border-[var(--bd)] text-[var(--txt)]'
+                }`}
+              >
+                👤 {wName}: {cnt} {cnt === 1 ? 'mesa' : 'mesas'}
+              </span>
+            ))}
+            {shiftDistribution.freeTables > 0 && (
+              <span className="px-2 py-0.5 rounded-md bg-amber-500/15 border border-amber-400/40 text-amber-200 font-bold">
+                🆓 Sem garçom: {shiftDistribution.freeTables}
+              </span>
+            )}
+          </div>
+        )}
       </div>
 
-      {tableCalls.length > 0 && (
+      {readyDeliveryCount > 0 && (
+        <div className="rounded-xl px-3 py-2 bg-sky-500/10 border border-sky-400/40 text-xs text-sky-200 flex items-center justify-between gap-2">
+          <span>
+            🛵 <b>{readyDeliveryCount}</b> pedido(s) de <b>Delivery / Retirada</b> pronto(s) — gerencie no painel <b>Delivery & Motoboys</b>.
+          </span>
+        </div>
+      )}
+
+      {visibleCalls.length > 0 && (
         <div className="card !border-amber-400/70 bg-amber-500/15 space-y-2">
           <div className="text-xs font-extrabold text-amber-200 uppercase tracking-wider">
-            🔔 Chamados ao vivo das mesas ({tableCalls.length})
+            🔔 Chamados ao vivo das mesas ({visibleCalls.length})
           </div>
-          {tableCalls.map((c) => (
-            <div
-              key={c.id}
-              className="rounded-xl p-2.5 bg-black/25 border border-amber-400/30 flex items-center justify-between gap-2 flex-wrap"
-            >
-              <div>
-                <div className="text-sm font-bold">
-                  {c.kind === 'bill' ? '🧾 Pediu a Conta' : '🙋 Chamou Garçom'} ·{' '}
-                  {c.table_label || 'Balcão'}
+          {visibleCalls.map((c) => {
+            const owner = getTableOwner(c.table_label);
+            const claim = callClaims[c.id];
+            const claimedByMe = claim && norm(claim.waiter_name) === myNorm;
+            const claimedByOther = claim && !claimedByMe;
+            return (
+              <div
+                key={c.id}
+                className="rounded-xl p-2.5 bg-black/25 border border-amber-400/30 flex items-center justify-between gap-2 flex-wrap"
+              >
+                <div>
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className="text-sm font-bold">
+                      {c.kind === 'bill' ? '🧾 Pediu a Conta' : '🙋 Chamou Garçom'} ·{' '}
+                      {c.table_label || 'Balcão'}
+                    </span>
+                    {owner && (
+                      <span
+                        className={`text-[10px] px-1.5 py-0.5 rounded font-bold ${
+                          norm(owner) === myNorm
+                            ? 'bg-emerald-500/25 text-emerald-200'
+                            : 'bg-white/10 text-white/80'
+                        }`}
+                      >
+                        👤 Mesa de {owner}
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-xs text-[var(--mut)] mt-0.5">
+                    Cliente: <b>{c.client_name}</b>
+                    {c.note ? ` · ${c.note}` : ''}
+                  </div>
+                  {claim && (
+                    <div
+                      className={`text-[11px] font-bold mt-1 ${
+                        claimedByMe ? 'text-emerald-300' : 'text-amber-300'
+                      }`}
+                    >
+                      🏃 {claim.waiter_name} já está indo atender
+                    </div>
+                  )}
                 </div>
-                <div className="text-xs text-[var(--mut)]">
-                  Cliente: <b>{c.client_name}</b>
-                  {c.note ? ` · ${c.note}` : ''}
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  {!claim ? (
+                    <button
+                      type="button"
+                      className="b sm"
+                      disabled={busyKey === `cc_${c.id}`}
+                      onClick={() => void toggleCallClaim(c, true)}
+                    >
+                      ✋ Indo atender
+                    </button>
+                  ) : claimedByMe ? (
+                    <button
+                      type="button"
+                      className="b g sm"
+                      disabled={busyKey === `cc_${c.id}`}
+                      onClick={() => void toggleCallClaim(c, false)}
+                    >
+                      Soltar
+                    </button>
+                  ) : null}
+                  {onResolveCall && (
+                    <button
+                      type="button"
+                      className={`b sm ${claimedByOther ? 'g' : 'ok'}`}
+                      onClick={() => void handleResolveCallWithCleanup(c.id)}
+                    >
+                      ✓ Atendido
+                    </button>
+                  )}
                 </div>
               </div>
-              {onResolveCall && (
-                <button
-                  type="button"
-                  className="b ok sm"
-                  onClick={() => void onResolveCall(c.id)}
-                >
-                  ✓ Atendido
-                </button>
-              )}
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
@@ -1154,42 +1507,106 @@ export const WaiterStationView: React.FC<WaiterStationViewProps> = ({
 
       {/* PRONTOS PARA LEVAR À MESA */}
       <div className="card !border-[var(--ok)]/50">
-        <h3>🔔 Prontos para entregar na mesa ({readyToDeliver.length})</h3>
+        <h3>
+          🔔 Prontos para levar à mesa ({readyToDeliver.length}
+          {waiterScope !== 'all' ? ` de ${readySalonOrders.length}` : ''})
+        </h3>
         {readyToDeliver.length === 0 ? (
           <div className="empty !py-5">
-            Nenhum pedido pronto aguardando retirada agora. ({pendingInPrep.length} em preparo)
+            {waiterScope === 'mine'
+              ? 'Nenhum pedido pronto para as suas mesas agora.'
+              : waiterScope === 'free'
+                ? 'Nenhum pedido pronto livre agora.'
+                : `Nenhum pedido pronto aguardando retirada agora. (${pendingInPrep.length} em preparo)`}
           </div>
         ) : (
           <div className="space-y-2">
             {readyToDeliver.map((o) => {
               const rec = recipeMap[o.recipe_id];
               const station = getOrderStation(o, rec);
+              const owner = getTableOwner(o.table_label);
+              const claim = orderClaims[o.id];
+              const claimedByMe = claim && norm(claim.waiter_name) === myNorm;
+              const claimedByOther = claim && !claimedByMe;
+              const cleanObs = cleanOrderNote(o);
               return (
                 <div
                   key={o.id}
-                  className="rounded-xl p-3 border border-[var(--ok)]/40 bg-[var(--ok)]/10 flex items-center justify-between gap-2 flex-wrap"
+                  className={`rounded-xl p-3 border flex items-center justify-between gap-2 flex-wrap ${
+                    claimedByOther
+                      ? 'border-white/15 bg-white/5 opacity-80'
+                      : 'border-[var(--ok)]/40 bg-[var(--ok)]/10'
+                  }`}
                 >
                   <div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-1.5 flex-wrap">
                       <span className="px-2 py-0.5 rounded-md text-[10px] font-extrabold bg-[var(--bg2)] border border-[var(--bd)]">
                         {station === 'cozinha' ? '🍳 COZINHA' : '🍸 BAR'}
                       </span>
                       <strong className="text-sm">
                         {o.qty}x {o.recipe_name || rec?.name || 'Pedido'}
                       </strong>
+                      {owner ? (
+                        <span
+                          className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                            norm(owner) === myNorm
+                              ? 'bg-emerald-500/25 text-emerald-200'
+                              : 'bg-white/10 text-[var(--mut)]'
+                          }`}
+                        >
+                          👤 Mesa de {owner}
+                        </span>
+                      ) : (
+                        o.table_label && (
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-200">
+                            🆓 Livre
+                          </span>
+                        )
+                      )}
                     </div>
                     <div className="text-xs text-[var(--txt)] mt-1 font-semibold">
                       👤 {clientDisplay(o)}
                     </div>
-                    {o.note && <div className="text-xs text-[var(--ac)] mt-0.5">Obs: {o.note}</div>}
+                    {cleanObs && <div className="text-xs text-[var(--ac)] mt-0.5">Obs: {cleanObs}</div>}
+                    {claim && (
+                      <div
+                        className={`text-[11px] font-bold mt-1 ${
+                          claimedByMe ? 'text-emerald-300' : 'text-amber-300'
+                        }`}
+                      >
+                        🏃 Levando agora: {claim.waiter_name}
+                      </div>
+                    )}
                   </div>
-                  <button
-                    type="button"
-                    className="b sm"
-                    onClick={() => void onSetOrderStatus(o.id, 'done')}
-                  >
-                    ✓ Entregue na mesa
-                  </button>
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    {!claim ? (
+                      <button
+                        type="button"
+                        className="b g sm"
+                        disabled={busyKey === `oc_${o.id}`}
+                        onClick={() => void toggleOrderClaim(o, true)}
+                      >
+                        ✋ Vou levar
+                      </button>
+                    ) : claimedByMe ? (
+                      <button
+                        type="button"
+                        className="b g sm"
+                        disabled={busyKey === `oc_${o.id}`}
+                        onClick={() => void toggleOrderClaim(o, false)}
+                      >
+                        Soltar
+                      </button>
+                    ) : null}
+                    <button
+                      type="button"
+                      className={`b sm ${claimedByOther ? 'g' : ''}`}
+                      disabled={busyKey === `del_${o.id}`}
+                      onClick={() => void handleDeliverOrder(o)}
+                    >
+                      ✓ Entregue na mesa
+                    </button>
+                  </div>
                 </div>
               );
             })}
@@ -1199,17 +1616,35 @@ export const WaiterStationView: React.FC<WaiterStationViewProps> = ({
 
       {/* MESAS & COMANDAS ABERTAS */}
       <div className="card">
-        <h3>🪑 Mesas & Comandas abertas ({openTabs.length})</h3>
-        {openTabs.length === 0 ? (
-          <div className="empty !py-4">Nenhuma comanda de mesa aberta no momento.</div>
+        <h3>
+          🪑 Mesas & Comandas abertas ({visibleTabs.length}
+          {waiterScope !== 'all' ? ` de ${openTabs.length}` : ''})
+        </h3>
+        {visibleTabs.length === 0 ? (
+          <div className="empty !py-4">
+            {waiterScope === 'mine'
+              ? 'Você ainda não assumiu nenhuma mesa. Toque em "🆓 Livres" ou "👥 Salão todo" e clique em "✋ Assumir".'
+              : waiterScope === 'free'
+                ? 'Todas as mesas abertas já possuem garçom responsável!'
+                : 'Nenhuma comanda de mesa aberta no momento.'}
+          </div>
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-            {openTabs.map((t) => {
+            {visibleTabs.map((t) => {
               const total = tableTotals[t.id] || tableTotals[t.table_label] || 0;
+              const owner = getTableOwner(t.table_label);
+              const isMine = owner && norm(owner) === myNorm;
+              const tabKey = tableOwnerKey(t.table_label);
               return (
                 <div
                   key={t.id}
-                  className="rounded-xl p-3 border border-[var(--bd)] bg-[var(--bg2)]"
+                  className={`rounded-xl p-3 border bg-[var(--bg2)] ${
+                    isMine
+                      ? 'border-emerald-400/50'
+                      : !owner
+                        ? 'border-amber-400/40'
+                        : 'border-[var(--bd)]'
+                  }`}
                 >
                   <div className="flex items-center justify-between gap-2">
                     <strong className="text-sm">🪑 {t.table_label}</strong>
@@ -1217,7 +1652,53 @@ export const WaiterStationView: React.FC<WaiterStationViewProps> = ({
                       Cód: {t.code}
                     </span>
                   </div>
-                  <div className="text-xs text-[var(--mut)] mt-1">
+
+                  {/* Responsável pela mesa (Multi-Garçom) */}
+                  <div className="flex items-center justify-between gap-1.5 mt-1.5">
+                    {owner ? (
+                      <span
+                        className={`text-[11px] font-bold px-2 py-0.5 rounded-md ${
+                          isMine
+                            ? 'bg-emerald-500/20 text-emerald-200'
+                            : 'bg-white/10 text-[var(--txt)]'
+                        }`}
+                      >
+                        👤 Responsável: {owner}
+                        {isMine ? ' (Você)' : ''}
+                      </span>
+                    ) : (
+                      <span className="text-[11px] font-bold px-2 py-0.5 rounded-md bg-amber-500/20 text-amber-200">
+                        🆓 Sem garçom atribuído
+                      </span>
+                    )}
+                    <div className="flex gap-1">
+                      {!isMine && (
+                        <button
+                          type="button"
+                          className="b ok sm !py-0.5 !px-2 !text-[11px]"
+                          disabled={busyKey === `tw_${tabKey}`}
+                          onClick={() => void assignTableWaiter(t.table_label, actorName)}
+                        >
+                          ✋ Assumir
+                        </button>
+                      )}
+                      {owner && (
+                        <button
+                          type="button"
+                          className="b g sm !py-0.5 !px-2 !text-[11px]"
+                          title="Passar mesa para outro garçom ou liberar"
+                          onClick={() => {
+                            setHandoffTargetName('');
+                            setHandoffTable(t);
+                          }}
+                        >
+                          👥 Passar
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="text-xs text-[var(--mut)] mt-1.5">
                     Pessoas: {(t.members || [t.opened_by]).join(', ')}
                   </div>
                   <div className="flex items-center justify-between gap-1.5 flex-wrap mt-2 pt-2 border-t border-[var(--bd)]">
@@ -1300,6 +1781,66 @@ export const WaiterStationView: React.FC<WaiterStationViewProps> = ({
           </div>
         )}
       </div>
+
+      {/* MODAL PASSAR MESA PARA OUTRO GARÇOM */}
+      {handoffTable && (
+        <div className="ov" onClick={() => setHandoffTable(null)}>
+          <div className="w narrow" onClick={(e) => e.stopPropagation()}>
+            <h2 className="!mt-0">👥 Passar {handoffTable.table_label}</h2>
+            <p className="mu text-xs mb-2">
+              Atual responsável: <b>{getTableOwner(handoffTable.table_label) || 'Nenhum'}</b>. Escolha
+              outro garçom do turno ou libere a mesa para a fila livre do salão.
+            </p>
+            {staffSuggestions.length > 0 && (
+              <div className="flex flex-wrap gap-1.5 mb-2.5">
+                {staffSuggestions.map((nm) => (
+                  <button
+                    key={nm}
+                    type="button"
+                    className={`b sm ${handoffTargetName === nm ? '' : 'g'}`}
+                    onClick={() => setHandoffTargetName(nm)}
+                  >
+                    👤 {nm}
+                  </button>
+                ))}
+              </div>
+            )}
+            <label>Ou digite o nome do garçom</label>
+            <input
+              value={handoffTargetName}
+              onChange={(e) => setHandoffTargetName(e.target.value)}
+              placeholder="Ex: Carlos, Fernanda..."
+              maxLength={40}
+            />
+            <div className="grid grid-cols-1 gap-2 mt-3">
+              <button
+                type="button"
+                className="b ok"
+                disabled={!handoffTargetName.trim()}
+                onClick={async () => {
+                  await assignTableWaiter(handoffTable.table_label, handoffTargetName.trim());
+                  setHandoffTable(null);
+                }}
+              >
+                ✓ Transferir mesa para {handoffTargetName.trim() || '...'}
+              </button>
+              <button
+                type="button"
+                className="b g"
+                onClick={async () => {
+                  await assignTableWaiter(handoffTable.table_label, null);
+                  setHandoffTable(null);
+                }}
+              >
+                🆓 Liberar mesa para qualquer garçom
+              </button>
+              <button type="button" className="b g" onClick={() => setHandoffTable(null)}>
+                Cancelar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* MODAL TRANSFERIR OU JUNTAR MESAS */}
       {tableAction && (
