@@ -2541,6 +2541,10 @@ export const MoreView: React.FC<{
   canEditMenu: boolean;
   hasPricing?: boolean;
   unpricedCount?: number;
+  planLabel?: string;
+  isProPlan?: boolean;
+  isPlatformAdmin?: boolean;
+  supportWhatsAppHref?: string | null;
   onBarUpdated: (bar: Bar) => void;
   onOpenQr: () => void;
   onOpenShakers: () => void;
@@ -2558,12 +2562,19 @@ export const MoreView: React.FC<{
   ) => void;
   onNavigate: (tab: string, careerMode?: 'store' | 'personal') => void;
   onOpenSwitchBar: () => void;
+  onOpenPlans?: () => void;
+  onOpenSuperAdmin?: () => void;
+  onOpenLegal?: (tab: 'terms' | 'privacy') => void;
 }> = ({
   bar,
   isManager,
   canEditMenu,
   hasPricing = false,
   unpricedCount = 0,
+  planLabel = 'Plano Grátis',
+  isProPlan = true,
+  isPlatformAdmin = false,
+  supportWhatsAppHref = null,
   onBarUpdated,
   onOpenQr,
   onOpenShakers,
@@ -2572,6 +2583,9 @@ export const MoreView: React.FC<{
   onOpenManagement,
   onNavigate,
   onOpenSwitchBar,
+  onOpenPlans,
+  onOpenSuperAdmin,
+  onOpenLegal,
 }) => {
   const open = bar.accepting_orders !== false;
 
@@ -2590,6 +2604,10 @@ export const MoreView: React.FC<{
       <h1>Mais</h1>
       <p className="mu">
         {bar.name}
+        {' · '}
+        <span className={isProPlan ? 'text-[var(--ok)] font-semibold' : 'text-[var(--ac)] font-semibold'}>
+          {planLabel}
+        </span>
         {bar.city && (
           <>
             {' · '}
@@ -2606,6 +2624,40 @@ export const MoreView: React.FC<{
       </p>
 
       <div className="menu-row-list">
+        {isPlatformAdmin && onOpenSuperAdmin && (
+          <button
+            type="button"
+            className="menu-row-item !border-[var(--ac)]/60"
+            onClick={onOpenSuperAdmin}
+          >
+            <div className="menu-row-text">
+              <div className="menu-row-title text-[var(--ac)]">
+                👑 Painel Admin SaaS (Planos, VIP & Anúncios)
+              </div>
+              <div className="menu-row-sub">
+                Liberar VIP grátis, gerenciar lojas, banners de parceiros e Google AdSense
+              </div>
+            </div>
+            <span className="menu-row-chev">›</span>
+          </button>
+        )}
+
+        {onOpenPlans && (
+          <button type="button" className="menu-row-item" onClick={onOpenPlans}>
+            <div className="menu-row-text">
+              <div className="menu-row-title">
+                ⭐ Plano & Assinatura ({planLabel})
+              </div>
+              <div className="menu-row-sub">
+                {isProPlan
+                  ? 'Ver benefícios ativos, validade e opções de download grátis'
+                  : 'Remova anúncios e libere Happy Hour, Fidelidade, Equipe e Bluetooth'}
+              </div>
+            </div>
+            <span className="menu-row-chev">›</span>
+          </button>
+        )}
+
         <div className="menu-row-item !cursor-default">
           <div className="menu-row-text">
             <div className="menu-row-title">Receber pedidos</div>
@@ -2677,7 +2729,7 @@ export const MoreView: React.FC<{
         {onOpenStation && (
           <div className="panel mt-1 mb-1">
             <div className="text-xs font-bold uppercase tracking-wider text-[var(--ac)] mb-2">
-              🎯 Áreas Operacionais da Equipe
+              🎯 Áreas Operacionais da Equipe {!isProPlan ? '· Pro' : ''}
             </div>
             <div className="grid grid-cols-3 gap-2">
               <button
@@ -2711,7 +2763,7 @@ export const MoreView: React.FC<{
           onClick={() => onNavigate('cashier')}
         >
           <div className="menu-row-text">
-            <div className="menu-row-title">💵 Caixa & Turno</div>
+            <div className="menu-row-title">💵 Caixa & Turno {!isProPlan ? '· Pro' : ''}</div>
             <div className="menu-row-sub">
               Abertura/fechamento, maquininha/Pix/dinheiro, 10%, divisão e pré-conta
             </div>
@@ -2728,8 +2780,8 @@ export const MoreView: React.FC<{
             >
               <div className="menu-row-text">
                 <div className="menu-row-title">
-                  🍻 Happy Hour Automático
-                  {getActiveHappyHours(bar).length > 0 && (
+                  🍻 Happy Hour Automático {!isProPlan ? '· Pro' : ''}
+                  {isProPlan && getActiveHappyHours(bar).length > 0 && (
                     <span className="badge-warn !bg-emerald-500/20 !text-emerald-300">
                       ATIVO AGORA
                     </span>
@@ -2748,7 +2800,9 @@ export const MoreView: React.FC<{
               onClick={() => onOpenManagement('fidelidade')}
             >
               <div className="menu-row-text">
-                <div className="menu-row-title">🎁 Cartão Fidelidade & Cashback</div>
+                <div className="menu-row-title">
+                  🎁 Cartão Fidelidade & Cashback {!isProPlan ? '· Pro' : ''}
+                </div>
                 <div className="menu-row-sub">
                   Carimbos ou cashback % por cliente com resgate automático no Caixa
                 </div>
@@ -2762,7 +2816,9 @@ export const MoreView: React.FC<{
               onClick={() => onOpenManagement('dashboard')}
             >
               <div className="menu-row-text">
-                <div className="menu-row-title">📊 Relatórios, Financeiro & Lucro</div>
+                <div className="menu-row-title">
+                  📊 Relatórios, Financeiro & Lucro {!isProPlan ? '· Pro' : ''}
+                </div>
                 <div className="menu-row-sub">
                   Faturamento, CMV, lucro líquido, top vendidos, picos e exportação CSV
                 </div>
@@ -2776,7 +2832,9 @@ export const MoreView: React.FC<{
               onClick={() => onOpenManagement('compras')}
             >
               <div className="menu-row-text">
-                <div className="menu-row-title">🛒 Compras, Fornecedores & Perdas</div>
+                <div className="menu-row-title">
+                  🛒 Compras, Fornecedores & Perdas {!isProPlan ? '· Pro' : ''}
+                </div>
                 <div className="menu-row-sub">
                   Lista automática de reposição, WhatsApp, quebras e cortesias
                 </div>
@@ -2790,7 +2848,9 @@ export const MoreView: React.FC<{
               onClick={() => onOpenManagement('reservas')}
             >
               <div className="menu-row-text">
-                <div className="menu-row-title">📅 Reservas de Mesa & Clientes (CRM)</div>
+                <div className="menu-row-title">
+                  📅 Reservas de Mesa & Clientes (CRM) {!isProPlan ? '· Pro' : ''}
+                </div>
                 <div className="menu-row-sub">
                   Agenda de reservas e ranking automático dos clientes frequentes
                 </div>
@@ -2888,7 +2948,42 @@ export const MoreView: React.FC<{
         </button>
 
         <PWAInstallButton variant="row" />
+
+        {supportWhatsAppHref && (
+          <a
+            href={supportWhatsAppHref}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="menu-row-item no-underline"
+          >
+            <div className="menu-row-text">
+              <div className="menu-row-title">💬 Suporte & Atendimento (WhatsApp)</div>
+              <div className="menu-row-sub">Dúvidas sobre o app, configuração ou Plano Pro</div>
+            </div>
+            <span className="menu-row-chev">›</span>
+          </a>
+        )}
       </div>
+
+      {onOpenLegal && (
+        <div className="mt-4 flex items-center justify-center gap-3 text-xs text-[var(--mut)]">
+          <button
+            type="button"
+            className="bg-transparent border-0 text-[var(--mut)] hover:text-[var(--fg)] underline cursor-pointer p-0"
+            onClick={() => onOpenLegal('terms')}
+          >
+            Termos de Uso
+          </button>
+          <span aria-hidden="true">·</span>
+          <button
+            type="button"
+            className="bg-transparent border-0 text-[var(--mut)] hover:text-[var(--fg)] underline cursor-pointer p-0"
+            onClick={() => onOpenLegal('privacy')}
+          >
+            Política de Privacidade
+          </button>
+        </div>
+      )}
     </div>
   );
 };

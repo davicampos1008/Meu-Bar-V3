@@ -316,6 +316,63 @@ export interface BarOperationalData {
   loyalty_customers?: LoyaltyCustomerRecord[];
 }
 
+export type BarPlanTier = 'free' | 'pro' | 'vip';
+
+export type PartnerAdPlacement = 'panel' | 'explore' | 'menu_free' | 'all';
+
+export interface PartnerAdBanner {
+  id: string;
+  title: string;
+  subtitle?: string | null;
+  cta_label?: string | null;
+  image_url?: string | null;
+  click_url?: string | null;
+  placement: PartnerAdPlacement;
+  badge_text?: string | null;
+  bg_color?: string | null;
+  accent_color?: string | null;
+  active: boolean;
+  priority?: number | null;
+  impressions?: number | null;
+  clicks?: number | null;
+  created_at?: string;
+}
+
+export interface PlatformSaaSConfig {
+  pro_price_monthly: number;
+  pro_price_yearly: number;
+  trial_days: number;
+  free_max_tables: number;
+  free_max_bars: number;
+  support_whatsapp: string;
+  checkout_monthly_url: string;
+  checkout_yearly_url: string;
+  adsense_enabled: boolean;
+  adsense_client_id: string;
+  adsense_slot_panel: string;
+  adsense_slot_explore: string;
+  adsense_slot_menu_free: string;
+  ads_rotation_mode: 'partner_first' | 'adsense_first' | 'rotate';
+  free_user_emails: string[];
+}
+
+export interface AdminBarOverview {
+  id: string;
+  name: string;
+  handle?: string | null;
+  city?: string | null;
+  kind: string;
+  owner: string;
+  owner_email?: string | null;
+  plan_tier?: BarPlanTier | null;
+  plan_expires_at?: string | null;
+  trial_ends_at?: string | null;
+  plan_note?: string | null;
+  created_at?: string;
+  orders_count?: number;
+  items_count?: number;
+}
+
 export interface Bar {
   id: string;
   owner: string;
@@ -361,6 +418,10 @@ export interface Bar {
   base_cost?: number | null;
   table_names?: string[] | null;
   ops_data?: BarOperationalData | null;
+  plan_tier?: BarPlanTier | null;
+  plan_expires_at?: string | null;
+  trial_ends_at?: string | null;
+  plan_note?: string | null;
   created_at?: string;
 }
 

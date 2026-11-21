@@ -6,6 +6,13 @@ import {
   getEffectiveItemPrice,
   sendTableCall,
 } from '../lib/opsUtils';
+import {
+  getBarPlanStatus,
+  getCachedPartnerAds,
+  getCachedPlatformConfig,
+  loadPartnerAds,
+  loadPlatformConfig,
+} from '../lib/saas';
 import { sb } from '../lib/supabase';
 import {
   applyBarTheme,
@@ -27,8 +34,11 @@ import type {
   ClientOrderLocal,
   ItemType,
   MenuBlockId,
+  PartnerAdBanner,
+  PlatformSaaSConfig,
   Recipe,
 } from '../types/meubar';
+import { AdSlot } from './AdSlot';
 import {
   buildMenuBackgroundStyle,
   FooterOrnamentView,
@@ -114,10 +124,24 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
   const [callingStaff, setCallingStaff] = useState(false);
   const [lastCallAt, setLastCallAt] = useState(0);
   const [hhTick, setHhTick] = useState(0);
+  const [saasConfig, setSaasConfig] = useState<PlatformSaaSConfig>(() => getCachedPlatformConfig());
+  const [partnerAds, setPartnerAds] = useState<PartnerAdBanner[]>(() => getCachedPartnerAds());
 
   useEffect(() => {
     const id = setInterval(() => setHhTick((t) => t + 1), 30000);
     return () => clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    void Promise.all([loadPlatformConfig(), loadPartnerAds(false)]).then(([cfg, ads]) => {
+      if (!active) return;
+      setSaasConfig(cfg);
+      setPartnerAds(ads);
+    });
+    return () => {
+      active = false;
+    };
   }, []);
 
   const tableSessionRef = useRef<TableSession | null>(null);
@@ -1403,6 +1427,34 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
             return node ? <div key={blockId}>{node}</div> : null;
           })}
         </SideDetailWrapper>
+
+        {(() => {
+          const menuPlan = getBarPlanStatus(bar, null, saasConfig);
+          if (!menuPlan.showAds) return null;
+          return (
+            <div className="mt-5 pb-20 space-y-2.5">
+              <AdSlot
+                placement="menu_free"
+                showAds
+                config={saasConfig}
+                partnerAds={partnerAds}
+              />
+              <div className="text-center text-xs opacity-70 pt-1">
+                Cardápio digital gratuito criado com{' '}
+                <a
+                  href={window.location.origin}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="underline font-semibold"
+                  style={{ color: accent }}
+                >
+                  Meu Bar
+                </a>{' '}
+                — baixe grátis para o seu bar
+              </div>
+            </div>
+          );
+        })()}
       </div>
 
       {mine.length > 0 && (

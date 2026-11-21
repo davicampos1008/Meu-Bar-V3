@@ -1,5 +1,6 @@
 import type { RealtimeChannel, User } from '@supabase/supabase-js';
 import { useEffect, useRef, useState } from 'react';
+import { AdSlot } from './components/AdSlot';
 import { LoginScreen, OnboardingScreen } from './components/AuthAndOnboarding';
 import {
   MoreView,
@@ -27,8 +28,10 @@ import {
   ShakersModal,
   SwitchBarModal,
 } from './components/Modals';
+import { LegalDocsModal, PlansView, ProGateCard } from './components/PlansAndLegalModal';
 import { OfflineIndicator, PWAInstallButton } from './components/PWAControls';
 import { BrandMark } from './components/SharedUI';
+import { SuperAdminView } from './components/SuperAdminView';
 import {
   flushOfflineOrders,
   loadOpenTableCalls,
@@ -36,6 +39,15 @@ import {
   resolveTableCall,
 } from './lib/opsUtils';
 import { EXTENDED_RECIPES } from './lib/recipesSeed';
+import {
+  buildWhatsAppLink,
+  getBarPlanStatus,
+  getCachedPartnerAds,
+  getCachedPlatformConfig,
+  isSuperAdmin,
+  loadPartnerAds,
+  loadPlatformConfig,
+} from './lib/saas';
 import { broadcastMenuUpdate, sb } from './lib/supabase';
 import { applyBarTheme, getUnpricedAvailableDrinks, norm } from './lib/utils';
 import type {
@@ -46,6 +58,8 @@ import type {
   JobApplication,
   JobPost,
   Order,
+  PartnerAdBanner,
+  PlatformSaaSConfig,
   Recipe,
   ServiceRequest,
   StaffProfile,
@@ -102,6 +116,12 @@ export default function App() {
   const [showShakers, setShowShakers] = useState(false);
   const [createDrinkMode, setCreateDrinkMode] = useState<null | boolean>(null);
   const [standaloneModal, setStandaloneModal] = useState<null | 'jobs' | 'profile'>(null);
+  const [legalModal, setLegalModal] = useState<null | 'terms' | 'privacy'>(null);
+  const [seekerOverlay, setSeekerOverlay] = useState<null | 'superadmin' | 'plans'>(null);
+
+  // SaaS Planos & Anúncios
+  const [saasConfig, setSaasConfig] = useState<PlatformSaaSConfig>(() => getCachedPlatformConfig());
+  const [partnerAds, setPartnerAds] = useState<PartnerAdBanner[]>(() => getCachedPartnerAds());
 
   const subRef = useRef<RealtimeChannel | null>(null);
   const activeBarIdRef = useRef<string | null>(null);
@@ -467,6 +487,10 @@ export default function App() {
   useEffect(() => {
     if (isMenuRoute) return;
     void detectCurrentCoords();
+    void Promise.all([loadPlatformConfig(), loadPartnerAds(false)]).then(([cfg, ads]) => {
+      setSaasConfig(cfg);
+      setPartnerAds(ads);
+    });
 
     sb.auth.getSession().then(({ data }) => {
       const u = data.session?.user || null;
@@ -636,6 +660,8 @@ export default function App() {
   // Proteção do botão Voltar do Android (Capacitor APK + PWA/WebView)
   const navStateRef = useRef({
     user,
+    legalModal,
+    seekerOverlay,
     standaloneModal,
     createDrinkMode,
     showShakers,
@@ -649,6 +675,8 @@ export default function App() {
   });
   navStateRef.current = {
     user,
+    legalModal,
+    seekerOverlay,
     standaloneModal,
     createDrinkMode,
     showShakers,
@@ -700,6 +728,16 @@ export default function App() {
       const st = navStateRef.current;
 
       // 2. Modais abertos
+      if (st.legalModal) {
+        setLegalModal(null);
+        keepGuard();
+        return;
+      }
+      if (st.seekerOverlay) {
+        setSeekerOverlay(null);
+        keepGuard();
+        return;
+      }
       if (st.standaloneModal) {
         setStandaloneModal(null);
         keepGuard();
@@ -750,7 +788,16 @@ export default function App() {
         }
         if (st.screenMode === 'bar') {
           if (
-            ['cashier', 'prices', 'studio', 'careers', 'catalog', 'management'].includes(st.tab)
+            [
+              'cashier',
+              'prices',
+              'studio',
+              'careers',
+              'catalog',
+              'management',
+              'plans',
+              'superadmin',
+            ].includes(st.tab)
           ) {
             setTab('more');
             keepGuard();
@@ -865,7 +912,14 @@ export default function App() {
       <>
         <OfflineIndicator />
         {toastMsg && <div className="toast">{toastMsg}</div>}
-        <LoginScreen />
+        <LoginScreen
+          saasConfig={saasConfig}
+          partnerAds={partnerAds}
+          onOpenLegal={(t) => setLegalModal(t)}
+        />
+        {legalModal && (
+          <LegalDocsModal initialTab={legalModal} onClose={() => setLegalModal(null)} />
+        )}
       </>
     );
   }
@@ -875,6 +929,12 @@ export default function App() {
     ? getUnpricedAvailableDrinks(recipes, items, prices, activeBar).length
     : 0;
   const actorName = profile.display_name || user.email?.split('@')[0] || 'Equipe';
+  const isPlatformAdmin = isSuperAdmin(user.email);
+  const planStatus = getBarPlanStatus(activeBar, user.email, saasConfig);
+  const supportWhatsAppHref = buildWhatsAppLink(
+    saasConfig.support_whatsapp,
+    `Olá! Preciso de ajuda no Meu Bar${activeBar ? ` (${activeBar.name})` : ''}.`
+  );
 
   return (
     <>
@@ -922,6 +982,15 @@ export default function App() {
           <div className="top">
             <BrandMark />
             <div className="row">
+              {isPlatformAdmin && (
+                <button
+                  type="button"
+                  className="bar-switcher-pill"
+                  onClick={() => setSeekerOverlay('superadmin')}
+                >
+                  👑 Admin
+                </button>
+              )}
               <PWAInstallButton variant="pill" />
               <button
                 type="button"
@@ -975,22 +1044,31 @@ export default function App() {
               </div>
             )}
             {seekerTab === 'explore' && (
-              <ExploreBarsView
-                jobs={jobs}
-                publicBars={[
-                  ...publicBars,
-                  ...bars
-                    .map((x) => x.bar)
-                    .filter((b) => !publicBars.some((pb) => pb.id === b.id)),
-                ]}
-                myApps={myApps}
-                profile={profile}
-                userId={user.id}
-                userCoords={userCoords}
-                onRefreshJobs={() => loadJobsAndRequests(user.id, null, false)}
-                onGoProfile={() => setSeekerTab('profile')}
-                onToast={showToast}
-              />
+              <>
+                <ExploreBarsView
+                  jobs={jobs}
+                  publicBars={[
+                    ...publicBars,
+                    ...bars
+                      .map((x) => x.bar)
+                      .filter((b) => !publicBars.some((pb) => pb.id === b.id)),
+                  ]}
+                  myApps={myApps}
+                  profile={profile}
+                  userId={user.id}
+                  userCoords={userCoords}
+                  onRefreshJobs={() => loadJobsAndRequests(user.id, null, false)}
+                  onGoProfile={() => setSeekerTab('profile')}
+                  onToast={showToast}
+                />
+                <AdSlot
+                  placement="explore"
+                  showAds={!isPlatformAdmin}
+                  config={saasConfig}
+                  partnerAds={partnerAds}
+                  onUpgradeClick={() => setSeekerOverlay('plans')}
+                />
+              </>
             )}
             {seekerTab === 'createbar' && (
               <div>
@@ -1119,34 +1197,52 @@ export default function App() {
 
           <div className="w">
             {tab === 'recipes' && (
-              <RecipesView
-                bar={activeBar}
-                items={items}
-                recipes={recipes}
-                prices={prices}
-                hasPricing={hasPricing}
-                unpricedCount={unpricedCount}
-                onGoPrices={() => setTab('prices')}
-                onSelectRecipe={setMakeDrinkRecipe}
-              />
+              <>
+                <RecipesView
+                  bar={activeBar}
+                  items={items}
+                  recipes={recipes}
+                  prices={prices}
+                  hasPricing={hasPricing}
+                  unpricedCount={unpricedCount}
+                  onGoPrices={() => setTab('prices')}
+                  onSelectRecipe={setMakeDrinkRecipe}
+                />
+                <AdSlot
+                  placement="panel"
+                  showAds={planStatus.showAds}
+                  config={saasConfig}
+                  partnerAds={partnerAds}
+                  onUpgradeClick={() => setTab('plans')}
+                />
+              </>
             )}
 
             {tab === 'stock' && (
-              <StockView
-                bar={activeBar}
-                items={items}
-                recipes={recipes}
-                prices={prices}
-                canEditMenu={canEditMenu}
-                hasPricing={hasPricing}
-                onItemsChange={setItems}
-                onGoPrices={() => setTab('prices')}
-                onOpenCompras={() => {
-                  setMgmtSubTab('compras');
-                  setTab('management');
-                }}
-                onToast={showToast}
-              />
+              <>
+                <StockView
+                  bar={activeBar}
+                  items={items}
+                  recipes={recipes}
+                  prices={prices}
+                  canEditMenu={canEditMenu}
+                  hasPricing={hasPricing}
+                  onItemsChange={setItems}
+                  onGoPrices={() => setTab('prices')}
+                  onOpenCompras={() => {
+                    setMgmtSubTab('compras');
+                    setTab('management');
+                  }}
+                  onToast={showToast}
+                />
+                <AdSlot
+                  placement="panel"
+                  showAds={planStatus.showAds}
+                  config={saasConfig}
+                  partnerAds={partnerAds}
+                  onUpgradeClick={() => setTab('plans')}
+                />
+              </>
             )}
 
             {tab === 'queue' && (
@@ -1212,61 +1308,110 @@ export default function App() {
               />
             )}
 
-            {tab === 'cashier' && (
-              <CashierProView
+            {tab === 'cashier' &&
+              (planStatus.isPro ? (
+                <CashierProView
+                  bar={activeBar}
+                  role={role}
+                  actorName={actorName}
+                  orders={orders}
+                  tableTabs={tableTabs}
+                  tableCalls={tableCalls}
+                  recipes={recipes}
+                  items={items}
+                  prices={prices}
+                  hasPricing={hasPricing}
+                  settledIds={settledIds}
+                  onSettled={(ids) => {
+                    const next = new Set(settledIds);
+                    ids.forEach((id) => next.add(id));
+                    setSettledIds(next);
+                  }}
+                  onBarUpdated={(updated) => {
+                    setActiveBar(updated);
+                    setBars((prev) =>
+                      prev.map((x) => (x.bar.id === updated.id ? { ...x, bar: updated } : x))
+                    );
+                  }}
+                  onRefreshOrders={() => refreshOrders(activeBar.id)}
+                  onRefreshTableTabs={() => refreshTableTabs(activeBar.id)}
+                  onResolveCall={async (callId) => {
+                    setTableCalls((prev) => prev.filter((x) => x.id !== callId));
+                    await resolveTableCall(activeBar.id, callId);
+                    showToast('Chamado marcado como atendido!');
+                  }}
+                  onGoManagement={(st) => {
+                    if (st) setMgmtSubTab(st);
+                    setTab('management');
+                  }}
+                  onBackMore={() => setTab('more')}
+                  onToast={showToast}
+                />
+              ) : (
+                <ProGateCard
+                  featureTitle="Caixa Completo, Turno & Divisão de Conta"
+                  description="Controle abertura e fechamento de turno, sangria, suprimento, taxa de 10%, divisão de conta, pré-conta térmica e resgate de fidelidade no Plano Pro."
+                  onOpenPlans={() => setTab('plans')}
+                  onBack={() => setTab('more')}
+                />
+              ))}
+
+            {tab === 'management' &&
+              (planStatus.isPro || mgmtSubTab === 'config' ? (
+                <ManagementProView
+                  bar={activeBar}
+                  role={role}
+                  actorName={actorName}
+                  items={items}
+                  recipes={recipes}
+                  initialSubTab={mgmtSubTab}
+                  onBarUpdated={(updated) => {
+                    setActiveBar(updated);
+                    setBars((prev) =>
+                      prev.map((x) => (x.bar.id === updated.id ? { ...x, bar: updated } : x))
+                    );
+                  }}
+                  onBackMore={() => setTab('more')}
+                  onToast={showToast}
+                />
+              ) : (
+                <ProGateCard
+                  featureTitle={
+                    mgmtSubTab === 'happyhour'
+                      ? 'Happy Hour Automático'
+                      : mgmtSubTab === 'fidelidade'
+                        ? 'Cartão Fidelidade & Cashback'
+                        : mgmtSubTab === 'compras'
+                          ? 'Lista de Compras, Fornecedores & Perdas'
+                          : mgmtSubTab === 'reservas'
+                            ? 'Reservas de Mesa & CRM de Clientes'
+                            : 'Relatórios Financeiros, CMV & Lucro Líquido'
+                  }
+                  description="Este módulo avançado faz parte do Plano Pro. Ative o Pro para remover anúncios e liberar toda a gestão profissional do seu bar."
+                  onOpenPlans={() => setTab('plans')}
+                  onBack={() => setTab('more')}
+                />
+              ))}
+
+            {tab === 'plans' && (
+              <PlansView
                 bar={activeBar}
-                role={role}
-                actorName={actorName}
-                orders={orders}
-                tableTabs={tableTabs}
-                tableCalls={tableCalls}
-                recipes={recipes}
-                items={items}
-                prices={prices}
-                hasPricing={hasPricing}
-                settledIds={settledIds}
-                onSettled={(ids) => {
-                  const next = new Set(settledIds);
-                  ids.forEach((id) => next.add(id));
-                  setSettledIds(next);
-                }}
-                onBarUpdated={(updated) => {
-                  setActiveBar(updated);
-                  setBars((prev) =>
-                    prev.map((x) => (x.bar.id === updated.id ? { ...x, bar: updated } : x))
-                  );
-                }}
-                onRefreshOrders={() => refreshOrders(activeBar.id)}
-                onRefreshTableTabs={() => refreshTableTabs(activeBar.id)}
-                onResolveCall={async (callId) => {
-                  setTableCalls((prev) => prev.filter((x) => x.id !== callId));
-                  await resolveTableCall(activeBar.id, callId);
-                  showToast('Chamado marcado como atendido!');
-                }}
-                onGoManagement={(st) => {
-                  if (st) setMgmtSubTab(st);
-                  setTab('management');
-                }}
-                onBackMore={() => setTab('more')}
+                userEmail={user.email}
+                planStatus={planStatus}
+                config={saasConfig}
+                onOpenLegal={(t) => setLegalModal(t)}
+                onBack={() => setTab('more')}
                 onToast={showToast}
               />
             )}
 
-            {tab === 'management' && (
-              <ManagementProView
-                bar={activeBar}
-                role={role}
-                actorName={actorName}
-                items={items}
-                recipes={recipes}
-                initialSubTab={mgmtSubTab}
-                onBarUpdated={(updated) => {
-                  setActiveBar(updated);
-                  setBars((prev) =>
-                    prev.map((x) => (x.bar.id === updated.id ? { ...x, bar: updated } : x))
-                  );
-                }}
-                onBackMore={() => setTab('more')}
+            {tab === 'superadmin' && isPlatformAdmin && (
+              <SuperAdminView
+                userId={user.id}
+                config={saasConfig}
+                onConfigUpdated={setSaasConfig}
+                onAdsUpdated={setPartnerAds}
+                onBack={() => setTab('more')}
                 onToast={showToast}
               />
             )}
@@ -1352,36 +1497,57 @@ export default function App() {
             )}
 
             {tab === 'more' && (
-              <MoreView
-                bar={activeBar}
-                isManager={isManager}
-                canEditMenu={canEditMenu}
-                hasPricing={hasPricing}
-                unpricedCount={unpricedCount}
-                onBarUpdated={(updated) => {
-                  setActiveBar(updated);
-                  setBars((prev) =>
-                    prev.map((x) => (x.bar.id === updated.id ? { ...x, bar: updated } : x))
-                  );
-                }}
-                onOpenQr={() => setShowQr(true)}
-                onOpenShakers={() => setShowShakers(true)}
-                onOpenCreateDrink={(edit) => setCreateDrinkMode(edit)}
-                onOpenStation={(st) => {
-                  setQueueStation(st);
-                  setTab('queue');
-                }}
-                onNavigate={(nextTab, cMode) => {
-                  if (nextTab === 'studio') setStudioInitialTab('menu');
-                  if (cMode) setCareerMode(cMode);
-                  setTab(nextTab);
-                }}
-                onOpenManagement={(st) => {
-                  setMgmtSubTab(st);
-                  setTab('management');
-                }}
-                onOpenSwitchBar={() => setShowSwitchBar(true)}
-              />
+              <>
+                <MoreView
+                  bar={activeBar}
+                  isManager={isManager}
+                  canEditMenu={canEditMenu}
+                  hasPricing={hasPricing}
+                  unpricedCount={unpricedCount}
+                  planLabel={planStatus.label}
+                  isProPlan={planStatus.isPro}
+                  isPlatformAdmin={isPlatformAdmin}
+                  supportWhatsAppHref={supportWhatsAppHref}
+                  onBarUpdated={(updated) => {
+                    setActiveBar(updated);
+                    setBars((prev) =>
+                      prev.map((x) => (x.bar.id === updated.id ? { ...x, bar: updated } : x))
+                    );
+                  }}
+                  onOpenQr={() => setShowQr(true)}
+                  onOpenShakers={() => setShowShakers(true)}
+                  onOpenCreateDrink={(edit) => setCreateDrinkMode(edit)}
+                  onOpenStation={(st) => {
+                    if (!planStatus.isPro) {
+                      showToast('Estações dedicadas da equipe fazem parte do Plano Pro.');
+                      setTab('plans');
+                      return;
+                    }
+                    setQueueStation(st);
+                    setTab('queue');
+                  }}
+                  onNavigate={(nextTab, cMode) => {
+                    if (nextTab === 'studio') setStudioInitialTab('menu');
+                    if (cMode) setCareerMode(cMode);
+                    setTab(nextTab);
+                  }}
+                  onOpenManagement={(st) => {
+                    setMgmtSubTab(st);
+                    setTab('management');
+                  }}
+                  onOpenSwitchBar={() => setShowSwitchBar(true)}
+                  onOpenPlans={() => setTab('plans')}
+                  onOpenSuperAdmin={() => setTab('superadmin')}
+                  onOpenLegal={(t) => setLegalModal(t)}
+                />
+                <AdSlot
+                  placement="panel"
+                  showAds={planStatus.showAds}
+                  config={saasConfig}
+                  partnerAds={partnerAds}
+                  onUpgradeClick={() => setTab('plans')}
+                />
+              </>
             )}
           </div>
 
@@ -1424,9 +1590,17 @@ export default function App() {
             <button
               type="button"
               className={`bnav-btn ${
-                ['more', 'cashier', 'studio', 'careers', 'prices', 'catalog', 'management'].includes(
-                  tab
-                )
+                [
+                  'more',
+                  'cashier',
+                  'studio',
+                  'careers',
+                  'prices',
+                  'catalog',
+                  'management',
+                  'plans',
+                  'superadmin',
+                ].includes(tab)
                   ? 'on'
                   : ''
               }`}
@@ -1567,6 +1741,40 @@ export default function App() {
             )}
           </div>
         </div>
+      )}
+      {seekerOverlay === 'superadmin' && isPlatformAdmin && (
+        <div className="ov">
+          <div className="w">
+            <SuperAdminView
+              userId={user.id}
+              config={saasConfig}
+              onConfigUpdated={setSaasConfig}
+              onAdsUpdated={setPartnerAds}
+              onBack={() => setSeekerOverlay(null)}
+              onToast={showToast}
+            />
+          </div>
+        </div>
+      )}
+
+      {seekerOverlay === 'plans' && (
+        <div className="ov">
+          <div className="w">
+            <PlansView
+              bar={activeBar}
+              userEmail={user.email}
+              planStatus={planStatus}
+              config={saasConfig}
+              onOpenLegal={(t) => setLegalModal(t)}
+              onBack={() => setSeekerOverlay(null)}
+              onToast={showToast}
+            />
+          </div>
+        </div>
+      )}
+
+      {legalModal && (
+        <LegalDocsModal initialTab={legalModal} onClose={() => setLegalModal(null)} />
       )}
     </>
   );

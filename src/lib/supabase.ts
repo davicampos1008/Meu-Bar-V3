@@ -55,6 +55,10 @@ export async function writeBarSafe(
     'base_cost',
     'table_names',
     'ops_data',
+    'plan_tier',
+    'plan_expires_at',
+    'trial_ends_at',
+    'plan_note',
     'shakers',
   ];
 
@@ -146,7 +150,7 @@ export function compressImageFile(file: File): Promise<File> {
     const reader = new FileReader();
     reader.onload = (e) => {
       img.onload = () => {
-        const maxSide = 1100;
+        const maxSide = 960;
         let w = img.width;
         let h = img.height;
         if (w > maxSide || h > maxSide) {
@@ -172,7 +176,7 @@ export function compressImageFile(file: File): Promise<File> {
             resolve(blob ? new File([blob], 'foto.jpg', { type: 'image/jpeg' }) : file);
           },
           'image/jpeg',
-          0.82
+          0.78
         );
       };
       img.onerror = () => resolve(file);

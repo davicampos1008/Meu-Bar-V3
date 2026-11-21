@@ -5,7 +5,14 @@ import type { Bar, BarEntry, JobPost, StaffProfile, UserCoords } from '../types/
 import { PWAInstallButton } from './PWAControls';
 import { BrandMark, ImageUploader, LocationPicker } from './SharedUI';
 
-export const LoginScreen: React.FC = () => {
+import { AdSlot } from './AdSlot';
+import type { PartnerAdBanner, PlatformSaaSConfig } from '../types/meubar';
+
+export const LoginScreen: React.FC<{
+  saasConfig?: PlatformSaaSConfig;
+  partnerAds?: PartnerAdBanner[];
+  onOpenLegal?: (tab: 'terms' | 'privacy') => void;
+}> = ({ saasConfig, partnerAds = [], onOpenLegal }) => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [msg, setMsg] = useState('');
@@ -71,13 +78,16 @@ export const LoginScreen: React.FC = () => {
     setBusy(false);
   };
 
+  const trialDays = saasConfig?.trial_days ?? 14;
+
   return (
     <div className="w narrow">
       <div className="text-center mb-3.5">
         <BrandMark big />
       </div>
       <p className="mu text-center">
-        Entre ou crie sua conta para gerenciar o bar, receitas, currículo e vagas.
+        Gestão completa de bar, receitas, estoque, cardápio QR e equipe.
+        {trialDays > 0 ? ` Comece grátis com ${trialDays} dias Pro liberados.` : ' Comece grátis.'}
       </p>
       <div className="panel">
         <label>E-mail</label>
@@ -114,14 +124,42 @@ export const LoginScreen: React.FC = () => {
             disabled={busy}
             onClick={() => void handleAuth('up')}
           >
-            Criar conta
+            Criar conta grátis
           </button>
         </div>
         {msg && <p className={isOk ? 'ok-txt' : 'err'}>{msg}</p>}
       </div>
-      <div className="text-center mt-4">
-        <PWAInstallButton variant="button" />
+
+      <div className="mt-3">
+        <PWAInstallButton variant="card" />
       </div>
+
+      <AdSlot
+        placement="explore"
+        showAds
+        config={saasConfig}
+        partnerAds={partnerAds}
+      />
+
+      {onOpenLegal && (
+        <div className="mt-4 pb-4 flex items-center justify-center gap-3 text-xs text-[var(--mut)]">
+          <button
+            type="button"
+            className="bg-transparent border-0 text-[var(--mut)] hover:text-[var(--fg)] underline cursor-pointer p-0"
+            onClick={() => onOpenLegal('terms')}
+          >
+            Termos de Uso
+          </button>
+          <span aria-hidden="true">·</span>
+          <button
+            type="button"
+            className="bg-transparent border-0 text-[var(--mut)] hover:text-[var(--fg)] underline cursor-pointer p-0"
+            onClick={() => onOpenLegal('privacy')}
+          >
+            Política de Privacidade
+          </button>
+        </div>
+      )}
     </div>
   );
 };

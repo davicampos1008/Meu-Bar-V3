@@ -55,6 +55,10 @@ alter table bars add column if not exists instagram text;
 alter table bars add column if not exists opening_hours text;
 alter table bars add column if not exists about text;
 alter table bars add column if not exists ops_data jsonb default '{}'::jsonb;
+alter table bars add column if not exists plan_tier text not null default 'free';
+alter table bars add column if not exists plan_expires_at timestamptz;
+alter table bars add column if not exists trial_ends_at timestamptz;
+alter table bars add column if not exists plan_note text;
 
 create unique index if not exists bars_handle_unique on bars (lower(handle)) where handle is not null;
 
@@ -376,6 +380,10 @@ select json_build_object(
     'instagram', b.instagram,
     'opening_hours', b.opening_hours,
     'about', b.about,
+    'plan_tier', coalesce(b.plan_tier, 'free'),
+    'plan_expires_at', b.plan_expires_at,
+    'trial_ends_at', b.trial_ends_at,
+    'created_at', b.created_at,
     'ops_data', json_build_object(
       'modifiers', coalesce(b.ops_data->'modifiers', '[]'::jsonb),
       'happy_hours', coalesce(b.ops_data->'happy_hours', '[]'::jsonb)
@@ -791,6 +799,159 @@ do $$ begin
   alter publication supabase_realtime add table job_applications;
 exception when others then null;
 end $$;
+
+-- 10.5) Monetização SaaS: Planos Grátis/Pro/VIP, Super Admin, Banners de Parceiros e Google AdSense
+create table if not exists platform_admins (
+  email text primary key,
+  created_at timestamptz default now()
+);
+
+insert into platform_admins(email)
+values ('nygames92@gmail.com')
+on conflict (email) do nothing;
+
+create or replace function public.is_platform_admin() returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (
+    select 1 from platform_admins pa
+    where lower(trim(pa.email)) = lower(trim(coalesce(auth.jwt() ->> 'email', '')))
+  );
+$$;
+
+create table if not exists platform_settings (
+  id text primary key default 'default',
+  config jsonb not null default '{}'::jsonb,
+  updated_at timestamptz default now()
+);
+
+alter table platform_settings enable row level security;
+drop policy if exists platform_settings_read on platform_settings;
+create policy platform_settings_read on platform_settings for select using (true);
+drop policy if exists platform_settings_admin_write on platform_settings;
+create policy platform_settings_admin_write on platform_settings for all
+  using (is_platform_admin())
+  with check (is_platform_admin());
+
+create table if not exists partner_ads (
+  id uuid primary key default gen_random_uuid(),
+  title text not null,
+  subtitle text,
+  cta_label text default 'Conhecer',
+  image_url text,
+  click_url text,
+  placement text not null default 'panel' check (placement in ('panel','explore','menu_free','all')),
+  badge_text text default 'Parceiro',
+  bg_color text,
+  accent_color text default '#e5a93c',
+  active boolean not null default true,
+  priority int not null default 10,
+  impressions bigint not null default 0,
+  clicks bigint not null default 0,
+  created_at timestamptz default now()
+);
+
+alter table partner_ads enable row level security;
+drop policy if exists partner_ads_public_read on partner_ads;
+create policy partner_ads_public_read on partner_ads for select using (active = true or is_platform_admin());
+drop policy if exists partner_ads_admin_write on partner_ads;
+create policy partner_ads_admin_write on partner_ads for all
+  using (is_platform_admin())
+  with check (is_platform_admin());
+
+create or replace function public.track_ad_event(p_ad_id uuid, p_kind text) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  if p_kind = 'click' then
+    update partner_ads set clicks = coalesce(clicks, 0) + 1 where id = p_ad_id and active = true;
+  elsif p_kind = 'impression' then
+    update partner_ads set impressions = coalesce(impressions, 0) + 1 where id = p_ad_id and active = true;
+  end if;
+end $$;
+grant execute on function public.track_ad_event(uuid, text) to anon, authenticated;
+
+create or replace function public.admin_list_bars() returns json
+language plpgsql security definer set search_path = public, auth as $$
+begin
+  if not public.is_platform_admin() then
+    raise exception 'Acesso restrito ao administrador da plataforma.';
+  end if;
+  return coalesce((
+    select json_agg(row_to_json(t))
+    from (
+      select
+        b.id,
+        b.name,
+        b.handle,
+        b.city,
+        b.kind,
+        b.owner,
+        u.email as owner_email,
+        coalesce(b.plan_tier, 'free') as plan_tier,
+        b.plan_expires_at,
+        b.trial_ends_at,
+        b.plan_note,
+        b.created_at,
+        (select count(*) from public.orders o where o.bar_id = b.id)::int as orders_count,
+        (select count(*) from public.bar_items bi where bi.bar_id = b.id)::int as items_count
+      from public.bars b
+      left join auth.users u on u.id = b.owner
+      order by b.created_at desc
+      limit 300
+    ) t
+  ), '[]'::json);
+end $$;
+grant execute on function public.admin_list_bars() to authenticated;
+
+create or replace function public.admin_set_bar_plan(
+  p_bar_id uuid,
+  p_tier text,
+  p_expires_at timestamptz default null,
+  p_note text default null
+) returns void
+language plpgsql security definer set search_path = public as $$
+declare
+  v_tier text := case when lower(coalesce(p_tier, '')) in ('pro','vip') then lower(p_tier) else 'free' end;
+begin
+  if not public.is_platform_admin() then
+    raise exception 'Acesso restrito ao administrador da plataforma.';
+  end if;
+  update public.bars
+  set
+    plan_tier = v_tier,
+    plan_expires_at = case when v_tier = 'pro' then p_expires_at else null end,
+    plan_note = nullif(left(trim(coalesce(p_note, '')), 140), '')
+  where id = p_bar_id;
+end $$;
+grant execute on function public.admin_set_bar_plan(uuid, text, timestamptz, text) to authenticated;
+
+create or replace function public.protect_bar_plan_columns()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if auth.uid() is not null and not public.is_platform_admin() then
+    if tg_op = 'INSERT' then
+      new.plan_tier := 'free';
+      new.plan_expires_at := null;
+      new.trial_ends_at := null;
+      new.plan_note := null;
+    elsif tg_op = 'UPDATE' then
+      new.plan_tier := old.plan_tier;
+      new.plan_expires_at := old.plan_expires_at;
+      new.trial_ends_at := old.trial_ends_at;
+      new.plan_note := old.plan_note;
+    end if;
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_protect_bar_plan_columns on public.bars;
+create trigger trg_protect_bar_plan_columns
+before insert or update on public.bars
+for each row execute function public.protect_bar_plan_columns();
 
 -- Opcional (para testar sem confirmar e-mail):
 -- Confirma usuários pendentes e cria gatilho para confirmar novos cadastros automaticamente.
