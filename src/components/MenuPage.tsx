@@ -1,4 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
+import {
+  canVibrateAlert,
+  isAlertEnabled,
+  useAlertPrefs,
+} from '../lib/alertPrefs';
 import { ALL_TAGS, CATS } from '../lib/catalog';
 import {
   getActiveHappyHours,
@@ -110,6 +115,8 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
   const [selectedRecipe, setSelectedRecipe] = useState<MenuItem | null>(null);
   const [showOrders, setShowOrders] = useState(false);
   const [readyAlert, setReadyAlert] = useState<ClientOrderLocal[] | null>(null);
+  const { prefs: alertPrefs, setPref: setAlertPref, patchPrefs: patchAlertPrefs } = useAlertPrefs();
+  const clientAlertOn = alertPrefs.allEnabled && alertPrefs.clientOrderReady;
   const [toastMsg, setToastMsg] = useState('');
 
   // Order form state
@@ -490,9 +497,11 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
       });
 
       if (changed) saveMine(next);
-      if (freshReady.length) {
-        beep(880, 0.6);
-        if (navigator.vibrate) navigator.vibrate([300, 120, 300, 120, 300]);
+      if (freshReady.length && isAlertEnabled('clientOrderReady')) {
+        beep(880, 0.6, 'clientOrderReady');
+        if (canVibrateAlert('clientOrderReady') && navigator.vibrate) {
+          navigator.vibrate([300, 120, 300, 120, 300]);
+        }
         document.title = '🍸 Seu drink está pronto!';
         setReadyAlert(freshReady);
       }
@@ -1672,6 +1681,28 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
                   <p className="mu mt-2">O pagamento é feito direto no caixa.</p>
                 </>
               )}
+              <div className="row sp mt-3 pt-2.5 border-t border-white/10">
+                <span className="text-xs text-[var(--mut)]">
+                  {clientAlertOn ? '🔔 Aviso de pedido pronto: Ativo' : '🔕 Aviso de pedido pronto: Silenciado'}
+                </span>
+                <button
+                  type="button"
+                  className="b g sm"
+                  onClick={() => {
+                    if (!clientAlertOn) {
+                      if (!alertPrefs.allEnabled) {
+                        patchAlertPrefs({ allEnabled: true, clientOrderReady: true });
+                      } else {
+                        setAlertPref('clientOrderReady', true);
+                      }
+                    } else {
+                      setAlertPref('clientOrderReady', false);
+                    }
+                  }}
+                >
+                  {clientAlertOn ? 'Silenciar' : 'Ativar'}
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -1787,6 +1818,17 @@ export const MenuPage: React.FC<{ barId: string; mesa?: string | null }> = ({
               }}
             >
               Vou buscar no bar
+            </button>
+            <button
+              type="button"
+              className="b g full mt-2"
+              onClick={() => {
+                setAlertPref('clientOrderReady', false);
+                setReadyAlert(null);
+                document.title = bar.name;
+              }}
+            >
+              🔕 Silenciar alertas de pedido pronto
             </button>
           </div>
         </div>

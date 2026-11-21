@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { isAlertEnabled } from '../lib/alertPrefs';
 import {
   canRoleDo,
   enqueueOfflineOrder,
@@ -722,7 +723,9 @@ export const WaiterStationView: React.FC<WaiterStationViewProps> = ({
       const sent = await flushOfflineOrders(bar.id);
       setOfflineCount(getOfflineQueuedOrders(bar.id).length);
       if (sent > 0) {
-        onToast(`${sent} pedido(s) offline sincronizado(s) automaticamente!`);
+        if (isAlertEnabled('offlineSync')) {
+          onToast(`${sent} pedido(s) offline sincronizado(s) automaticamente!`);
+        }
         await onRefreshAll();
       }
     };

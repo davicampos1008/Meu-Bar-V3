@@ -20,6 +20,11 @@ import {
   getConnectedBluetoothPrinter,
   writeEscPosBluetooth,
 } from './bluetoothPrinter';
+import {
+  canPlayAlertSound,
+  canVibrateAlert,
+  type AlertCategoryKey,
+} from './alertPrefs';
 import { getDefaultUnitForIngredient } from './catalog';
 import { broadcastMenuUpdate, sb, writeBarSafe } from './supabase';
 import {
@@ -680,16 +685,23 @@ export async function flushOfflineOrders(barId?: string): Promise<number> {
 /* ============================================================
  * ALERTAS SONOROS E VIBRAÇÃO DIFERENCIADOS POR ESTAÇÃO
  * ============================================================ */
-export function playStationAlert(station: 'bar' | 'cozinha' | 'garcom'): void {
-  try {
-    if (typeof navigator !== 'undefined' && navigator.vibrate) {
-      if (station === 'garcom') navigator.vibrate([120, 80, 120, 80, 180]);
-      else if (station === 'cozinha') navigator.vibrate([200, 100, 200]);
-      else navigator.vibrate([150]);
+export function playStationAlert(
+  station: 'bar' | 'cozinha' | 'garcom',
+  category?: AlertCategoryKey
+): void {
+  if (canVibrateAlert(category)) {
+    try {
+      if (typeof navigator !== 'undefined' && navigator.vibrate) {
+        if (station === 'garcom') navigator.vibrate([120, 80, 120, 80, 180]);
+        else if (station === 'cozinha') navigator.vibrate([200, 100, 200]);
+        else navigator.vibrate([150]);
+      }
+    } catch {
+      // ignore
     }
-  } catch {
-    // ignore
   }
+
+  if (!canPlayAlertSound(category)) return;
 
   try {
     const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;

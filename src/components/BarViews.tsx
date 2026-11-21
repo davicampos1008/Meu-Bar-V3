@@ -1,5 +1,10 @@
 import React, { useEffect, useState } from 'react';
 import {
+  getAlertPrefsSummary,
+  isAlertEnabled,
+  useAlertPrefs,
+} from '../lib/alertPrefs';
+import {
   ALL_TAGS,
   CAT,
   CATS,
@@ -379,7 +384,11 @@ export const StockView: React.FC<{
     setVariant('');
     setCost('');
     const nextUnpriced = getUnpricedAvailableDrinks(recipes, next, prices, bar);
-    if (hasPricing && nextUnpriced.length > unpricedAvailable.length) {
+    if (
+      hasPricing &&
+      nextUnpriced.length > unpricedAvailable.length &&
+      isAlertEnabled('lowStock')
+    ) {
       const gained = nextUnpriced.length - unpricedAvailable.length;
       onToast(`Item adicionado! ⚠️ +${gained} drink(s) liberado(s) aguardam preço na Precificação.`);
     } else {
@@ -617,7 +626,11 @@ export const StockView: React.FC<{
     onItemsChange(nextItems);
     void broadcastMenuUpdate(bar.id);
     const nextUnpriced = getUnpricedAvailableDrinks(recipes, nextItems, prices, bar);
-    if (hasPricing && nextUnpriced.length > unpricedAvailable.length) {
+    if (
+      hasPricing &&
+      nextUnpriced.length > unpricedAvailable.length &&
+      isAlertEnabled('lowStock')
+    ) {
       const gained = nextUnpriced.length - unpricedAvailable.length;
       onToast(`${rawName} adicionado! ⚠️ +${gained} drink(s) liberado(s) aguardam preço.`);
     } else {
@@ -1358,7 +1371,7 @@ export const QueueView: React.FC<{
     }
 
     if (status === 'ready') {
-      playStationAlert('garcom');
+      playStationAlert('garcom', 'orderReady');
       const allLow: string[] = [];
       let curItems = [...items];
       for (const id of ids) {
@@ -1377,7 +1390,7 @@ export const QueueView: React.FC<{
         allLow.push(...ded.lowStockNames);
       }
       if (onItemsChange && curItems !== items) onItemsChange(curItems);
-      if (allLow.length > 0 && onToast) {
+      if (allLow.length > 0 && onToast && isAlertEnabled('lowStock')) {
         onToast(`⚠️ Estoque baixo: ${Array.from(new Set(allLow)).join(', ')}`);
       }
     }
@@ -2544,6 +2557,7 @@ export const MoreView: React.FC<{
   planLabel?: string;
   isProPlan?: boolean;
   isPlatformAdmin?: boolean;
+  unreadAdminAlerts?: number;
   supportWhatsAppHref?: string | null;
   onBarUpdated: (bar: Bar) => void;
   onOpenQr: () => void;
@@ -2562,6 +2576,7 @@ export const MoreView: React.FC<{
   ) => void;
   onNavigate: (tab: string, careerMode?: 'store' | 'personal') => void;
   onOpenSwitchBar: () => void;
+  onOpenAlertSettings?: () => void;
   onOpenPlans?: () => void;
   onOpenSuperAdmin?: () => void;
   onOpenLegal?: (tab: 'terms' | 'privacy') => void;
@@ -2574,6 +2589,7 @@ export const MoreView: React.FC<{
   planLabel = 'Plano Grátis',
   isProPlan = true,
   isPlatformAdmin = false,
+  unreadAdminAlerts = 0,
   supportWhatsAppHref = null,
   onBarUpdated,
   onOpenQr,
@@ -2583,11 +2599,15 @@ export const MoreView: React.FC<{
   onOpenManagement,
   onNavigate,
   onOpenSwitchBar,
+  onOpenAlertSettings,
   onOpenPlans,
   onOpenSuperAdmin,
   onOpenLegal,
 }) => {
   const open = bar.accepting_orders !== false;
+  const { prefs: alertPrefs } = useAlertPrefs();
+  const alertSummary = getAlertPrefsSummary(alertPrefs, isPlatformAdmin);
+  const showLowStockAlerts = alertPrefs.allEnabled && alertPrefs.lowStock;
 
   const handleToggleOrders = async () => {
     const r = await sb
@@ -2632,7 +2652,12 @@ export const MoreView: React.FC<{
           >
             <div className="menu-row-text">
               <div className="menu-row-title text-[var(--ac)]">
-                👑 Painel Admin SaaS (Planos, VIP & Anúncios)
+                👑 Painel Admin SaaS (Contas, VIP & Anúncios)
+                {unreadAdminAlerts > 0 && (
+                  <span className="badge-warn !bg-emerald-500/20 !text-emerald-200 ml-1.5">
+                    🔔 {unreadAdminAlerts} nova(s)
+                  </span>
+                )}
               </div>
               <div className="menu-row-sub">
                 Liberar VIP grátis, gerenciar lojas, banners de parceiros e Google AdSense
@@ -2671,6 +2696,29 @@ export const MoreView: React.FC<{
             {open ? 'Pausar' : 'Ligar'}
           </button>
         </div>
+
+        {onOpenAlertSettings && (
+          <button type="button" className="menu-row-item" onClick={onOpenAlertSettings}>
+            <div className="menu-row-text">
+              <div className="menu-row-title">
+                {alertSummary.isMuted ? '🔕' : '🔔'} Alertas & Notificações
+                <span
+                  className={`badge-warn ml-1.5 ${
+                    alertSummary.isMuted
+                      ? '!bg-red-500/20 !text-red-200'
+                      : '!bg-emerald-500/20 !text-emerald-200'
+                  }`}
+                >
+                  {alertSummary.label}
+                </span>
+              </div>
+              <div className="menu-row-sub">
+                Ative ou desative sons, vibração, pedidos, mesas, estoque e alertas do app
+              </div>
+            </div>
+            <span className="menu-row-chev">›</span>
+          </button>
+        )}
 
         <button type="button" className="menu-row-item" onClick={onOpenQr}>
           <div className="menu-row-text">
@@ -2899,12 +2947,12 @@ export const MoreView: React.FC<{
             <div className="menu-row-text">
               <div className="menu-row-title">
                 💰 Precificação
-                {hasPricing && unpricedCount > 0 && (
+                {hasPricing && unpricedCount > 0 && showLowStockAlerts && (
                   <span className="badge-warn">{unpricedCount} sem preço</span>
                 )}
               </div>
               <div className="menu-row-sub">
-                {hasPricing && unpricedCount > 0
+                {hasPricing && unpricedCount > 0 && showLowStockAlerts
                   ? `${unpricedCount} item(ns) do estoque aguardando preço para o cardápio`
                   : 'Preços dos drinks (cardápio pago)'}
               </div>

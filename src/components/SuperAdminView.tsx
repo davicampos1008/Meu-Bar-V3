@@ -1,9 +1,12 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { useAlertPrefs } from '../lib/alertPrefs';
 import {
   adminListAllBars,
+  adminListUsers,
   adminUpdateBarPlan,
   buildAdsTxtLine,
   getBarPlanStatus,
+  isSuperAdmin,
   isValidAdSenseClient,
   isValidAdSenseSlot,
   loadPartnerAds,
@@ -13,7 +16,9 @@ import {
 import { sb } from '../lib/supabase';
 import { money } from '../lib/utils';
 import type {
+  AdminAlertItem,
   AdminBarOverview,
+  AdminUserAccount,
   BarPlanTier,
   PartnerAdBanner,
   PartnerAdPlacement,
@@ -21,7 +26,8 @@ import type {
 } from '../types/meubar';
 import { ImageUploader } from './SharedUI';
 
-type AdminTab = 'stores' | 'partners' | 'adsense' | 'sales';
+type AdminTab = 'accounts' | 'stores' | 'partners' | 'adsense' | 'sales';
+type AccountFilter = 'all' | 'recent' | 'with_bars' | 'no_bars' | 'vip_pro';
 
 const PLACEMENT_LABELS: Record<PartnerAdPlacement, string> = {
   panel: 'Painel Admin (Estoque/Receitas/Mais)',
@@ -30,20 +36,53 @@ const PLACEMENT_LABELS: Record<PartnerAdPlacement, string> = {
   all: 'Todos os espaços permitidos',
 };
 
+function fmtDateTime(iso?: string | null): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleString('pt-BR', {
+    day: '2-digit',
+    month: '2-digit',
+    year: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
 export const SuperAdminView: React.FC<{
   userId: string;
   config: PlatformSaaSConfig;
+  adminAlerts?: AdminAlertItem[];
+  onMarkAlertsRead?: (ids?: string[]) => Promise<void> | void;
+  onOpenAlertSettings?: () => void;
   onConfigUpdated: (next: PlatformSaaSConfig) => void;
   onAdsUpdated: (ads: PartnerAdBanner[]) => void;
   onBack: () => void;
   onToast: (msg: string) => void;
-}> = ({ userId, config, onConfigUpdated, onAdsUpdated, onBack, onToast }) => {
-  const [tab, setTab] = useState<AdminTab>('stores');
+}> = ({
+  userId,
+  config,
+  adminAlerts = [],
+  onMarkAlertsRead,
+  onOpenAlertSettings,
+  onConfigUpdated,
+  onAdsUpdated,
+  onBack,
+  onToast,
+}) => {
+  const { prefs: alertPrefs, setPref: setAlertPref, patchPrefs: patchAlertPrefs } = useAlertPrefs();
+  const adminAlertOn = alertPrefs.allEnabled && alertPrefs.adminNewAccount;
+  const [tab, setTab] = useState<AdminTab>('accounts');
 
-  // Lojas & Planos
+  // Contas & Lojas
+  const [users, setUsers] = useState<AdminUserAccount[]>([]);
+  const [usersErr, setUsersErr] = useState('');
   const [stores, setStores] = useState<AdminBarOverview[]>([]);
-  const [storesLoading, setStoresLoading] = useState(true);
   const [storesErr, setStoresErr] = useState('');
+  const [loadingDirectory, setLoadingDirectory] = useState(true);
+
+  const [accountQuery, setAccountQuery] = useState('');
+  const [accountFilter, setAccountFilter] = useState<AccountFilter>('all');
   const [storeQuery, setStoreQuery] = useState('');
   const [busyBarId, setBusyBarId] = useState<string | null>(null);
   const [noteByBar, setNoteByBar] = useState<Record<string, string>>({});
@@ -72,13 +111,16 @@ export const SuperAdminView: React.FC<{
     setDraft(config);
   }, [config]);
 
-  const refreshStores = async () => {
-    setStoresLoading(true);
+  const refreshDirectory = async () => {
+    setLoadingDirectory(true);
     setStoresErr('');
-    const res = await adminListAllBars();
-    setStores(res.bars);
-    if (res.error) setStoresErr(res.error);
-    setStoresLoading(false);
+    setUsersErr('');
+    const [storesRes, usersRes] = await Promise.all([adminListAllBars(), adminListUsers()]);
+    setStores(storesRes.bars);
+    if (storesRes.error) setStoresErr(storesRes.error);
+    setUsers(usersRes.users);
+    if (usersRes.error) setUsersErr(usersRes.error);
+    setLoadingDirectory(false);
   };
 
   const refreshAds = async () => {
@@ -90,7 +132,7 @@ export const SuperAdminView: React.FC<{
   };
 
   useEffect(() => {
-    void refreshStores();
+    void refreshDirectory();
     void refreshAds();
   }, []);
 
@@ -118,10 +160,13 @@ export const SuperAdminView: React.FC<{
           ? `Plano Pro ativado (${daysValid ? `${daysValid} dias` : 'sem vencimento'})!`
           : 'Loja alterada para Plano Grátis.'
     );
-    await refreshStores();
+    await refreshDirectory();
   };
 
-  const handleSaveConfig = async (nextCfg: PlatformSaaSConfig, successMsg = 'Configurações salvas!') => {
+  const handleSaveConfig = async (
+    nextCfg: PlatformSaaSConfig,
+    successMsg = 'Configurações salvas!'
+  ) => {
     setSavingCfg(true);
     const res = await savePlatformConfig(nextCfg);
     setSavingCfg(false);
@@ -135,32 +180,41 @@ export const SuperAdminView: React.FC<{
     onToast(successMsg);
   };
 
+  const handleToggleEmailVip = async (rawEmail: string, grant: boolean) => {
+    const clean = rawEmail.trim().toLowerCase();
+    if (!clean || !clean.includes('@')) {
+      onToast('E-mail inválido.');
+      return;
+    }
+    const exists = draft.free_user_emails.includes(clean);
+    if (grant && exists) {
+      onToast(`${clean} já possui Pro VIP liberado!`);
+      return;
+    }
+    const nextEmails = grant
+      ? [...draft.free_user_emails, clean]
+      : draft.free_user_emails.filter((x) => x !== clean);
+    const nextCfg: PlatformSaaSConfig = {
+      ...draft,
+      free_user_emails: nextEmails,
+    };
+    setDraft(nextCfg);
+    await handleSaveConfig(
+      nextCfg,
+      grant
+        ? `Pro VIP (Grátis) liberado para ${clean}!`
+        : `${clean} removido da lista Pro VIP.`
+    );
+  };
+
   const handleAddVipEmail = async () => {
     const clean = newVipEmail.trim().toLowerCase();
     if (!clean || !clean.includes('@')) {
       onToast('Digite um e-mail válido.');
       return;
     }
-    if (draft.free_user_emails.includes(clean)) {
-      onToast('Este e-mail já está na lista VIP.');
-      return;
-    }
-    const nextCfg: PlatformSaaSConfig = {
-      ...draft,
-      free_user_emails: [...draft.free_user_emails, clean],
-    };
-    setDraft(nextCfg);
     setNewVipEmail('');
-    await handleSaveConfig(nextCfg, `E-mail ${clean} liberado como Pro VIP grátis!`);
-  };
-
-  const handleRemoveVipEmail = async (em: string) => {
-    const nextCfg: PlatformSaaSConfig = {
-      ...draft,
-      free_user_emails: draft.free_user_emails.filter((x) => x !== em),
-    };
-    setDraft(nextCfg);
-    await handleSaveConfig(nextCfg, `${em} removido da lista VIP.`);
+    await handleToggleEmailVip(clean, true);
   };
 
   const resetAdForm = () => {
@@ -248,6 +302,137 @@ export const SuperAdminView: React.FC<{
     await refreshAds();
   };
 
+  // Unifica contas vindas de auth.users + donos de bares + alertas recentes (fallback caso SQL ainda não tenha sido rodado)
+  const organizedAccounts = useMemo(() => {
+    const byId = new Map<
+      string,
+      AdminUserAccount & { ownedBars: AdminBarOverview[]; isVipEmail: boolean; isAdmin: boolean }
+    >();
+    const emailToId = new Map<string, string>();
+    const vipSet = new Set(draft.free_user_emails.map((e) => e.trim().toLowerCase()));
+
+    users.forEach((u) => {
+      const em = (u.email || '').trim().toLowerCase();
+      byId.set(u.id, {
+        ...u,
+        email: em || u.email,
+        ownedBars: [],
+        isVipEmail: Boolean(em && vipSet.has(em)),
+        isAdmin: isSuperAdmin(em),
+      });
+      if (em) emailToId.set(em, u.id);
+    });
+
+    stores.forEach((b) => {
+      const em = (b.owner_email || '').trim().toLowerCase();
+      const targetId = byId.has(b.owner) ? b.owner : (em && emailToId.get(em)) || b.owner;
+      if (!byId.has(targetId)) {
+        byId.set(targetId, {
+          id: targetId,
+          email: em || `conta-${targetId.slice(0, 8)}`,
+          display_name: null,
+          location: b.city || null,
+          created_at: b.created_at || null,
+          last_sign_in_at: null,
+          bars_count: 0,
+          member_bars_count: 0,
+          ownedBars: [],
+          isVipEmail: Boolean(em && vipSet.has(em)),
+          isAdmin: isSuperAdmin(em),
+        });
+      }
+      const acc = byId.get(targetId)!;
+      acc.ownedBars.push(b);
+      acc.bars_count = acc.ownedBars.length;
+    });
+
+    // Inclui e-mails vindos de alertas ao vivo caso ainda não estejam na lista
+    adminAlerts.forEach((al) => {
+      const em = (al.user_email || '').trim().toLowerCase();
+      if (!em || emailToId.has(em)) return;
+      const syntheticId = al.user_id || `email:${em}`;
+      if (byId.has(syntheticId)) return;
+      byId.set(syntheticId, {
+        id: syntheticId,
+        email: em,
+        display_name: null,
+        location: null,
+        created_at: al.created_at,
+        last_sign_in_at: null,
+        bars_count: 0,
+        member_bars_count: 0,
+        ownedBars: [],
+        isVipEmail: vipSet.has(em),
+        isAdmin: isSuperAdmin(em),
+      });
+      emailToId.set(em, syntheticId);
+    });
+
+    return Array.from(byId.values()).sort((a, b) => {
+      const ta = a.created_at ? new Date(a.created_at).getTime() : 0;
+      const tb = b.created_at ? new Date(b.created_at).getTime() : 0;
+      return tb - ta;
+    });
+  }, [users, stores, adminAlerts, draft.free_user_emails]);
+
+  const nowMs = Date.now();
+  const sevenDaysMs = 7 * 86400000;
+
+  const accountStats = useMemo(() => {
+    let recent = 0;
+    let withBars = 0;
+    let vipOrPro = 0;
+    organizedAccounts.forEach((acc) => {
+      if (acc.created_at && nowMs - new Date(acc.created_at).getTime() <= sevenDaysMs) recent++;
+      if (acc.ownedBars.length > 0) withBars++;
+      const hasProBar = acc.ownedBars.some(
+        (b) => getBarPlanStatus(b, acc.email, draft).effectiveTier === 'pro' || b.plan_tier === 'vip'
+      );
+      if (acc.isAdmin || acc.isVipEmail || hasProBar) vipOrPro++;
+    });
+    return {
+      total: organizedAccounts.length,
+      recent,
+      withBars,
+      noBars: organizedAccounts.length - withBars,
+      vipOrPro,
+    };
+  }, [organizedAccounts, draft, nowMs]);
+
+  const filteredAccounts = useMemo(() => {
+    const q = accountQuery.trim().toLowerCase();
+    return organizedAccounts.filter((acc) => {
+      const hasProBar = acc.ownedBars.some((b) => {
+        const st = getBarPlanStatus(b, acc.email, draft);
+        return st.effectiveTier === 'pro' || st.effectiveTier === 'vip';
+      });
+      if (accountFilter === 'recent') {
+        if (!acc.created_at || nowMs - new Date(acc.created_at).getTime() > sevenDaysMs) {
+          return false;
+        }
+      } else if (accountFilter === 'with_bars' && acc.ownedBars.length === 0) {
+        return false;
+      } else if (accountFilter === 'no_bars' && acc.ownedBars.length > 0) {
+        return false;
+      } else if (accountFilter === 'vip_pro' && !acc.isAdmin && !acc.isVipEmail && !hasProBar) {
+        return false;
+      }
+
+      if (!q) return true;
+      const matchUser =
+        (acc.email || '').toLowerCase().includes(q) ||
+        (acc.display_name || '').toLowerCase().includes(q) ||
+        (acc.location || '').toLowerCase().includes(q);
+      const matchBar = acc.ownedBars.some(
+        (b) =>
+          (b.name || '').toLowerCase().includes(q) ||
+          (b.handle || '').toLowerCase().includes(q) ||
+          (b.city || '').toLowerCase().includes(q)
+      );
+      return matchUser || matchBar;
+    });
+  }, [organizedAccounts, accountQuery, accountFilter, draft, nowMs]);
+
   // KPIs das lojas
   const storeStats = stores.reduce(
     (acc, s) => {
@@ -273,6 +458,7 @@ export const SuperAdminView: React.FC<{
     );
   });
 
+  const unreadAlerts = adminAlerts.filter((a) => !a.read);
   const adsTxtLine = buildAdsTxtLine(draft.adsense_client_id);
 
   return (
@@ -283,20 +469,148 @@ export const SuperAdminView: React.FC<{
 
       <div className="mt-3">
         <div className="text-xs text-[var(--ac)] font-semibold">Administração da Plataforma</div>
-        <h1 className="!mt-1 !mb-1">Painel SaaS · Planos & Anúncios</h1>
+        <h1 className="!mt-1 !mb-1">Painel SaaS · Contas, Bares & Anúncios</h1>
         <p className="mu text-xs">
-          Controle assinaturas, libere VIP grátis para quem você quiser, gerencie banners de parceiros e configure o Google AdSense.
+          Acompanhe todas as contas criadas, veja os bares de cada usuário, receba alertas de novos cadastros, libere Pro/VIP e gerencie anúncios.
         </p>
       </div>
+
+      {/* CONTROLE DO ALERTA DE NOVAS CONTAS */}
+      <div className="panel mt-3 flex flex-wrap items-center justify-between gap-2.5">
+        <div className="min-w-0 flex-1">
+          <div className="text-xs font-bold text-[var(--fg)]">
+            {adminAlertOn ? '🔔 Alerta de nova conta: Ativado' : '🔕 Alerta de nova conta: Desativado'}
+          </div>
+          <div className="text-[11px] text-[var(--mut)]">
+            {adminAlertOn
+              ? 'Você recebe som, aviso na tela, contador e banner sempre que uma nova conta for criada.'
+              : 'Os alertas de novos cadastros estão pausados neste aparelho (você ainda pode ver todas as contas abaixo).'}
+          </div>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          {onOpenAlertSettings && (
+            <button
+              type="button"
+              className="b g sm"
+              onClick={onOpenAlertSettings}
+            >
+              Todos os alertas
+            </button>
+          )}
+          <button
+            type="button"
+            role="switch"
+            aria-checked={adminAlertOn}
+            aria-label="Ativar ou desativar alerta de nova conta criada"
+            onClick={() => {
+              if (!adminAlertOn) {
+                if (!alertPrefs.allEnabled) {
+                  patchAlertPrefs({ allEnabled: true, adminNewAccount: true });
+                } else {
+                  setAlertPref('adminNewAccount', true);
+                }
+              } else {
+                setAlertPref('adminNewAccount', false);
+              }
+            }}
+            className={`relative inline-flex h-7 w-12 shrink-0 cursor-pointer items-center rounded-full border transition-colors ${
+              adminAlertOn
+                ? 'bg-emerald-500 border-emerald-400'
+                : 'bg-white/10 border-white/15'
+            }`}
+          >
+            <span
+              className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${
+                adminAlertOn ? 'translate-x-6' : 'translate-x-1'
+              }`}
+            />
+          </button>
+        </div>
+      </div>
+
+      {/* ALERTA DE NOVAS CONTAS CRIADAS */}
+      {adminAlertOn && unreadAlerts.length > 0 && (
+        <div className="panel mt-3 !border-emerald-400/50 bg-emerald-500/10 space-y-2.5">
+          <div className="row sp flex-wrap gap-2">
+            <div>
+              <div className="text-sm font-bold text-emerald-200">
+                🔔 {unreadAlerts.length} nova(s) conta(s) criada(s) recentemente
+              </div>
+              <div className="text-xs text-[var(--mut)]">
+                Você pode liberar Pro VIP direto por aqui ou marcar como lido.
+              </div>
+            </div>
+            {onMarkAlertsRead && (
+              <button
+                type="button"
+                className="b g sm"
+                onClick={() => void onMarkAlertsRead()}
+              >
+                Marcar tudo como lido
+              </button>
+            )}
+          </div>
+
+          <div className="space-y-1.5">
+            {unreadAlerts.slice(0, 6).map((al) => {
+              const em = (al.user_email || '').trim().toLowerCase();
+              const alreadyVip = Boolean(em && draft.free_user_emails.includes(em));
+              return (
+                <div
+                  key={al.id}
+                  className="rounded-xl bg-black/25 border border-white/10 px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-xs"
+                >
+                  <div className="min-w-0">
+                    <div className="font-bold text-[var(--fg)] truncate">
+                      {em || al.title}
+                    </div>
+                    <div className="text-[var(--mut)]">
+                      {al.message || 'Nova conta cadastrada'} · {fmtDateTime(al.created_at)}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    {em && !isSuperAdmin(em) && (
+                      <button
+                        type="button"
+                        className={`b sm ${alreadyVip ? 'g' : 'ok'}`}
+                        disabled={savingCfg}
+                        onClick={() => void handleToggleEmailVip(em, !alreadyVip)}
+                      >
+                        {alreadyVip ? 'VIP Ativo' : 'Liberar VIP'}
+                      </button>
+                    )}
+                    {onMarkAlertsRead && (
+                      <button
+                        type="button"
+                        className="b g sm"
+                        onClick={() => void onMarkAlertsRead([al.id])}
+                      >
+                        OK
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Navegação por abas */}
       <div className="chips !flex-wrap !overflow-visible mt-3 mb-3">
         <button
           type="button"
+          className={`chip ${tab === 'accounts' ? 'on' : ''}`}
+          onClick={() => setTab('accounts')}
+        >
+          Contas & Bares ({accountStats.total})
+        </button>
+        <button
+          type="button"
           className={`chip ${tab === 'stores' ? 'on' : ''}`}
           onClick={() => setTab('stores')}
         >
-          Lojas & Planos ({storeStats.total})
+          Todos os Bares ({storeStats.total})
         </button>
         <button
           type="button"
@@ -321,7 +635,276 @@ export const SuperAdminView: React.FC<{
         </button>
       </div>
 
-      {/* ABA 1: LOJAS & LIBERAÇÃO FREEMIUM / VIP */}
+      {/* ABA 1: CONTAS CRIADAS + BARES DE CADA CONTA */}
+      {tab === 'accounts' && (
+        <div className="space-y-3">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            <div className="panel !m-0 !p-3">
+              <div className="text-[11px] text-[var(--mut)]">Contas criadas</div>
+              <div className="text-xl font-bold tabular-nums mt-0.5">{accountStats.total}</div>
+            </div>
+            <div className="panel !m-0 !p-3">
+              <div className="text-[11px] text-[var(--mut)]">Novas (7 dias)</div>
+              <div className="text-xl font-bold tabular-nums text-[var(--ok)] mt-0.5">
+                {accountStats.recent}
+              </div>
+            </div>
+            <div className="panel !m-0 !p-3">
+              <div className="text-[11px] text-[var(--mut)]">Com bar criado</div>
+              <div className="text-xl font-bold tabular-nums mt-0.5">{accountStats.withBars}</div>
+            </div>
+            <div className="panel !m-0 !p-3">
+              <div className="text-[11px] text-[var(--mut)]">Contas VIP / Pro</div>
+              <div className="text-xl font-bold tabular-nums text-[var(--ac)] mt-0.5">
+                {accountStats.vipOrPro}
+              </div>
+            </div>
+          </div>
+
+          {/* Atalho rápido para liberar qualquer e-mail manualmente */}
+          <div className="panel">
+            <h2 className="!mt-0">Liberar Pro VIP Grátis por E-mail</h2>
+            <p className="mu text-xs">
+              Libere o Plano Pro gratuito para qualquer pessoa mesmo antes de ela criar um bar. Todas as lojas dela já nascem Pro e sem anúncios.
+            </p>
+            <div className="row mt-2">
+              <input
+                type="email"
+                value={newVipEmail}
+                onChange={(e) => setNewVipEmail(e.target.value)}
+                placeholder="email.da.pessoa@gmail.com"
+                className="grow"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void handleAddVipEmail();
+                }}
+              />
+              <button
+                type="button"
+                className="b sm shrink-0"
+                disabled={savingCfg}
+                onClick={() => void handleAddVipEmail()}
+              >
+                Liberar VIP
+              </button>
+            </div>
+          </div>
+
+          {/* Diretório organizado de Contas + seus Bares */}
+          <div className="panel">
+            <div className="row sp flex-wrap gap-2">
+              <h2 className="!m-0">Todas as Contas & Bares dos Usuários</h2>
+              <button
+                type="button"
+                className="b g sm"
+                onClick={() => void refreshDirectory()}
+              >
+                Atualizar
+              </button>
+            </div>
+
+            {(usersErr || storesErr) && (
+              <p className="warn-txt text-xs mt-2">
+                Execute o arquivo <b>supabase/schema_completo.sql</b> atualizado no SQL Editor do Supabase para listar todas as contas cadastradas (inclusive quem ainda não criou bar) e ativar os alertas automáticos no banco.
+              </p>
+            )}
+
+            <input
+              type="search"
+              value={accountQuery}
+              onChange={(e) => setAccountQuery(e.target.value)}
+              placeholder="Buscar por e-mail, nome da pessoa, cidade ou nome do bar..."
+              className="mt-2.5"
+            />
+
+            <div className="flex flex-wrap gap-1.5 mt-2.5">
+              {(
+                [
+                  { id: 'all', label: `Todas (${accountStats.total})` },
+                  { id: 'recent', label: `Novas 7d (${accountStats.recent})` },
+                  { id: 'with_bars', label: `Com bar (${accountStats.withBars})` },
+                  { id: 'no_bars', label: `Sem bar (${accountStats.noBars})` },
+                  { id: 'vip_pro', label: `VIP / Pro (${accountStats.vipOrPro})` },
+                ] as { id: AccountFilter; label: string }[]
+              ).map((f) => (
+                <button
+                  key={f.id}
+                  type="button"
+                  onClick={() => setAccountFilter(f.id)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold border cursor-pointer transition-colors ${
+                    accountFilter === f.id
+                      ? 'bg-[var(--ac)] text-[#120d0c] border-transparent'
+                      : 'bg-black/20 text-[var(--mut)] border-white/10 hover:text-[var(--fg)]'
+                  }`}
+                >
+                  {f.label}
+                </button>
+              ))}
+            </div>
+
+            {loadingDirectory ? (
+              <p className="mu mt-3 text-xs">Carregando contas e bares…</p>
+            ) : filteredAccounts.length === 0 ? (
+              <p className="mu mt-3 text-xs">Nenhuma conta encontrada com esse filtro.</p>
+            ) : (
+              <div className="space-y-3 mt-3">
+                {filteredAccounts.map((acc) => {
+                  const isNewAccount =
+                    Boolean(acc.created_at) &&
+                    nowMs - new Date(acc.created_at!).getTime() <= 48 * 3600000;
+                  const canToggleEmail = Boolean(acc.email && acc.email.includes('@') && !acc.isAdmin);
+                  return (
+                    <div
+                      key={acc.id}
+                      className="rounded-2xl border border-white/12 bg-black/20 p-3.5 space-y-2.5"
+                    >
+                      {/* Cabeçalho da Conta */}
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-bold text-sm text-[var(--fg)]">
+                              {acc.display_name || (acc.email || '').split('@')[0] || 'Usuário'}
+                            </span>
+                            {isNewAccount && (
+                              <span className="text-[11px] font-semibold text-emerald-300">
+                                · Nova conta
+                              </span>
+                            )}
+                            {acc.isAdmin && (
+                              <span className="text-[11px] font-semibold text-[var(--ac)]">
+                                · Admin
+                              </span>
+                            )}
+                            {!acc.isAdmin && acc.isVipEmail && (
+                              <span className="text-[11px] font-semibold text-[var(--ok)]">
+                                · Pro VIP (Conta liberada)
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-xs text-[var(--fg)]/80 break-all mt-0.5">
+                            {acc.email}
+                          </div>
+                          <div className="text-[11px] text-[var(--mut)] mt-0.5 tabular-nums">
+                            Criada em {fmtDateTime(acc.created_at)}
+                            {acc.last_sign_in_at
+                              ? ` · Último acesso ${fmtDateTime(acc.last_sign_in_at)}`
+                              : ''}
+                            {acc.location ? ` · ${acc.location}` : ''}
+                          </div>
+                        </div>
+
+                        {canToggleEmail && (
+                          <button
+                            type="button"
+                            className={`b sm shrink-0 ${acc.isVipEmail ? 'g' : 'ok'}`}
+                            disabled={savingCfg}
+                            onClick={() => void handleToggleEmailVip(acc.email, !acc.isVipEmail)}
+                          >
+                            {acc.isVipEmail ? 'Remover VIP da conta' : 'Liberar Pro VIP (Grátis)'}
+                          </button>
+                        )}
+                      </div>
+
+                      {/* Bares pertencentes a esta conta */}
+                      <div className="pt-2 border-t border-white/10">
+                        {acc.ownedBars.length === 0 ? (
+                          <div className="text-xs text-[var(--mut)]">
+                            Nenhum bar criado por esta conta ainda
+                            {acc.member_bars_count && acc.member_bars_count > 0
+                              ? ` (atua como equipe em ${acc.member_bars_count} bar(es))`
+                              : '.'}
+                          </div>
+                        ) : (
+                          <div className="space-y-2">
+                            <div className="text-[11px] font-semibold text-[var(--mut)]">
+                              Bares criados por esta conta ({acc.ownedBars.length})
+                            </div>
+                            {acc.ownedBars.map((b) => {
+                              const bStatus = getBarPlanStatus(b, acc.email, draft);
+                              const isBusy = busyBarId === b.id;
+                              return (
+                                <div
+                                  key={b.id}
+                                  className="rounded-xl border border-white/10 bg-black/25 p-2.5 space-y-2"
+                                >
+                                  <div className="flex flex-wrap items-center justify-between gap-2">
+                                    <div className="min-w-0">
+                                      <div className="text-xs font-bold text-[var(--fg)]">
+                                        {b.name}
+                                        {b.handle ? (
+                                          <span className="font-normal text-[var(--mut)]">
+                                            {' '}
+                                            @{b.handle}
+                                          </span>
+                                        ) : null}
+                                      </div>
+                                      <div className="text-[11px] text-[var(--mut)] tabular-nums">
+                                        {b.city || 'Sem cidade'}
+                                        {typeof b.orders_count === 'number'
+                                          ? ` · ${b.orders_count} pedido(s)`
+                                          : ''}
+                                        {typeof b.items_count === 'number'
+                                          ? ` · ${b.items_count} item(ns) no estoque`
+                                          : ''}
+                                      </div>
+                                    </div>
+                                    <div className="text-xs font-semibold tabular-nums text-[var(--ac)]">
+                                      {bStatus.label}
+                                      {bStatus.expiresAt && bStatus.effectiveTier === 'pro'
+                                        ? ` · até ${new Date(bStatus.expiresAt).toLocaleDateString('pt-BR')}`
+                                        : ''}
+                                    </div>
+                                  </div>
+
+                                  <div className="flex flex-wrap gap-1.5">
+                                    <button
+                                      type="button"
+                                      className="b sm !text-[11px] !py-1"
+                                      disabled={isBusy}
+                                      onClick={() => void handleSetPlan(b.id, 'vip', null)}
+                                    >
+                                      Bar VIP
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="b ok sm !text-[11px] !py-1"
+                                      disabled={isBusy}
+                                      onClick={() => void handleSetPlan(b.id, 'pro', 30)}
+                                    >
+                                      Pro +30d
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="b ok sm !text-[11px] !py-1"
+                                      disabled={isBusy}
+                                      onClick={() => void handleSetPlan(b.id, 'pro', 365)}
+                                    >
+                                      Pro +1 ano
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="b g sm !text-[11px] !py-1"
+                                      disabled={isBusy}
+                                      onClick={() => void handleSetPlan(b.id, 'free', null)}
+                                    >
+                                      Grátis
+                                    </button>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ABA 2: TODOS OS BARES (VISÃO POR LOJA) */}
       {tab === 'stores' && (
         <div className="space-y-3">
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
@@ -349,68 +932,17 @@ export const SuperAdminView: React.FC<{
             </div>
           </div>
 
-          {/* Liberação por e-mail VIP */}
-          <div className="panel">
-            <h2 className="!mt-0">Liberar Pro Grátis por E-mail (VIP)</h2>
-            <p className="mu text-xs">
-              Qualquer pessoa adicionada aqui terá acesso completo ao Plano Pro e zero anúncios em todos os bares que criar ou gerenciar.
-            </p>
-            <div className="row mt-2">
-              <input
-                type="email"
-                value={newVipEmail}
-                onChange={(e) => setNewVipEmail(e.target.value)}
-                placeholder="email.da.pessoa@gmail.com"
-                className="grow"
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') void handleAddVipEmail();
-                }}
-              />
-              <button
-                type="button"
-                className="b sm shrink-0"
-                disabled={savingCfg}
-                onClick={() => void handleAddVipEmail()}
-              >
-                Liberar VIP
-              </button>
-            </div>
-            {draft.free_user_emails.length > 0 && (
-              <div className="list mt-3">
-                {draft.free_user_emails.map((em) => (
-                  <div key={em}>
-                    <span className="text-sm font-medium">{em}</span>
-                    <button
-                      type="button"
-                      className="b g sm"
-                      onClick={() => void handleRemoveVipEmail(em)}
-                    >
-                      Remover
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* Lista de todas as lojas */}
           <div className="panel">
             <div className="row sp flex-wrap gap-2">
               <h2 className="!m-0">Bares cadastrados</h2>
               <button
                 type="button"
                 className="b g sm"
-                onClick={() => void refreshStores()}
+                onClick={() => void refreshDirectory()}
               >
                 Atualizar lista
               </button>
             </div>
-
-            {storesErr && (
-              <p className="warn-txt text-xs mt-2">
-                Aviso: execute o arquivo <b>supabase/schema_completo.sql</b> atualizado no SQL Editor do Supabase para habilitar a listagem global com e-mail dos donos ({storesErr}).
-              </p>
-            )}
 
             <input
               type="search"
@@ -420,7 +952,7 @@ export const SuperAdminView: React.FC<{
               className="mt-2.5"
             />
 
-            {storesLoading ? (
+            {loadingDirectory ? (
               <p className="mu mt-3 text-xs">Carregando lojas…</p>
             ) : filteredStores.length === 0 ? (
               <p className="mu mt-3 text-xs">Nenhuma loja encontrada.</p>
@@ -510,7 +1042,7 @@ export const SuperAdminView: React.FC<{
         </div>
       )}
 
-      {/* ABA 2: BANNERS DE PARCEIROS */}
+      {/* ABA 3: BANNERS DE PARCEIROS */}
       {tab === 'partners' && (
         <div className="space-y-3">
           <div className="panel">
@@ -705,7 +1237,7 @@ export const SuperAdminView: React.FC<{
         </div>
       )}
 
-      {/* ABA 3: GOOGLE ADSENSE */}
+      {/* ABA 4: GOOGLE ADSENSE */}
       {tab === 'adsense' && (
         <div className="space-y-3">
           <div className="panel">
@@ -827,7 +1359,7 @@ export const SuperAdminView: React.FC<{
         </div>
       )}
 
-      {/* ABA 4: PREÇOS & VENDAS */}
+      {/* ABA 5: PREÇOS & VENDAS */}
       {tab === 'sales' && (
         <div className="panel space-y-2">
           <h2 className="!mt-0">Preços, Trial & Links de Venda</h2>

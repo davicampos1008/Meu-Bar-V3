@@ -5,6 +5,7 @@ import type { Bar, BarEntry, JobPost, StaffProfile, UserCoords } from '../types/
 import { PWAInstallButton } from './PWAControls';
 import { BrandMark, ImageUploader, LocationPicker } from './SharedUI';
 
+import { broadcastNewUserSignup } from '../lib/saas';
 import { AdSlot } from './AdSlot';
 import type { PartnerAdBanner, PlatformSaaSConfig } from '../types/meubar';
 
@@ -62,6 +63,8 @@ export const LoginScreen: React.FC<{
       setMsg(formatAuthError(r.error.message));
       return;
     }
+
+    void broadcastNewUserSignup(em);
 
     if (!r.data.session) {
       const loginTry = await sb.auth.signInWithPassword({ email: em, password });

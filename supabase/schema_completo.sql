@@ -953,6 +953,82 @@ create trigger trg_protect_bar_plan_columns
 before insert or update on public.bars
 for each row execute function public.protect_bar_plan_columns();
 
+create table if not exists public.admin_notifications (
+  id uuid primary key default gen_random_uuid(),
+  kind text not null default 'new_user',
+  title text not null,
+  message text,
+  user_id uuid,
+  user_email text,
+  read boolean not null default false,
+  created_at timestamptz not null default now()
+);
+
+alter table public.admin_notifications enable row level security;
+drop policy if exists admin_notifications_admin_only on public.admin_notifications;
+create policy admin_notifications_admin_only on public.admin_notifications for all
+  using (public.is_platform_admin())
+  with check (public.is_platform_admin());
+
+do $$ begin
+  alter publication supabase_realtime add table public.admin_notifications;
+exception when others then null;
+end $$;
+
+create or replace function public.notify_admin_new_user()
+returns trigger
+language plpgsql
+security definer
+set search_path = public, auth
+as $$
+begin
+  insert into public.admin_notifications(kind, title, message, user_id, user_email, read)
+  values (
+    'new_user',
+    'Nova conta criada',
+    coalesce(new.email, 'Novo usuário') || ' acabou de criar conta no Meu Bar.',
+    new.id,
+    new.email,
+    false
+  );
+  return new;
+exception when others then
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_notify_admin_new_user on auth.users;
+create trigger trg_notify_admin_new_user
+after insert on auth.users
+for each row execute function public.notify_admin_new_user();
+
+create or replace function public.admin_list_users() returns json
+language plpgsql security definer set search_path = public, auth as $$
+begin
+  if not public.is_platform_admin() then
+    raise exception 'Acesso restrito ao administrador da plataforma.';
+  end if;
+  return coalesce((
+    select json_agg(row_to_json(t))
+    from (
+      select
+        u.id,
+        u.email,
+        sp.display_name,
+        sp.location,
+        u.created_at,
+        u.last_sign_in_at,
+        (select count(*) from public.bars b where b.owner = u.id)::int as bars_count,
+        (select count(*) from public.bar_members bm where bm.user_id = u.id)::int as member_bars_count
+      from auth.users u
+      left join public.staff_profiles sp on sp.user_id = u.id
+      order by u.created_at desc
+      limit 500
+    ) t
+  ), '[]'::json);
+end $$;
+grant execute on function public.admin_list_users() to authenticated;
+
 -- Opcional (para testar sem confirmar e-mail):
 -- Confirma usuários pendentes e cria gatilho para confirmar novos cadastros automaticamente.
 -- Além disso, recomendamos desligar "Confirm email" em:

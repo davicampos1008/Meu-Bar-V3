@@ -1,6 +1,7 @@
 import type { RealtimeChannel, User } from '@supabase/supabase-js';
 import { useEffect, useRef, useState } from 'react';
 import { AdSlot } from './components/AdSlot';
+import { AlertSettingsView } from './components/AlertSettingsView';
 import { LoginScreen, OnboardingScreen } from './components/AuthAndOnboarding';
 import {
   MoreView,
@@ -33,6 +34,13 @@ import { OfflineIndicator, PWAInstallButton } from './components/PWAControls';
 import { BrandMark } from './components/SharedUI';
 import { SuperAdminView } from './components/SuperAdminView';
 import {
+  canShowToast,
+  getAlertPrefsSummary,
+  isAlertEnabled,
+  useAlertPrefs,
+  type AlertCategoryKey,
+} from './lib/alertPrefs';
+import {
   flushOfflineOrders,
   loadOpenTableCalls,
   playStationAlert,
@@ -45,12 +53,15 @@ import {
   getCachedPartnerAds,
   getCachedPlatformConfig,
   isSuperAdmin,
+  loadAdminNotifications,
   loadPartnerAds,
   loadPlatformConfig,
+  markAdminNotificationsRead,
 } from './lib/saas';
 import { broadcastMenuUpdate, sb } from './lib/supabase';
 import { applyBarTheme, getUnpricedAvailableDrinks, norm } from './lib/utils';
 import type {
+  AdminAlertItem,
   Bar,
   BarEntry,
   BarItem,
@@ -117,11 +128,15 @@ export default function App() {
   const [createDrinkMode, setCreateDrinkMode] = useState<null | boolean>(null);
   const [standaloneModal, setStandaloneModal] = useState<null | 'jobs' | 'profile'>(null);
   const [legalModal, setLegalModal] = useState<null | 'terms' | 'privacy'>(null);
-  const [seekerOverlay, setSeekerOverlay] = useState<null | 'superadmin' | 'plans'>(null);
+  const [seekerOverlay, setSeekerOverlay] = useState<null | 'superadmin' | 'plans' | 'alerts'>(null);
 
   // SaaS Planos & Anúncios
   const [saasConfig, setSaasConfig] = useState<PlatformSaaSConfig>(() => getCachedPlatformConfig());
   const [partnerAds, setPartnerAds] = useState<PartnerAdBanner[]>(() => getCachedPartnerAds());
+  const [adminAlerts, setAdminAlerts] = useState<AdminAlertItem[]>([]);
+  const { prefs: alertPrefs } = useAlertPrefs();
+  const alertPrefsRef = useRef(alertPrefs);
+  alertPrefsRef.current = alertPrefs;
 
   const subRef = useRef<RealtimeChannel | null>(null);
   const activeBarIdRef = useRef<string | null>(null);
@@ -193,7 +208,8 @@ export default function App() {
     return inserted.length > 0 ? dedupeRecipes([...cleanCurrent, ...inserted]) : cleanCurrent;
   };
 
-  const showToast = (t: string) => {
+  const showToast = (t: string, category?: AlertCategoryKey) => {
+    if (!canShowToast(category, alertPrefsRef.current)) return;
     setToastMsg(t);
     setTimeout(() => setToastMsg((prev) => (prev === t ? '' : prev)), 2500);
   };
@@ -530,6 +546,75 @@ export default function App() {
     };
   }, [isMenuRoute]);
 
+  // Alertas em tempo real para o Super Admin quando uma nova conta é criada
+  useEffect(() => {
+    if (isMenuRoute || !user || !isSuperAdmin(user.email)) {
+      setAdminAlerts([]);
+      return;
+    }
+
+    let mounted = true;
+    void loadAdminNotifications().then((list) => {
+      if (!mounted) return;
+      setAdminAlerts(list);
+      const unreadCount = list.filter((a) => !a.read).length;
+      if (unreadCount > 0 && isAlertEnabled('adminNewAccount', alertPrefsRef.current)) {
+        showToast(
+          `🔔 ${unreadCount} nova(s) conta(s) criada(s) no Meu Bar!`,
+          'adminNewAccount'
+        );
+      }
+    });
+
+    const handleIncomingAlert = (incoming: AdminAlertItem) => {
+      if (!mounted || !incoming) return;
+      setAdminAlerts((prev) => {
+        if (
+          prev.some(
+            (x) =>
+              x.id === incoming.id ||
+              (incoming.user_email &&
+                x.user_email === incoming.user_email &&
+                Math.abs(
+                  new Date(x.created_at).getTime() - new Date(incoming.created_at).getTime()
+                ) < 15000)
+          )
+        ) {
+          return prev;
+        }
+        if (isAlertEnabled('adminNewAccount', alertPrefsRef.current)) {
+          playStationAlert('garcom', 'adminNewAccount');
+          showToast(
+            `🆕 Nova conta criada: ${incoming.user_email || incoming.title}!`,
+            'adminNewAccount'
+          );
+        }
+        return [incoming, ...prev].slice(0, 40);
+      });
+    };
+
+    const adminCh = sb
+      .channel('platform-admin-alerts')
+      .on('broadcast', { event: 'new_user' }, (msg) => {
+        const payload = msg?.payload as AdminAlertItem | undefined;
+        if (payload) handleIncomingAlert(payload);
+      })
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'admin_notifications' },
+        (p) => {
+          const row = p.new as AdminAlertItem | undefined;
+          if (row) handleIncomingAlert(row);
+        }
+      )
+      .subscribe();
+
+    return () => {
+      mounted = false;
+      void sb.removeChannel(adminCh);
+    };
+  }, [isMenuRoute, user?.id, user?.email]);
+
   useEffect(() => {
     if (isMenuRoute || !user) return;
     if (!activeBar || screenMode === 'seeker') {
@@ -553,12 +638,12 @@ export default function App() {
         },
         (p) => {
           if (p.eventType === 'INSERT') {
-            playStationAlert(role === 'cozinha' ? 'cozinha' : 'bar');
+            playStationAlert(role === 'cozinha' ? 'cozinha' : 'bar', 'newOrders');
           } else if (
             p.eventType === 'UPDATE' &&
             (p.new as Order | undefined)?.status === 'ready'
           ) {
-            playStationAlert('garcom');
+            playStationAlert('garcom', 'orderReady');
           }
           void refreshOrders(activeBar.id);
         }
@@ -589,7 +674,10 @@ export default function App() {
     const syncOffline = async () => {
       const sentCount = await flushOfflineOrders(activeBar.id);
       if (sentCount > 0) {
-        showToast(`${sentCount} pedido(s) offline sincronizado(s) automaticamente!`);
+        showToast(
+          `${sentCount} pedido(s) offline sincronizado(s) automaticamente!`,
+          'offlineSync'
+        );
         void refreshOrders(activeBar.id);
       }
     };
@@ -604,12 +692,15 @@ export default function App() {
       .on('broadcast', { event: 'table_call' }, (msg) => {
         const incoming = msg?.payload as TableCallAlert | undefined;
         if (!incoming || !incoming.id) return;
-        playStationAlert('garcom');
-        showToast(
-          incoming.kind === 'bill'
-            ? `🧾 ${incoming.table_label || incoming.client_name} pediu a conta${incoming.note ? ` (${incoming.note})` : ''}!`
-            : `🙋 ${incoming.table_label || incoming.client_name} chamou o garçom!`
-        );
+        if (isAlertEnabled('tableCalls', alertPrefsRef.current)) {
+          playStationAlert('garcom', 'tableCalls');
+          showToast(
+            incoming.kind === 'bill'
+              ? `🧾 ${incoming.table_label || incoming.client_name} pediu a conta${incoming.note ? ` (${incoming.note})` : ''}!`
+              : `🙋 ${incoming.table_label || incoming.client_name} chamou o garçom!`,
+            'tableCalls'
+          );
+        }
         setTableCalls((prev) =>
           prev.some((x) => x.id === incoming.id) ? prev : [incoming, ...prev]
         );
@@ -628,13 +719,14 @@ export default function App() {
           filter: 'bar_id=eq.' + activeBar.id,
         },
         (p) => {
-          if (p.eventType === 'INSERT') {
+          if (p.eventType === 'INSERT' && isAlertEnabled('tableCalls', alertPrefsRef.current)) {
             const c = p.new as TableCallAlert;
-            playStationAlert('garcom');
+            playStationAlert('garcom', 'tableCalls');
             showToast(
               c.kind === 'bill'
                 ? `🧾 ${c.table_label || c.client_name} pediu a conta!`
-                : `🙋 ${c.table_label || c.client_name} chamou o garçom!`
+                : `🙋 ${c.table_label || c.client_name} chamou o garçom!`,
+              'tableCalls'
             );
           }
           void loadOpenTableCalls(activeBar.id).then((list) => setTableCalls(list));
@@ -797,6 +889,7 @@ export default function App() {
               'management',
               'plans',
               'superadmin',
+              'alerts',
             ].includes(st.tab)
           ) {
             setTab('more');
@@ -930,7 +1023,19 @@ export default function App() {
     : 0;
   const actorName = profile.display_name || user.email?.split('@')[0] || 'Equipe';
   const isPlatformAdmin = isSuperAdmin(user.email);
+  const adminNewAccountAlertOn = isAlertEnabled('adminNewAccount', alertPrefs);
+  const unreadAdminAlerts = adminNewAccountAlertOn
+    ? adminAlerts.filter((a) => !a.read).length
+    : 0;
+  const visibleTableCalls = isAlertEnabled('tableCalls', alertPrefs) ? tableCalls : [];
+  const seekerAlertSummary = getAlertPrefsSummary(alertPrefs, isPlatformAdmin);
   const planStatus = getBarPlanStatus(activeBar, user.email, saasConfig);
+  const handleMarkAdminAlertsRead = async (ids?: string[]) => {
+    setAdminAlerts((prev) =>
+      prev.map((a) => (!ids || ids.includes(a.id) ? { ...a, read: true } : a))
+    );
+    await markAdminNotificationsRead(ids);
+  };
   const supportWhatsAppHref = buildWhatsAppLink(
     saasConfig.support_whatsapp,
     `Olá! Preciso de ajuda no Meu Bar${activeBar ? ` (${activeBar.name})` : ''}.`
@@ -988,9 +1093,17 @@ export default function App() {
                   className="bar-switcher-pill"
                   onClick={() => setSeekerOverlay('superadmin')}
                 >
-                  👑 Admin
+                  👑 Admin{unreadAdminAlerts > 0 ? ` (${unreadAdminAlerts})` : ''}
                 </button>
               )}
+              <button
+                type="button"
+                className="bar-switcher-pill"
+                title="Configurar alertas do app"
+                onClick={() => setSeekerOverlay('alerts')}
+              >
+                {seekerAlertSummary.isMuted ? '🔕' : '🔔'}
+              </button>
               <PWAInstallButton variant="pill" />
               <button
                 type="button"
@@ -1255,7 +1368,7 @@ export default function App() {
                 items={items}
                 prices={prices}
                 tableTabs={tableTabs}
-                tableCalls={tableCalls}
+                tableCalls={visibleTableCalls}
                 defaultStation={queueStation}
                 onItemsChange={setItems}
                 onResolveCall={async (callId) => {
@@ -1316,7 +1429,7 @@ export default function App() {
                   actorName={actorName}
                   orders={orders}
                   tableTabs={tableTabs}
-                  tableCalls={tableCalls}
+                  tableCalls={visibleTableCalls}
                   recipes={recipes}
                   items={items}
                   prices={prices}
@@ -1409,10 +1522,20 @@ export default function App() {
               <SuperAdminView
                 userId={user.id}
                 config={saasConfig}
+                adminAlerts={adminAlerts}
+                onMarkAlertsRead={handleMarkAdminAlertsRead}
+                onOpenAlertSettings={() => setTab('alerts')}
                 onConfigUpdated={setSaasConfig}
                 onAdsUpdated={setPartnerAds}
                 onBack={() => setTab('more')}
                 onToast={showToast}
+              />
+            )}
+
+            {tab === 'alerts' && (
+              <AlertSettingsView
+                isPlatformAdmin={isPlatformAdmin}
+                onBack={() => setTab('more')}
               />
             )}
 
@@ -1507,6 +1630,7 @@ export default function App() {
                   planLabel={planStatus.label}
                   isProPlan={planStatus.isPro}
                   isPlatformAdmin={isPlatformAdmin}
+                  unreadAdminAlerts={unreadAdminAlerts}
                   supportWhatsAppHref={supportWhatsAppHref}
                   onBarUpdated={(updated) => {
                     setActiveBar(updated);
@@ -1536,6 +1660,7 @@ export default function App() {
                     setTab('management');
                   }}
                   onOpenSwitchBar={() => setShowSwitchBar(true)}
+                  onOpenAlertSettings={() => setTab('alerts')}
                   onOpenPlans={() => setTab('plans')}
                   onOpenSuperAdmin={() => setTab('superadmin')}
                   onOpenLegal={(t) => setLegalModal(t)}
@@ -1748,10 +1873,24 @@ export default function App() {
             <SuperAdminView
               userId={user.id}
               config={saasConfig}
+              adminAlerts={adminAlerts}
+              onMarkAlertsRead={handleMarkAdminAlertsRead}
+              onOpenAlertSettings={() => setSeekerOverlay('alerts')}
               onConfigUpdated={setSaasConfig}
               onAdsUpdated={setPartnerAds}
               onBack={() => setSeekerOverlay(null)}
               onToast={showToast}
+            />
+          </div>
+        </div>
+      )}
+
+      {seekerOverlay === 'alerts' && (
+        <div className="ov">
+          <div className="w">
+            <AlertSettingsView
+              isPlatformAdmin={isPlatformAdmin}
+              onBack={() => setSeekerOverlay(null)}
             />
           </div>
         </div>

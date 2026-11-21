@@ -373,6 +373,28 @@ export interface AdminBarOverview {
   items_count?: number;
 }
 
+export interface AdminUserAccount {
+  id: string;
+  email: string;
+  display_name?: string | null;
+  location?: string | null;
+  created_at?: string | null;
+  last_sign_in_at?: string | null;
+  bars_count?: number;
+  member_bars_count?: number;
+}
+
+export interface AdminAlertItem {
+  id: string;
+  kind: 'new_user' | 'new_bar' | string;
+  title: string;
+  message?: string | null;
+  user_id?: string | null;
+  user_email?: string | null;
+  read: boolean;
+  created_at: string;
+}
+
 export interface Bar {
   id: string;
   owner: string;

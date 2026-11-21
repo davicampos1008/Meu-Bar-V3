@@ -1,5 +1,7 @@
 import type {
+  AdminAlertItem,
   AdminBarOverview,
+  AdminUserAccount,
   Bar,
   BarPlanTier,
   PartnerAdBanner,
@@ -375,6 +377,81 @@ export async function adminUpdateBarPlan(
     .eq('id', barId);
   if (!up.error) return { ok: true };
   return { ok: false, error: rpc.error.message };
+}
+
+export async function adminListUsers(): Promise<{
+  users: AdminUserAccount[];
+  error?: string;
+}> {
+  const rpc = await sb.rpc('admin_list_users');
+  if (!rpc.error && Array.isArray(rpc.data)) {
+    return { users: rpc.data as AdminUserAccount[] };
+  }
+  return { users: [], error: rpc.error?.message };
+}
+
+export async function loadAdminNotifications(): Promise<AdminAlertItem[]> {
+  try {
+    const res = await sb
+      .from('admin_notifications')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(40);
+    if (!res.error && Array.isArray(res.data)) {
+      return res.data as AdminAlertItem[];
+    }
+  } catch {
+    // ignore before SQL migration
+  }
+  return [];
+}
+
+export async function markAdminNotificationsRead(ids?: string[]): Promise<void> {
+  try {
+    if (ids && ids.length > 0) {
+      await sb.from('admin_notifications').update({ read: true }).in('id', ids);
+    } else {
+      await sb.from('admin_notifications').update({ read: true }).eq('read', false);
+    }
+  } catch {
+    // ignore
+  }
+}
+
+export async function broadcastNewUserSignup(email: string): Promise<void> {
+  const cleanEmail = (email || '').trim().toLowerCase();
+  if (!cleanEmail) return;
+  try {
+    const ch = sb.channel('platform-admin-alerts');
+    await new Promise<void>((resolve) => {
+      const timeout = setTimeout(resolve, 900);
+      ch.subscribe((status) => {
+        if (status === 'SUBSCRIBED') {
+          clearTimeout(timeout);
+          void ch
+            .send({
+              type: 'broadcast',
+              event: 'new_user',
+              payload: {
+                id: `local-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                kind: 'new_user',
+                title: 'Nova conta criada',
+                message: `${cleanEmail} acabou de criar conta no Meu Bar`,
+                user_email: cleanEmail,
+                read: false,
+                created_at: new Date().toISOString(),
+              } satisfies AdminAlertItem,
+            })
+            .finally(() => {
+              setTimeout(() => void sb.removeChannel(ch), 300);
+              resolve();
+            });
+        }
+      });
+    });
+  } catch {
+    // ignore broadcast issues
+  }
 }
 
 let adsenseInjectedClient = '';

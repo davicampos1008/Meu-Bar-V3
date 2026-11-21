@@ -13,6 +13,7 @@ import type {
   StoreProfilePreset,
   UserCoords,
 } from '../types/meubar';
+import { canPlayAlertSound, type AlertCategoryKey } from './alertPrefs';
 import { AVULSO_CATS, PETISCO_CATS, PLACES_CATALOG, QR_DESIGN_TEMPLATES } from './catalog';
 
 export const money = (v: number | null | undefined): string =>
@@ -618,7 +619,8 @@ export function formatShakers(raw: number[] | number | null | undefined): string
   return list.map((s) => `${s} ml`).join(', ');
 }
 
-export function beep(freq = 740, duration = 0.45): void {
+export function beep(freq = 740, duration = 0.45, category?: AlertCategoryKey): void {
+  if (!canPlayAlertSound(category)) return;
   try {
     const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
     const c = new AudioCtx();
