@@ -1049,18 +1049,6 @@ export const QrModal: React.FC<{
                   </p>
                 )}
                 <div className="row mt-2 flex-wrap">
-                  {missingNamesForPriced.length > 0 && onItemsChange && (
-                    <button
-                      type="button"
-                      className="b sm ok"
-                      disabled={addingStock}
-                      onClick={() => void handleAddMissingFromQr()}
-                    >
-                      {addingStock
-                        ? 'Adicionando...'
-                        : `+ Colocar faltantes no Estoque (${missingNamesForPriced.slice(0, 2).join(', ')})`}
-                    </button>
-                  )}
                   {!isHome && onGoPrices && (
                     <button
                       type="button"

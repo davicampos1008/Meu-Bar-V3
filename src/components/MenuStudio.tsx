@@ -33,8 +33,10 @@ import {
   getActiveStoreProfileId,
   getBarMenuDesign,
   getBarPromotions,
+  getContrastingTextColor,
   getMenuPresets,
   getQrDesigns,
+  getStoredUiThemeMode,
   getStoreProfileConfig,
   getStoreProfiles,
   getUnpricedAvailableDrinks,
@@ -409,7 +411,7 @@ export const StoreStudioView: React.FC<{
         qr_designs: nextQrDesigns,
         active_qr_design: nextActiveQrDesign,
       };
-      applyBarTheme(normalized);
+      applyBarTheme(normalized, getStoredUiThemeMode());
       onBarUpdated(normalized);
       void broadcastMenuUpdate(bar.id, normalized);
       onToast(successMsg);
@@ -973,7 +975,7 @@ export const StoreStudioView: React.FC<{
               accent={colorAccent}
               surface={colorSurface}
               okColor={colorOk}
-              textColor={colorText}
+              textColor={getContrastingTextColor(colorSurface, colorText)}
               activePromo={activePromo}
               pricesMap={prices}
               previewFallbackPrice={hasPricing ? 28 : null}
@@ -991,10 +993,12 @@ export const StoreStudioView: React.FC<{
       );
     };
 
+    const previewSafeText = getContrastingTextColor(colorBg, colorText);
+
     return (
       <div
         className="rounded-2xl p-3.5 transition-all"
-        style={{ ...bgStyle, color: colorText, border: `1px solid ${colorAccent}44` }}
+        style={{ ...bgStyle, color: previewSafeText, border: `1px solid ${colorAccent}44` }}
       >
         <SideDetailWrapper sideDetail={design.side_detail} accent={colorAccent}>
           {blockOrder.map((bId, idx) => {
@@ -1031,7 +1035,7 @@ export const StoreStudioView: React.FC<{
         type="button"
         className="b g sm"
         onClick={() => {
-          applyBarTheme(bar);
+          applyBarTheme(bar, getStoredUiThemeMode());
           onBackMore();
         }}
       >

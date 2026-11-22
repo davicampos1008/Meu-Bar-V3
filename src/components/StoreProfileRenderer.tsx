@@ -1,6 +1,12 @@
 import React from 'react';
 import { safeExternalUrl } from '../lib/security';
-import { externalMapUrl, getStoreProfileConfig } from '../lib/utils';
+import {
+  externalMapUrl,
+  getContrastingAccentColor,
+  getContrastingTextColor,
+  getStoreProfileConfig,
+  isColorLight,
+} from '../lib/utils';
 import type { Bar, JobPost, StoreProfileConfig } from '../types/meubar';
 import {
   buildMenuBackgroundStyle,
@@ -32,9 +38,11 @@ export const StoreProfileRenderer: React.FC<StoreProfileRendererProps> = ({
   const cfg = profileConfig || getStoreProfileConfig(bar);
   const bg = bar.color_bg || '#0b0a0d';
   const surface = bar.color_surface || '#15131a';
-  const accent = bar.color_accent || '#e5a93c';
+  const accent = getContrastingAccentColor(bar.color_accent || '#e5a93c', surface);
   const ok = bar.color_ok || '#34d399';
-  const textCol = bar.color_text || '#f5efe2';
+  const textCol = getContrastingTextColor(bg, bar.color_text);
+  const cardTextCol = getContrastingTextColor(surface, bar.color_text);
+  const surfaceIsLight = isColorLight(surface);
   const fontCls = bar.name_font || 'store-font-serif';
 
   const bgStyle = buildMenuBackgroundStyle(
@@ -64,8 +72,8 @@ export const StoreProfileRenderer: React.FC<StoreProfileRendererProps> = ({
   const getCardStyle = (): React.CSSProperties => {
     const base: React.CSSProperties = {
       background: surface,
-      color: textCol,
-      borderColor: `${accent}33`,
+      color: cardTextCol,
+      borderColor: surfaceIsLight ? 'rgba(17,17,20,0.16)' : `${accent}38`,
     };
     if (cfg.card_style === 'bordered') {
       return { ...base, border: `2px solid ${accent}` };

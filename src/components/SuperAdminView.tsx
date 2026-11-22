@@ -24,9 +24,11 @@ import type {
   PartnerAdPlacement,
   PlatformSaaSConfig,
 } from '../types/meubar';
+import { AdminSimulatorView } from './AdminSimulatorView';
 import { ImageUploader } from './SharedUI';
+import { SupportDeskView } from './SupportChatView';
 
-type AdminTab = 'accounts' | 'stores' | 'partners' | 'adsense' | 'sales';
+export type AdminTab = 'accounts' | 'stores' | 'support' | 'simulator' | 'partners' | 'adsense' | 'sales';
 type AccountFilter = 'all' | 'recent' | 'with_bars' | 'no_bars' | 'vip_pro';
 
 const PLACEMENT_LABELS: Record<PartnerAdPlacement, string> = {
@@ -51,28 +53,57 @@ function fmtDateTime(iso?: string | null): string {
 
 export const SuperAdminView: React.FC<{
   userId: string;
+  userEmail?: string | null;
+  actorName?: string;
   config: PlatformSaaSConfig;
   adminAlerts?: AdminAlertItem[];
+  controlledTab?: AdminTab;
+  hideInternalNav?: boolean;
+  onTabChange?: (next: AdminTab) => void;
   onMarkAlertsRead?: (ids?: string[]) => Promise<void> | void;
   onOpenAlertSettings?: () => void;
   onConfigUpdated: (next: PlatformSaaSConfig) => void;
+  onBarPlanChanged?: (
+    barId: string,
+    tier: BarPlanTier,
+    expiresAt: string | null,
+    trialEndsAt: string | null,
+    note: string | null
+  ) => void;
   onAdsUpdated: (ads: PartnerAdBanner[]) => void;
-  onBack: () => void;
+  onBack?: () => void;
   onToast: (msg: string) => void;
 }> = ({
   userId,
+  userEmail,
+  actorName = 'Admin Suporte',
   config,
   adminAlerts = [],
+  controlledTab,
+  hideInternalNav = false,
+  onTabChange,
   onMarkAlertsRead,
   onOpenAlertSettings,
   onConfigUpdated,
+  onBarPlanChanged,
   onAdsUpdated,
   onBack,
   onToast,
 }) => {
   const { prefs: alertPrefs, setPref: setAlertPref, patchPrefs: patchAlertPrefs } = useAlertPrefs();
   const adminAlertOn = alertPrefs.allEnabled && alertPrefs.adminNewAccount;
-  const [tab, setTab] = useState<AdminTab>('accounts');
+  const [internalTab, setInternalTab] = useState<AdminTab>(controlledTab || 'accounts');
+  const [supportFocus, setSupportFocus] = useState<{
+    barId: string;
+    barName: string;
+    ownerEmail?: string | null;
+  } | null>(null);
+
+  const tab: AdminTab = controlledTab ?? internalTab;
+  const setTab = (next: AdminTab) => {
+    setInternalTab(next);
+    onTabChange?.(next);
+  };
 
   // Contas & Lojas
   const [users, setUsers] = useState<AdminUserAccount[]>([]);
@@ -147,20 +178,43 @@ export const SuperAdminView: React.FC<{
         ? new Date(Date.now() + daysValid * 86400000).toISOString()
         : null;
     const note = (noteByBar[barId] || '').trim() || null;
-    const res = await adminUpdateBarPlan(barId, tier, expiresAt, note);
+    const res = await adminUpdateBarPlan(barId, tier, expiresAt, note, draft);
     setBusyBarId(null);
     if (!res.ok) {
       onToast(`Erro: ${res.error || 'Execute o schema_completo.sql atualizado no Supabase.'}`);
       return;
     }
+    if (res.nextConfig) {
+      setDraft(res.nextConfig);
+      onConfigUpdated(res.nextConfig);
+    }
+    setStores((prev) =>
+      prev.map((s) =>
+        s.id === barId
+          ? {
+              ...s,
+              plan_tier: tier,
+              plan_expires_at: tier === 'pro' ? expiresAt : null,
+              trial_ends_at: res.trialEndsAt,
+              plan_note: note,
+            }
+          : s
+      )
+    );
+    onBarPlanChanged?.(barId, tier, tier === 'pro' ? expiresAt : null, res.trialEndsAt, note);
     onToast(
       tier === 'vip'
-        ? 'Acesso VIP (Pro Grátis) liberado para esta loja!'
+        ? '✓ Acesso VIP (Pro Grátis) liberado para esta loja!'
         : tier === 'pro'
-          ? `Plano Pro ativado (${daysValid ? `${daysValid} dias` : 'sem vencimento'})!`
-          : 'Loja alterada para Plano Grátis.'
+          ? `✓ Plano Pro ativado (${daysValid ? `${daysValid} dias` : 'sem vencimento'})!`
+          : '✓ Loja alterada para Plano Grátis.'
     );
-    await refreshDirectory();
+    void refreshDirectory();
+  };
+
+  const openChatWithBar = (barId: string, barName: string, ownerEmail?: string | null) => {
+    setSupportFocus({ barId, barName, ownerEmail });
+    setTab('support');
   };
 
   const handleSaveConfig = async (
@@ -463,15 +517,29 @@ export const SuperAdminView: React.FC<{
 
   return (
     <div>
-      <button type="button" className="b g sm" onClick={onBack}>
-        ← Voltar
-      </button>
+      {onBack && !hideInternalNav && (
+        <button type="button" className="b g sm" onClick={onBack}>
+          ← Voltar
+        </button>
+      )}
 
-      <div className="mt-3">
-        <div className="text-xs text-[var(--ac)] font-semibold">Administração da Plataforma</div>
-        <h1 className="!mt-1 !mb-1">Painel SaaS · Contas, Bares & Anúncios</h1>
+      <div className={hideInternalNav ? 'mt-0' : 'mt-3'}>
+        <div className="text-xs text-[var(--ac)] font-semibold">
+          Administração da Plataforma
+        </div>
+        <h1 className="!mt-1 !mb-1">
+          {tab === 'support'
+            ? '🎧 Central de Suporte & Equipe'
+            : tab === 'stores'
+              ? '🏪 Gestão de Lojas & Planos'
+              : tab === 'partners' || tab === 'adsense'
+                ? '📣 Anúncios & Parceiros'
+                : tab === 'sales'
+                  ? '⚙️ Preços, Planos & Vendas SaaS'
+                  : '👑 Contas, Bares & Planos'}
+        </h1>
         <p className="mu text-xs">
-          Acompanhe todas as contas criadas, veja os bares de cada usuário, receba alertas de novos cadastros, libere Pro/VIP e gerencie anúncios.
+          Controle exclusivo da administração do Meu Bar: contas, alteração de planos das lojas, chat de suporte com equipe delegada e monetização.
         </p>
       </div>
 
@@ -597,43 +665,106 @@ export const SuperAdminView: React.FC<{
       )}
 
       {/* Navegação por abas */}
-      <div className="chips !flex-wrap !overflow-visible mt-3 mb-3">
-        <button
-          type="button"
-          className={`chip ${tab === 'accounts' ? 'on' : ''}`}
-          onClick={() => setTab('accounts')}
-        >
-          Contas & Bares ({accountStats.total})
-        </button>
-        <button
-          type="button"
-          className={`chip ${tab === 'stores' ? 'on' : ''}`}
-          onClick={() => setTab('stores')}
-        >
-          Todos os Bares ({storeStats.total})
-        </button>
-        <button
-          type="button"
-          className={`chip ${tab === 'partners' ? 'on' : ''}`}
-          onClick={() => setTab('partners')}
-        >
-          Parceiros ({ads.filter((a) => a.active).length})
-        </button>
-        <button
-          type="button"
-          className={`chip ${tab === 'adsense' ? 'on' : ''}`}
-          onClick={() => setTab('adsense')}
-        >
-          Google AdSense {draft.adsense_enabled ? '· Ativo' : ''}
-        </button>
-        <button
-          type="button"
-          className={`chip ${tab === 'sales' ? 'on' : ''}`}
-          onClick={() => setTab('sales')}
-        >
-          Preços & Vendas
-        </button>
-      </div>
+      {!hideInternalNav ? (
+        <div className="chips !flex-wrap !overflow-visible mt-3 mb-3">
+          <button
+            type="button"
+            className={`chip ${tab === 'accounts' ? 'on' : ''}`}
+            onClick={() => setTab('accounts')}
+          >
+            Contas & Bares ({accountStats.total})
+          </button>
+          <button
+            type="button"
+            className={`chip ${tab === 'stores' ? 'on' : ''}`}
+            onClick={() => setTab('stores')}
+          >
+            Todos os Bares ({storeStats.total})
+          </button>
+          <button
+            type="button"
+            className={`chip ${tab === 'support' ? 'on' : ''}`}
+            onClick={() => setTab('support')}
+          >
+            💬 Suporte & Equipe
+          </button>
+          <button
+            type="button"
+            className={`chip ${tab === 'simulator' ? 'on' : ''}`}
+            onClick={() => setTab('simulator')}
+          >
+            🧪 Simulador Demo
+          </button>
+          <button
+            type="button"
+            className={`chip ${tab === 'partners' ? 'on' : ''}`}
+            onClick={() => setTab('partners')}
+          >
+            Parceiros ({ads.filter((a) => a.active).length})
+          </button>
+          <button
+            type="button"
+            className={`chip ${tab === 'adsense' ? 'on' : ''}`}
+            onClick={() => setTab('adsense')}
+          >
+            Google AdSense {draft.adsense_enabled ? '· Ativo' : ''}
+          </button>
+          <button
+            type="button"
+            className={`chip ${tab === 'sales' ? 'on' : ''}`}
+            onClick={() => setTab('sales')}
+          >
+            Preços & Vendas
+          </button>
+        </div>
+      ) : (
+        (tab === 'partners' || tab === 'adsense') && (
+          <div className="chips !flex-wrap !overflow-visible mt-3 mb-3">
+            <button
+              type="button"
+              className={`chip ${tab === 'partners' ? 'on' : ''}`}
+              onClick={() => setTab('partners')}
+            >
+              🤝 Banners de Parceiros ({ads.filter((a) => a.active).length})
+            </button>
+            <button
+              type="button"
+              className={`chip ${tab === 'adsense' ? 'on' : ''}`}
+              onClick={() => setTab('adsense')}
+            >
+              🌐 Google AdSense {draft.adsense_enabled ? '· Ativo' : ''}
+            </button>
+          </div>
+        )
+      )}
+
+      {/* ABA SIMULADOR DE LOJA FICTÍCIA (EXCLUSIVO ADM) */}
+      {tab === 'simulator' && (
+        <div className="mt-3">
+          <AdminSimulatorView onToast={onToast} />
+        </div>
+      )}
+
+      {/* ABA SUPORTE DIRETO + EQUIPE DE SUPORTE */}
+      {tab === 'support' && (
+        <div className="mt-3">
+          <SupportDeskView
+            userId={userId}
+            userEmail={userEmail}
+            actorName={actorName}
+            config={draft}
+            canManageTeam
+            focusBarId={supportFocus?.barId}
+            focusBarName={supportFocus?.barName}
+            focusOwnerEmail={supportFocus?.ownerEmail}
+            onConfigUpdated={(next) => {
+              setDraft(next);
+              onConfigUpdated(next);
+            }}
+            onToast={onToast}
+          />
+        </div>
+      )}
 
       {/* ABA 1: CONTAS CRIADAS + BARES DE CADA CONTA */}
       {tab === 'accounts' && (
@@ -819,8 +950,19 @@ export const SuperAdminView: React.FC<{
                               Bares criados por esta conta ({acc.ownedBars.length})
                             </div>
                             {acc.ownedBars.map((b) => {
-                              const bStatus = getBarPlanStatus(b, acc.email, draft);
+                              const barOwnStatus = getBarPlanStatus(b, acc.email, draft, {
+                                ignoreAdminAutoVip: true,
+                                ignoreEmailVip: true,
+                              });
                               const isBusy = busyBarId === b.id;
+                              const isVip = barOwnStatus.effectiveTier === 'vip';
+                              const isPro30 =
+                                barOwnStatus.effectiveTier === 'pro' &&
+                                (barOwnStatus.daysLeft ?? 0) <= 60;
+                              const isProYear =
+                                barOwnStatus.effectiveTier === 'pro' &&
+                                (barOwnStatus.daysLeft ?? 0) > 60;
+                              const isFree = barOwnStatus.effectiveTier === 'free';
                               return (
                                 <div
                                   key={b.id}
@@ -847,46 +989,60 @@ export const SuperAdminView: React.FC<{
                                           : ''}
                                       </div>
                                     </div>
-                                    <div className="text-xs font-semibold tabular-nums text-[var(--ac)]">
-                                      {bStatus.label}
-                                      {bStatus.expiresAt && bStatus.effectiveTier === 'pro'
-                                        ? ` · até ${new Date(bStatus.expiresAt).toLocaleDateString('pt-BR')}`
-                                        : ''}
+                                    <div className="text-xs font-semibold tabular-nums text-[var(--ac)] text-right">
+                                      <div>
+                                        {barOwnStatus.label}
+                                        {barOwnStatus.expiresAt && barOwnStatus.effectiveTier === 'pro'
+                                          ? ` · até ${new Date(barOwnStatus.expiresAt).toLocaleDateString('pt-BR')}`
+                                          : ''}
+                                      </div>
+                                      {(acc.isAdmin || acc.isVipEmail) && !isVip && (
+                                        <div className="text-[10px] text-[var(--mut)]">
+                                          (Conta {acc.isAdmin ? 'Admin' : 'VIP'})
+                                        </div>
+                                      )}
                                     </div>
                                   </div>
 
                                   <div className="flex flex-wrap gap-1.5">
                                     <button
                                       type="button"
-                                      className="b sm !text-[11px] !py-1"
+                                      className={`b sm !text-[11px] !py-1 ${isVip ? '' : 'g'}`}
                                       disabled={isBusy}
                                       onClick={() => void handleSetPlan(b.id, 'vip', null)}
                                     >
-                                      Bar VIP
+                                      {isVip ? '✓ Bar VIP' : 'Bar VIP'}
                                     </button>
                                     <button
                                       type="button"
-                                      className="b ok sm !text-[11px] !py-1"
+                                      className={`b sm !text-[11px] !py-1 ${isPro30 ? 'ok' : 'g'}`}
                                       disabled={isBusy}
                                       onClick={() => void handleSetPlan(b.id, 'pro', 30)}
                                     >
-                                      Pro +30d
+                                      {isPro30 ? '✓ Pro +30d' : 'Pro +30d'}
                                     </button>
                                     <button
                                       type="button"
-                                      className="b ok sm !text-[11px] !py-1"
+                                      className={`b sm !text-[11px] !py-1 ${isProYear ? 'ok' : 'g'}`}
                                       disabled={isBusy}
                                       onClick={() => void handleSetPlan(b.id, 'pro', 365)}
                                     >
-                                      Pro +1 ano
+                                      {isProYear ? '✓ Pro +1 ano' : 'Pro +1 ano'}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className={`b sm !text-[11px] !py-1 ${isFree ? '' : 'g'}`}
+                                      disabled={isBusy}
+                                      onClick={() => void handleSetPlan(b.id, 'free', null)}
+                                    >
+                                      {isFree ? '✓ Grátis' : 'Grátis'}
                                     </button>
                                     <button
                                       type="button"
                                       className="b g sm !text-[11px] !py-1"
-                                      disabled={isBusy}
-                                      onClick={() => void handleSetPlan(b.id, 'free', null)}
+                                      onClick={() => openChatWithBar(b.id, b.name, acc.email)}
                                     >
-                                      Grátis
+                                      💬 Chat
                                     </button>
                                   </div>
                                 </div>
@@ -959,8 +1115,15 @@ export const SuperAdminView: React.FC<{
             ) : (
               <div className="space-y-2.5 mt-3">
                 {filteredStores.map((st) => {
-                  const status = getBarPlanStatus(st, st.owner_email, draft);
+                  const status = getBarPlanStatus(st, st.owner_email, draft, {
+                    ignoreAdminAutoVip: true,
+                    ignoreEmailVip: true,
+                  });
                   const isBusy = busyBarId === st.id;
+                  const isVip = status.effectiveTier === 'vip';
+                  const isPro30 = status.effectiveTier === 'pro' && (status.daysLeft ?? 0) <= 60;
+                  const isProYear = status.effectiveTier === 'pro' && (status.daysLeft ?? 0) > 60;
+                  const isFree = status.effectiveTier === 'free';
                   return (
                     <div
                       key={st.id}
@@ -1002,35 +1165,42 @@ export const SuperAdminView: React.FC<{
                       <div className="flex flex-wrap gap-1.5">
                         <button
                           type="button"
-                          className="b sm"
+                          className={`b sm ${isVip ? '' : 'g'}`}
                           disabled={isBusy}
                           onClick={() => void handleSetPlan(st.id, 'vip', null)}
                         >
-                          Liberar VIP (Grátis)
+                          {isVip ? '✓ VIP Ativo' : 'Liberar VIP (Grátis)'}
                         </button>
                         <button
                           type="button"
-                          className="b ok sm"
+                          className={`b sm ${isPro30 ? 'ok' : 'g'}`}
                           disabled={isBusy}
                           onClick={() => void handleSetPlan(st.id, 'pro', 30)}
                         >
-                          Pro +30d
+                          {isPro30 ? '✓ Pro +30d' : 'Pro +30d'}
                         </button>
                         <button
                           type="button"
-                          className="b ok sm"
+                          className={`b sm ${isProYear ? 'ok' : 'g'}`}
                           disabled={isBusy}
                           onClick={() => void handleSetPlan(st.id, 'pro', 365)}
                         >
-                          Pro +1 ano
+                          {isProYear ? '✓ Pro +1 ano' : 'Pro +1 ano'}
+                        </button>
+                        <button
+                          type="button"
+                          className={`b sm ${isFree ? '' : 'g'}`}
+                          disabled={isBusy}
+                          onClick={() => void handleSetPlan(st.id, 'free', null)}
+                        >
+                          {isFree ? '✓ Grátis' : 'Voltar p/ Grátis'}
                         </button>
                         <button
                           type="button"
                           className="b g sm"
-                          disabled={isBusy}
-                          onClick={() => void handleSetPlan(st.id, 'free', null)}
+                          onClick={() => openChatWithBar(st.id, st.name, st.owner_email)}
                         >
-                          Voltar p/ Grátis
+                          💬 Chat Suporte
                         </button>
                       </div>
                     </div>

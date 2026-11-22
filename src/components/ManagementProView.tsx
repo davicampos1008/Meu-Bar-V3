@@ -50,6 +50,7 @@ import type {
   WaiterOperationMode,
   WaiterZone,
 } from '../types/meubar';
+import { StaffAccountsManagerCard } from './StaffLoginGate';
 
 export type ManagementSubTab =
   | 'dashboard'
@@ -245,11 +246,29 @@ export const ManagementProView: React.FC<{
       rec.commission = Math.round(rec.salesTotal * (commPct / 100) * 100) / 100;
     });
 
+    // Somar comissões 100% repassadas diretamente no fechamento do caixa (hoje)
+    const todaySales = (ops.cash_shifts || []).flatMap((sh) => sh.sales || []).filter(
+      (s) => (s.paid_at || '').slice(0, 10) === t
+    );
+    const directByWaiter: Record<string, number> = {};
+    todaySales.forEach((s) => {
+      if (s.service_100_to_waiter && s.waiter_name && (s.waiter_commission || 0) > 0) {
+        const k = norm(s.waiter_name);
+        directByWaiter[k] = (directByWaiter[k] || 0) + Number(s.waiter_commission || 0);
+        ensure(s.waiter_name);
+      }
+    });
+    Object.entries(directByWaiter).forEach(([k, val]) => {
+      if (map[k]) {
+        map[k].commission = Math.round(val * 100) / 100;
+      }
+    });
+
     return {
       commPct,
       rows: Object.values(map).sort((a, b) => b.salesTotal - a.salesTotal || b.activeTables - a.activeTables),
     };
-  }, [orders, openTabsNow, bar, prices, currentWaiterCfg.waiter_commission_pct]);
+  }, [orders, openTabsNow, bar, prices, currentWaiterCfg.waiter_commission_pct, ops.cash_shifts]);
 
   const handleSaveWaiterConfig = async () => {
     setSavingWaiterCfg(true);
@@ -285,7 +304,7 @@ export const ManagementProView: React.FC<{
       id: 'wz_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
       name: zName,
       waiter_name: wName,
-      tables: newZoneTables,
+      table_labels: newZoneTables,
     };
     setWaiterCfg((prev) => ({
       ...prev,
@@ -391,6 +410,21 @@ export const ManagementProView: React.FC<{
   const [pixMerchant, setPixMerchant] = useState(ops.pix_merchant_name || bar.name);
   const [pixCity, setPixCity] = useState(ops.pix_city || bar.city || '');
   const [defaultFeePct, setDefaultFeePct] = useState(String(ops.default_service_fee_pct ?? 10));
+  const [serviceFeeAllowCustom, setServiceFeeAllowCustom] = useState(
+    ops.service_fee_allow_custom !== false
+  );
+  const [serviceFee100ToWaiter, setServiceFee100ToWaiter] = useState(
+    Boolean(ops.service_fee_100_to_waiter)
+  );
+  const [couvertEnabled, setCouvertEnabled] = useState(Boolean(ops.couvert_enabled));
+  const [couvertLabel, setCouvertLabel] = useState(ops.couvert_label || 'Couvert artístico');
+  const [couvertPriceStr, setCouvertPriceStr] = useState(
+    ops.couvert_price ? String(ops.couvert_price) : ''
+  );
+  const [couvertMode, setCouvertMode] = useState<'mandatory' | 'optional'>(
+    ops.couvert_mode || 'optional'
+  );
+  const [couvertPerPerson, setCouvertPerPerson] = useState(Boolean(ops.couvert_per_person));
   const [printerWidth, setPrinterWidth] = useState<'80mm' | '58mm'>(ops.printer_width || '80mm');
   const [autoDeduct, setAutoDeduct] = useState(ops.auto_deduct_stock !== false);
   const [auditSearch, setAuditSearch] = useState('');
@@ -720,6 +754,7 @@ export const ManagementProView: React.FC<{
     e.preventDefault();
     setSaving(true);
     try {
+      const parsedCouvert = Math.max(0, Number(couvertPriceStr.replace(',', '.')) || 0);
       const updated = await saveBarOpsData(
         bar,
         {
@@ -727,6 +762,13 @@ export const ManagementProView: React.FC<{
           pix_merchant_name: pixMerchant.trim() || bar.name,
           pix_city: pixCity.trim() || bar.city || '',
           default_service_fee_pct: Math.max(0, Math.min(30, Number(defaultFeePct) || 0)),
+          service_fee_allow_custom: serviceFeeAllowCustom,
+          service_fee_100_to_waiter: serviceFee100ToWaiter,
+          couvert_enabled: couvertEnabled,
+          couvert_label: couvertLabel.trim() || 'Couvert artístico',
+          couvert_price: parsedCouvert,
+          couvert_mode: couvertMode,
+          couvert_per_person: couvertPerPerson,
           printer_width: printerWidth,
           auto_deduct_stock: autoDeduct,
         },
@@ -736,12 +778,12 @@ export const ManagementProView: React.FC<{
         await logBarAudit(
           updated,
           'Configurações operacionais',
-          `Pix: ${pixKey.trim() ? 'configurado' : 'vazio'} | Serviço: ${defaultFeePct}% | Impressora: ${printerWidth} | Baixa automática: ${autoDeduct ? 'ON' : 'OFF'}`,
+          `Pix: ${pixKey.trim() ? 'configurado' : 'vazio'} | Serviço: ${defaultFeePct}% (100% garçom: ${serviceFee100ToWaiter ? 'SIM' : 'NÃO'}) | Couvert: ${couvertEnabled ? `${money(parsedCouvert)} (${couvertMode})` : 'OFF'} | Impressora: ${printerWidth}`,
           actorName,
           role || 'owner',
           onBarUpdated
         );
-        onToast('Configurações operacionais salvas!');
+        onToast('Configurações operacionais, Couvert e Garçom salvos!');
       }
     } finally {
       setSaving(false);
@@ -2301,10 +2343,107 @@ export const ManagementProView: React.FC<{
                 </label>
               </div>
             </div>
+            {/* COUVERT ARTÍSTICO & COMISSÃO DO GARÇOM */}
+            <div className="pt-3 mt-2 border-t border-white/10 space-y-2.5">
+              <div className="text-xs font-extrabold uppercase tracking-wider text-[var(--ac)]">
+                🎵 Couvert Artístico & Comissão do Garçom (Cardápio + Caixa)
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <label className="!m-0 flex items-center gap-2 rounded-xl p-2.5 bg-[var(--bg2)] border border-[var(--bd)] cursor-pointer text-xs font-semibold">
+                  <input
+                    type="checkbox"
+                    checked={couvertEnabled}
+                    onChange={(e) => setCouvertEnabled(e.target.checked)}
+                    className="!w-4 !h-4"
+                  />
+                  <span>Ativar cobrança de Couvert (exibe aviso no cardápio e na comanda)</span>
+                </label>
+
+                <label className="!m-0 flex items-center gap-2 rounded-xl p-2.5 bg-emerald-500/10 border border-emerald-500/30 cursor-pointer text-xs font-semibold">
+                  <input
+                    type="checkbox"
+                    checked={serviceFee100ToWaiter}
+                    onChange={(e) => setServiceFee100ToWaiter(e.target.checked)}
+                    className="!w-4 !h-4"
+                  />
+                  <span>
+                    💚 Avisar cliente que <b>100% da taxa vai para o garçom</b> (lança direto na
+                    comissão)
+                  </span>
+                </label>
+              </div>
+
+              <label className="!m-0 flex items-center gap-2 text-xs font-semibold cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={serviceFeeAllowCustom}
+                  onChange={(e) => setServiceFeeAllowCustom(e.target.checked)}
+                  className="!w-4 !h-4"
+                />
+                <span>
+                  Permitir cliente/caixa ajustar a % do garçom ou informar valor fixo (R$)
+                </span>
+              </label>
+
+              {couvertEnabled && (
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 rounded-xl p-3 bg-[var(--bg2)] border border-[var(--bd)]">
+                  <div>
+                    <label className="!mt-0">Nome exibido</label>
+                    <input
+                      value={couvertLabel}
+                      onChange={(e) => setCouvertLabel(e.target.value)}
+                      placeholder="Couvert artístico"
+                      maxLength={36}
+                    />
+                  </div>
+                  <div>
+                    <label className="!mt-0">Valor do Couvert (R$)</label>
+                    <input
+                      type="number"
+                      min={0}
+                      step="0.5"
+                      value={couvertPriceStr}
+                      onChange={(e) => setCouvertPriceStr(e.target.value)}
+                      placeholder="Ex: 15.00"
+                    />
+                  </div>
+                  <div>
+                    <label className="!mt-0">Regra no cardápio do cliente</label>
+                    <select
+                      value={couvertMode}
+                      onChange={(e) => setCouvertMode(e.target.value as 'mandatory' | 'optional')}
+                    >
+                      <option value="mandatory">Obrigatório (fixo na comanda)</option>
+                      <option value="optional">Opcional (cliente pode desmarcar)</option>
+                    </select>
+                  </div>
+                  <label className="sm:col-span-3 !m-0 flex items-center gap-2 text-xs font-semibold cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={couvertPerPerson}
+                      onChange={(e) => setCouvertPerPerson(e.target.checked)}
+                      className="!w-4 !h-4"
+                    />
+                    <span>Cobrar couvert por pessoa na mesa (no caixa multiplica pela qtd. de pessoas)</span>
+                  </label>
+                </div>
+              )}
+            </div>
+
             <button type="submit" className="b ok sm" disabled={saving}>
               {saving ? 'Salvando…' : '💾 Salvar configurações'}
             </button>
           </form>
+
+          {/* LOGIN DE FUNCIONÁRIOS, MULTI-FUNÇÃO E SENHA ADM */}
+          <StaffAccountsManagerCard
+            bar={bar}
+            actorName={actorName}
+            role={role}
+            onBarUpdated={onBarUpdated}
+            onToast={onToast}
+          />
 
           {/* MATRIZ DE PERMISSÕES POR CARGO */}
           <div className="panel">
@@ -2432,11 +2571,20 @@ export const ManagementProView: React.FC<{
                   atendentes indo na mesma mesa.
                 </p>
               </div>
-              {onOpenWaiterStation && (
-                <button type="button" className="b g sm" onClick={onOpenWaiterStation}>
-                  🏃 Abrir Central do Garçom
+              <div className="flex flex-wrap gap-1.5">
+                <button
+                  type="button"
+                  className="b sm"
+                  onClick={() => setSubTab('config')}
+                >
+                  🔐 Logins, Senhas & Multi-Funções
                 </button>
-              )}
+                {onOpenWaiterStation && (
+                  <button type="button" className="b g sm" onClick={onOpenWaiterStation}>
+                    🏃 Abrir Central do Garçom
+                  </button>
+                )}
+              </div>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
@@ -2454,7 +2602,7 @@ export const ManagementProView: React.FC<{
                         : 'bg-[var(--bg2)] border-[var(--bd)] text-[var(--mut)] hover:border-white/25'
                     }`}
                   >
-                    <div className="text-sm font-extrabold text-[var(--txt)]">{meta.title}</div>
+                    <div className="text-sm font-extrabold text-[var(--txt)]">{meta.label}</div>
                     <p className="text-xs mt-1 leading-relaxed !mb-0">{meta.description}</p>
                   </button>
                 );
@@ -2605,7 +2753,7 @@ export const ManagementProView: React.FC<{
                         📍 {z.name} · <span className="text-[var(--ac)]">👤 {z.waiter_name}</span>
                       </div>
                       <div className="text-xs text-[var(--mut)] mt-0.5">
-                        Mesas: <b>{z.tables.join(', ')}</b>
+                        Mesas: <b>{(z.table_labels || []).join(', ')}</b>
                       </div>
                     </div>
                     <button

@@ -30,10 +30,23 @@ export const DEFAULT_SAAS_CONFIG: PlatformSaaSConfig = {
   adsense_slot_menu_free: '',
   ads_rotation_mode: 'partner_first',
   free_user_emails: [],
+  support_agent_emails: [],
+  bar_plan_overrides: {},
 };
 
 export function isSuperAdmin(email?: string | null): boolean {
   return Boolean(email && email.trim().toLowerCase() === SUPER_ADMIN_EMAIL);
+}
+
+export function isSupportStaff(
+  email?: string | null,
+  config: PlatformSaaSConfig = DEFAULT_SAAS_CONFIG
+): boolean {
+  const clean = (email || '').trim().toLowerCase();
+  if (!clean) return false;
+  if (isSuperAdmin(clean)) return true;
+  const list = (config.support_agent_emails || []).map((e) => e.trim().toLowerCase());
+  return list.includes(clean);
 }
 
 export function sanitizeHttpUrl(raw?: string | null): string | null {
@@ -91,11 +104,12 @@ export interface BarPlanStatus {
 export function getBarPlanStatus(
   bar: Partial<Bar> | null | undefined,
   userEmail?: string | null,
-  config: PlatformSaaSConfig = DEFAULT_SAAS_CONFIG
+  config: PlatformSaaSConfig = DEFAULT_SAAS_CONFIG,
+  options?: { ignoreAdminAutoVip?: boolean; ignoreEmailVip?: boolean }
 ): BarPlanStatus {
   const cleanEmail = (userEmail || '').trim().toLowerCase();
 
-  if (isSuperAdmin(cleanEmail)) {
+  if (!options?.ignoreAdminAutoVip && isSuperAdmin(cleanEmail)) {
     return {
       effectiveTier: 'vip',
       isPro: true,
@@ -108,7 +122,7 @@ export function getBarPlanStatus(
   }
 
   const vipEmails = (config.free_user_emails || []).map((e) => e.trim().toLowerCase());
-  if (cleanEmail && vipEmails.includes(cleanEmail)) {
+  if (!options?.ignoreEmailVip && cleanEmail && vipEmails.includes(cleanEmail)) {
     return {
       effectiveTier: 'vip',
       isPro: true,
@@ -131,7 +145,14 @@ export function getBarPlanStatus(
     };
   }
 
-  if (bar.plan_tier === 'vip') {
+  // Mescla eventual override salvo em platform_settings (garante efeito imediato mesmo antes de rodar SQL novo)
+  const override = bar.id ? config.bar_plan_overrides?.[bar.id] : undefined;
+  const effTier = override?.tier ?? bar.plan_tier ?? 'free';
+  const effExpiresAt = override ? override.expires_at ?? null : bar.plan_expires_at ?? null;
+  const effTrialEndsAt = override ? override.trial_ends_at ?? null : bar.trial_ends_at ?? null;
+  const effNote = override ? override.note ?? bar.plan_note ?? null : bar.plan_note ?? null;
+
+  if (effTier === 'vip') {
     return {
       effectiveTier: 'vip',
       isPro: true,
@@ -139,13 +160,13 @@ export function getBarPlanStatus(
       label: 'Pro VIP (Liberado)',
       daysLeft: null,
       expiresAt: null,
-      note: bar.plan_note || 'Cortesia liberada pela administração',
+      note: effNote || 'Cortesia liberada pela administração',
     };
   }
 
   const nowMs = Date.now();
-  if (bar.plan_tier === 'pro') {
-    if (!bar.plan_expires_at) {
+  if (effTier === 'pro') {
+    if (!effExpiresAt) {
       return {
         effectiveTier: 'pro',
         isPro: true,
@@ -153,10 +174,10 @@ export function getBarPlanStatus(
         label: 'Plano Pro',
         daysLeft: null,
         expiresAt: null,
-        note: bar.plan_note,
+        note: effNote,
       };
     }
-    const expMs = new Date(bar.plan_expires_at).getTime();
+    const expMs = new Date(effExpiresAt).getTime();
     if (!Number.isNaN(expMs) && expMs > nowMs) {
       const daysLeft = Math.max(1, Math.ceil((expMs - nowMs) / 86400000));
       return {
@@ -165,18 +186,21 @@ export function getBarPlanStatus(
         showAds: false,
         label: 'Plano Pro',
         daysLeft,
-        expiresAt: bar.plan_expires_at,
-        note: bar.plan_note,
+        expiresAt: effExpiresAt,
+        note: effNote,
       };
     }
   }
 
   // Período de teste automático (Trial Pro grátis para bares novos)
+  // Se o admin definiu explicitamente como 'free' (trial_ends_at no passado ou override 'free'), respeita Grátis!
   const trialDays = Math.max(0, Number(config.trial_days ?? 14));
   let trialEndMs: number | null = null;
-  if (bar.trial_ends_at) {
-    const parsed = new Date(bar.trial_ends_at).getTime();
+  if (effTrialEndsAt) {
+    const parsed = new Date(effTrialEndsAt).getTime();
     if (!Number.isNaN(parsed)) trialEndMs = parsed;
+  } else if (override?.tier === 'free') {
+    trialEndMs = 0;
   } else if (bar.created_at && trialDays > 0) {
     const createdMs = new Date(bar.created_at).getTime();
     if (!Number.isNaN(createdMs)) trialEndMs = createdMs + trialDays * 86400000;
@@ -200,8 +224,8 @@ export function getBarPlanStatus(
     showAds: true,
     label: 'Plano Grátis',
     daysLeft: null,
-    expiresAt: bar.plan_expires_at || null,
-    note: bar.plan_note,
+    expiresAt: effExpiresAt,
+    note: effNote,
   };
 }
 
@@ -211,6 +235,10 @@ export function canUseFeature(status: BarPlanStatus, _feature: ProFeatureKey): b
 
 export function mergeSaasConfig(raw: unknown): PlatformSaaSConfig {
   const obj = raw && typeof raw === 'object' ? (raw as Partial<PlatformSaaSConfig>) : {};
+  const rawOverrides =
+    obj.bar_plan_overrides && typeof obj.bar_plan_overrides === 'object'
+      ? obj.bar_plan_overrides
+      : {};
   return {
     ...DEFAULT_SAAS_CONFIG,
     ...obj,
@@ -222,6 +250,16 @@ export function mergeSaasConfig(raw: unknown): PlatformSaaSConfig {
     free_user_emails: Array.isArray(obj.free_user_emails)
       ? obj.free_user_emails.map((e) => String(e || '').trim().toLowerCase()).filter(Boolean)
       : [],
+    support_agent_emails: Array.isArray(obj.support_agent_emails)
+      ? Array.from(
+          new Set(
+            obj.support_agent_emails
+              .map((e) => String(e || '').trim().toLowerCase())
+              .filter(Boolean)
+          )
+        )
+      : [],
+    bar_plan_overrides: rawOverrides,
   };
 }
 
@@ -356,27 +394,63 @@ export async function adminUpdateBarPlan(
   barId: string,
   tier: BarPlanTier,
   expiresAt: string | null,
-  note: string | null
-): Promise<{ ok: boolean; error?: string }> {
+  note: string | null,
+  currentConfig?: PlatformSaaSConfig
+): Promise<{ ok: boolean; error?: string; nextConfig?: PlatformSaaSConfig; trialEndsAt: string | null }> {
+  const trialEndsAt = tier === 'free' ? new Date(Date.now() - 60000).toISOString() : null;
+  let dbSaved = false;
+  let lastErr: string | undefined;
+
   const rpc = await sb.rpc('admin_set_bar_plan', {
     p_bar_id: barId,
     p_tier: tier,
     p_expires_at: expiresAt,
     p_note: note,
   });
-  if (!rpc.error) return { ok: true };
+  if (!rpc.error) {
+    dbSaved = true;
+  } else {
+    lastErr = rpc.error.message;
+  }
 
-  // Fallback direto se o bar for do próprio usuário
+  // Garante também trial_ends_at no passado ao mudar explicitamente para Grátis (mesmo se a RPC antiga ainda estiver no banco)
   const up = await sb
     .from('bars')
     .update({
       plan_tier: tier,
-      plan_expires_at: expiresAt,
+      plan_expires_at: tier === 'pro' ? expiresAt : null,
+      trial_ends_at: trialEndsAt,
       plan_note: note,
     })
     .eq('id', barId);
-  if (!up.error) return { ok: true };
-  return { ok: false, error: rpc.error.message };
+  if (!up.error) {
+    dbSaved = true;
+  }
+
+  // Persiste também em platform_settings.bar_plan_overrides para sincronização imediata entre todas as telas
+  let nextConfig: PlatformSaaSConfig | undefined;
+  if (currentConfig) {
+    nextConfig = {
+      ...currentConfig,
+      bar_plan_overrides: {
+        ...(currentConfig.bar_plan_overrides || {}),
+        [barId]: {
+          tier,
+          expires_at: tier === 'pro' ? expiresAt : null,
+          trial_ends_at: trialEndsAt,
+          note,
+          updated_at: new Date().toISOString(),
+        },
+      },
+    };
+    const cfgSave = await savePlatformConfig(nextConfig);
+    if (cfgSave.ok) dbSaved = true;
+  }
+
+  if (dbSaved) {
+    return { ok: true, nextConfig, trialEndsAt };
+  }
+  return { ok: false, error: lastErr || up.error?.message, nextConfig, trialEndsAt };
 }
 
 export async function adminListUsers(): Promise<{

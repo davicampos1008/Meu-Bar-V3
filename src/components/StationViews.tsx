@@ -77,6 +77,7 @@ interface BarmanStationViewProps {
   recipes: Recipe[];
   onSetOrderStatus: (orderId: string, status: Order['status']) => Promise<void>;
   onCancelOrder?: (order: Order, reason: string) => Promise<void>;
+  onSelectRecipe?: (recipe: Recipe) => void;
   onGoStock?: () => void;
   onRefresh: () => Promise<void>;
 }
@@ -88,44 +89,55 @@ export const BarmanStationView: React.FC<BarmanStationViewProps> = ({
   recipes,
   onSetOrderStatus,
   onCancelOrder,
+  onSelectRecipe,
   onGoStock,
   onRefresh,
 }) => {
-  const [expandedRecipeId, setExpandedRecipeId] = useState<string | null>(null);
+  const [expandedRecipeKey, setExpandedRecipeKey] = useState<string | null>(null);
   const [filterMode, setFilterMode] = useState<'pending' | 'ready'>('pending');
   const [cancelTarget, setCancelTarget] = useState<Order | null>(null);
   const [cancelReason, setCancelReason] = useState('');
   const canCancel = canRoleDo(bar, role, 'can_cancel_order');
 
-  const recipeMap = useMemo(() => {
-    const m: Record<string, Recipe> = {};
+  const { recipeMap, recipeByName } = useMemo(() => {
+    const byId: Record<string, Recipe> = {};
+    const byName: Record<string, Recipe> = {};
     recipes.forEach((r) => {
-      m[r.id] = r;
+      byId[r.id] = r;
+      const k = norm(r.name);
+      if (k && !byName[k]) byName[k] = r;
     });
-    return m;
+    return { recipeMap: byId, recipeByName: byName };
   }, [recipes]);
+
+  const resolveOrderRecipe = (o: Order): Recipe | undefined =>
+    recipeMap[o.recipe_id] || recipeByName[norm(o.recipe_name || '')];
 
   const barOrders = useMemo(() => {
     return orders.filter((o) => {
       if (o.status === 'done') return false;
-      const rec = recipeMap[o.recipe_id];
+      const rec = recipeMap[o.recipe_id] || recipeByName[norm(o.recipe_name || '')];
       return getOrderStation(o, rec) === 'bar';
     });
-  }, [orders, recipeMap]);
+  }, [orders, recipeMap, recipeByName]);
 
   const pendingOrders = barOrders.filter((o) => o.status === 'pending');
   const readyOrders = barOrders.filter((o) => o.status === 'ready');
 
   // Agrupamento em lote para preparo simultâneo de drinks iguais
   const groupedPending = useMemo(() => {
-    const map: Record<string, { recipeId: string; name: string; totalQty: number; items: Order[] }> =
-      {};
+    const map: Record<
+      string,
+      { groupKey: string; recipeId: string; recipe?: Recipe; name: string; totalQty: number; items: Order[] }
+    > = {};
     pendingOrders.forEach((o) => {
-      const rec = recipeMap[o.recipe_id];
+      const rec = recipeMap[o.recipe_id] || recipeByName[norm(o.recipe_name || '')];
       const key = o.recipe_id || o.recipe_name || o.id;
       if (!map[key]) {
         map[key] = {
+          groupKey: key,
           recipeId: o.recipe_id,
+          recipe: rec,
           name: o.recipe_name || rec?.name || 'Drink',
           totalQty: 0,
           items: [],
@@ -135,7 +147,7 @@ export const BarmanStationView: React.FC<BarmanStationViewProps> = ({
       map[key].items.push(o);
     });
     return Object.values(map).sort((a, b) => b.totalQty - a.totalQty);
-  }, [pendingOrders, recipeMap]);
+  }, [pendingOrders, recipeMap, recipeByName]);
 
   return (
     <div className="space-y-3">
@@ -184,11 +196,18 @@ export const BarmanStationView: React.FC<BarmanStationViewProps> = ({
           </div>
         ) : (
           groupedPending.map((group) => {
-            const rec = recipeMap[group.recipeId];
-            const isOpen = expandedRecipeId === group.recipeId;
+            const rec = group.recipe || recipeMap[group.recipeId] || recipeByName[norm(group.name)];
+            const isOpen = expandedRecipeKey === group.groupKey;
             const isAvulso = rec && getRecipeItemType(rec) === 'avulso';
+            const hasRecipeDetails = Boolean(
+              rec &&
+                ((rec.ingredients && rec.ingredients.filter((i) => !i.n.startsWith('__')).length > 0) ||
+                  rec.steps ||
+                  rec.instructions ||
+                  rec.description)
+            );
             return (
-              <div key={group.recipeId + group.name} className="card !border-[var(--ac)]/40">
+              <div key={group.groupKey + group.name} className="card !border-[var(--ac)]/40">
                 <div className="flex items-center justify-between gap-2 flex-wrap">
                   <div>
                     <span className="inline-block px-2 py-0.5 rounded-md text-xs font-extrabold bg-[var(--ac)] text-[#111014] mr-2">
@@ -198,14 +217,25 @@ export const BarmanStationView: React.FC<BarmanStationViewProps> = ({
                       {isAvulso ? '🍺' : '🍸'} {group.name}
                     </strong>
                   </div>
-                  <div className="flex gap-1.5">
-                    {rec && !isAvulso && (
+                  <div className="flex gap-1.5 flex-wrap">
+                    {rec && hasRecipeDetails && (
                       <button
                         type="button"
                         className="b g sm"
-                        onClick={() => setExpandedRecipeId(isOpen ? null : group.recipeId)}
+                        onClick={() =>
+                          setExpandedRecipeKey(isOpen ? null : group.groupKey)
+                        }
                       >
-                        {isOpen ? 'Ocultar receita' : '📖 Receita'}
+                        {isOpen ? 'Ocultar receita' : '📖 Ver receita'}
+                      </button>
+                    )}
+                    {rec && onSelectRecipe && !isAvulso && (
+                      <button
+                        type="button"
+                        className="b g sm"
+                        onClick={() => onSelectRecipe(rec)}
+                      >
+                        🍸 Preparo
                       </button>
                     )}
                     {group.items.length > 1 && (
@@ -229,17 +259,22 @@ export const BarmanStationView: React.FC<BarmanStationViewProps> = ({
                     <div className="font-bold text-[var(--ac)]">
                       Ingredientes ({rec.glass || 'Copo padrão'} · {rec.technique || 'Preparo'})
                     </div>
-                    <ul className="list-disc pl-4 m-0 space-y-0.5">
-                      {(rec.ingredients || []).map((ing, idx) => (
-                        <li key={idx}>
-                          <strong>{ing.n}</strong>
-                          {ing.q ? ` — ${ing.q}` : ''}
-                        </li>
-                      ))}
-                    </ul>
-                    {(rec.steps || rec.instructions) && (
+                    {(rec.ingredients || []).filter((ing) => !ing.n.startsWith('__')).length > 0 && (
+                      <ul className="list-disc pl-4 m-0 space-y-0.5">
+                        {(rec.ingredients || [])
+                          .filter((ing) => !ing.n.startsWith('__'))
+                          .map((ing, idx) => (
+                            <li key={idx}>
+                              <strong>{ing.n}</strong>
+                              {ing.q ? ` — ${ing.q}` : ''}
+                            </li>
+                          ))}
+                      </ul>
+                    )}
+                    {(rec.steps || rec.instructions || rec.description) && (
                       <div className="text-[var(--mut)] pt-1 border-t border-[var(--bd)]">
-                        <strong>Modo:</strong> {rec.steps || rec.instructions}
+                        <strong>Modo de preparo:</strong>{' '}
+                        {rec.steps || rec.instructions || rec.description}
                       </div>
                     )}
                     {rec.garnish && (
@@ -323,26 +358,40 @@ export const BarmanStationView: React.FC<BarmanStationViewProps> = ({
         ) : readyOrders.length === 0 ? (
           <div className="card empty">Nenhum drink aguardando retirada do garçom.</div>
         ) : (
-          readyOrders.map((o) => (
-            <div
-              key={o.id}
-              className="card !border-[var(--ok)]/40 flex items-center justify-between gap-2 flex-wrap"
-            >
-              <div>
-                <div className="font-bold text-sm">
-                  🔔 {o.qty}x {o.recipe_name || recipeMap[o.recipe_id]?.name || 'Drink'}
-                </div>
-                <div className="text-xs text-[var(--mut)]">{clientDisplay(o)}</div>
-              </div>
-              <button
-                type="button"
-                className="b g sm"
-                onClick={() => void onSetOrderStatus(o.id, 'done')}
+          readyOrders.map((o) => {
+            const rec = resolveOrderRecipe(o);
+            return (
+              <div
+                key={o.id}
+                className="card !border-[var(--ok)]/40 flex items-center justify-between gap-2 flex-wrap"
               >
-                ✓ Entregue no balcão
-              </button>
-            </div>
-          ))
+                <div>
+                  <div className="font-bold text-sm">
+                    🔔 {o.qty}x {o.recipe_name || rec?.name || 'Drink'}
+                  </div>
+                  <div className="text-xs text-[var(--mut)]">{clientDisplay(o)}</div>
+                </div>
+                <div className="flex gap-1.5 flex-wrap">
+                  {rec && onSelectRecipe && (
+                    <button
+                      type="button"
+                      className="b g sm"
+                      onClick={() => onSelectRecipe(rec)}
+                    >
+                      📖 Ver receita
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="b g sm"
+                    onClick={() => void onSetOrderStatus(o.id, 'done')}
+                  >
+                    ✓ Entregue no balcão
+                  </button>
+                </div>
+              </div>
+            );
+          })
         )}
 
       {cancelTarget && onCancelOrder && (
@@ -391,6 +440,7 @@ interface KitchenStationViewProps {
   recipes: Recipe[];
   onSetOrderStatus: (orderId: string, status: Order['status']) => Promise<void>;
   onCancelOrder?: (order: Order, reason: string) => Promise<void>;
+  onSelectRecipe?: (recipe: Recipe) => void;
   onRecipesUpdated: () => Promise<void>;
   onOpenCatalog?: () => void;
   onRefresh: () => Promise<void>;
@@ -404,23 +454,31 @@ export const KitchenStationView: React.FC<KitchenStationViewProps> = ({
   recipes,
   onSetOrderStatus,
   onCancelOrder,
+  onSelectRecipe,
   onRecipesUpdated,
   onOpenCatalog,
   onRefresh,
   onToast,
 }) => {
   const [showAvailability, setShowAvailability] = useState(false);
+  const [expandedKitchenOrderId, setExpandedKitchenOrderId] = useState<string | null>(null);
   const [cancelTarget, setCancelTarget] = useState<Order | null>(null);
   const [cancelReason, setCancelReason] = useState('');
   const canCancel = canRoleDo(bar, role, 'can_cancel_order');
 
-  const recipeMap = useMemo(() => {
-    const m: Record<string, Recipe> = {};
+  const { recipeMap, recipeByName } = useMemo(() => {
+    const byId: Record<string, Recipe> = {};
+    const byName: Record<string, Recipe> = {};
     recipes.forEach((r) => {
-      m[r.id] = r;
+      byId[r.id] = r;
+      const k = norm(r.name);
+      if (k && !byName[k]) byName[k] = r;
     });
-    return m;
+    return { recipeMap: byId, recipeByName: byName };
   }, [recipes]);
+
+  const resolveKitchenRecipe = (o: Order): Recipe | undefined =>
+    recipeMap[o.recipe_id] || recipeByName[norm(o.recipe_name || '')];
 
   const petiscos = useMemo(
     () =>
@@ -434,9 +492,10 @@ export const KitchenStationView: React.FC<KitchenStationViewProps> = ({
     () =>
       orders.filter((o) => {
         if (o.status === 'done') return false;
-        return getOrderStation(o, recipeMap[o.recipe_id]) === 'cozinha';
+        const rec = recipeMap[o.recipe_id] || recipeByName[norm(o.recipe_name || '')];
+        return getOrderStation(o, rec) === 'cozinha';
       }),
-    [orders, recipeMap]
+    [orders, recipeMap, recipeByName]
   );
 
   const pending = kitchenOrders.filter((o) => o.status === 'pending');
@@ -542,6 +601,12 @@ export const KitchenStationView: React.FC<KitchenStationViewProps> = ({
             {pending.map((o) => {
               const mins = elapsedMinutes(o.created_at);
               const urgent = mins >= 15;
+              const rec = resolveKitchenRecipe(o);
+              const cleanIngs = (rec?.ingredients || []).filter((i) => !i.n.startsWith('__'));
+              const hasRecipeInfo = Boolean(
+                rec && (cleanIngs.length > 0 || rec.steps || rec.instructions || rec.description)
+              );
+              const isOpen = expandedKitchenOrderId === o.id;
               return (
                 <div
                   key={o.id}
@@ -554,7 +619,7 @@ export const KitchenStationView: React.FC<KitchenStationViewProps> = ({
                   <div className="flex items-start justify-between gap-2">
                     <div>
                       <div className="text-base font-extrabold">
-                        {o.qty}x {o.recipe_name || recipeMap[o.recipe_id]?.name || 'Petisco'}
+                        {o.qty}x {o.recipe_name || rec?.name || 'Petisco'}
                       </div>
                       <div className="text-xs text-[var(--mut)] mt-0.5">{clientDisplay(o)}</div>
                     </div>
@@ -575,7 +640,49 @@ export const KitchenStationView: React.FC<KitchenStationViewProps> = ({
                     </div>
                   )}
 
-                  <div className="flex gap-1.5 mt-3">
+                  {isOpen && rec && (
+                    <div className="mt-2 rounded-lg bg-black/25 border border-[var(--bd)] p-2.5 text-xs space-y-1.5">
+                      {cleanIngs.length > 0 && (
+                        <div>
+                          <div className="font-bold text-[var(--ac)] mb-0.5">Ingredientes:</div>
+                          <ul className="list-disc pl-4 m-0 space-y-0.5">
+                            {cleanIngs.map((ing, idx) => (
+                              <li key={idx}>
+                                <strong>{ing.n}</strong>
+                                {ing.q ? ` — ${ing.q}` : ''}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                      {(rec.steps || rec.instructions || rec.description) && (
+                        <div className="text-[var(--mut)]">
+                          <strong className="text-[var(--txt)]">Preparo:</strong>{' '}
+                          {rec.steps || rec.instructions || rec.description}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="flex gap-1.5 mt-3 flex-wrap">
+                    {hasRecipeInfo && (
+                      <button
+                        type="button"
+                        className="b g sm"
+                        onClick={() => setExpandedKitchenOrderId(isOpen ? null : o.id)}
+                      >
+                        {isOpen ? 'Ocultar' : '📖 Receita'}
+                      </button>
+                    )}
+                    {rec && onSelectRecipe && (
+                      <button
+                        type="button"
+                        className="b g sm"
+                        onClick={() => onSelectRecipe(rec)}
+                      >
+                        🍳 Ficha
+                      </button>
+                    )}
                     <button
                       type="button"
                       className="b g sm"
@@ -584,7 +691,7 @@ export const KitchenStationView: React.FC<KitchenStationViewProps> = ({
                         printKitchenOrBarTicket({
                           bar,
                           order: o,
-                          recipeName: o.recipe_name || recipeMap[o.recipe_id]?.name || 'Petisco',
+                          recipeName: o.recipe_name || rec?.name || 'Petisco',
                           station: 'cozinha',
                         })
                       }
@@ -1245,7 +1352,7 @@ export const WaiterStationView: React.FC<WaiterStationViewProps> = ({
                   {' '}
                   · 📍 Sua praça:{' '}
                   <b className="text-[var(--ok)]">
-                    {myZones.map((z) => `${z.name} (${z.tables.length})`).join(', ')}
+                    {myZones.map((z) => `${z.name} (${(z.table_labels || []).length})`).join(', ')}
                   </b>
                 </>
               )}

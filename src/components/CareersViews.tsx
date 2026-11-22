@@ -24,6 +24,80 @@ import type {
 import { ImageUploader, LocationPicker } from './SharedUI';
 import { StoreProfileRenderer } from './StoreProfileRenderer';
 
+export const StoreProfileModal: React.FC<{
+  bar: Partial<Bar>;
+  jobs: JobPost[];
+  appliedJobIds: string[];
+  onApplyJob?: (job: JobPost) => void;
+  onClose: () => void;
+  backLabel?: string;
+}> = ({
+  bar,
+  jobs,
+  appliedJobIds,
+  onApplyJob,
+  onClose,
+  backLabel = '← Voltar',
+}) => {
+  const [fullBar, setFullBar] = useState<Partial<Bar>>(bar);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    setFullBar(bar);
+    if (!bar.id) return;
+    let mounted = true;
+    setLoading(true);
+    void (async () => {
+      try {
+        const rpc = await sb.rpc('get_menu', { p_bar: bar.id });
+        if (!mounted) return;
+        const fetched = (rpc.data as { bar?: Partial<Bar> } | null)?.bar;
+        if (!rpc.error && fetched && fetched.id) {
+          setFullBar((prev) => ({ ...prev, ...fetched }));
+        } else {
+          const direct = await sb
+            .from('bars')
+            .select(
+              'id,name,handle,city,lat,lon,kind,logo_url,banner_url,slogan,phone,instagram,opening_hours,about,store_profile_data,color_bg,color_surface,color_accent,color_ok,color_text,name_font,crest_border,crest_base,crest_icon,crest_ornament,accepting_orders'
+            )
+            .eq('id', bar.id)
+            .maybeSingle();
+          if (mounted && !direct.error && direct.data) {
+            setFullBar((prev) => ({ ...prev, ...(direct.data as Partial<Bar>) }));
+          }
+        }
+      } finally {
+        if (mounted) setLoading(false);
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, [bar.id]);
+
+  return (
+    <div className="ov !z-[60]" onClick={onClose}>
+      <div className="w narrow" onClick={(e) => e.stopPropagation()}>
+        <div className="row sp mb-3">
+          <button type="button" className="b g sm" onClick={onClose}>
+            {backLabel}
+          </button>
+          {loading && <span className="mu text-xs">Carregando dados da loja…</span>}
+        </div>
+        <StoreProfileRenderer
+          bar={fullBar}
+          jobs={jobs.filter((x) => x.bar_id === fullBar.id)}
+          appliedJobIds={appliedJobIds}
+          onApplyJob={onApplyJob}
+          onOpenMenu={(id) => {
+            window.location.href = menuUrl(id);
+          }}
+        />
+      </div>
+    </div>
+  );
+};
+
 export const ProfileSection: React.FC<{
   profile: StaffProfile;
   userId: string;
@@ -44,6 +118,18 @@ export const ProfileSection: React.FC<{
   const [err, setErr] = useState('');
   const [msg, setMsg] = useState('');
   const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setDisplayName(profile.display_name || '');
+    setAvatarUrl(profile.avatar_url || '');
+    setPdfUrl(profile.resume_pdf_url || '');
+    setLocation(profile.location || '');
+    setWorkMode(profile.work_mode || 'ambos');
+    setExpYears(String(profile.experience_years || 0));
+    setAvailability(profile.availability || '');
+    setSkills(new Set(profile.skills || []));
+    setBio(profile.bio || '');
+  }, [profile.user_id, profile.updated_at]);
 
   const handlePdfChange = async (file?: File | null) => {
     if (!file) return;
@@ -71,7 +157,7 @@ export const ProfileSection: React.FC<{
       bio,
     });
     if (missing.length > 0) {
-      const m = `Preencha todos os campos do currículo: ${missing.join(', ')}.`;
+      const m = `Preencha todos os campos obrigatórios do currículo: ${missing.join(', ')}.`;
       setErr(m);
       onToast(m);
       return;
@@ -83,7 +169,7 @@ export const ProfileSection: React.FC<{
         {
           user_id: userId,
           display_name: displayName.trim(),
-          avatar_url: avatarUrl.trim(),
+          avatar_url: avatarUrl.trim() || null,
           resume_pdf_url: pdfUrl.trim() || null,
           location: location.trim(),
           work_mode: workMode,
@@ -103,19 +189,19 @@ export const ProfileSection: React.FC<{
       return;
     }
     if (r.data) onProfileSaved(r.data as StaffProfile);
-    setMsg('Currículo salvo e pronto para vagas!');
+    setMsg('Currículo salvo e pronto para se candidatar às vagas!');
     onToast('Currículo salvo!');
   };
 
   return (
     <div className="panel">
       <h2>Meu Currículo Profissional</h2>
-      <p className="mu">Preencha os campos obrigatórios (*) para poder se candidatar às vagas.</p>
+      <p className="mu">Preencha os campos obrigatórios (*) para enviar seu currículo para qualquer loja.</p>
       <label>Nome profissional *</label>
       <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
 
       <ImageUploader
-        label="Foto de rosto * (câmera ou galeria)"
+        label="Foto de rosto (opcional, recomendada)"
         value={avatarUrl}
         folder="avatars"
         userId={userId}
@@ -272,21 +358,55 @@ export const JobsSection: React.FC<{
     .sort((a, b) => a._km - b._km);
 
   const [inspectBar, setInspectBar] = useState<Partial<Bar> | null>(null);
+  const [applyingJobId, setApplyingJobId] = useState<string | null>(null);
+  const [applyNote, setApplyNote] = useState('');
+  const [sendingApp, setSendingApp] = useState(false);
 
-  const handleApply = async (jobId: string) => {
+  const handleApply = async (jobId: string, customMessage?: string) => {
     if (missingProfileFields.length > 0) {
       onToast(`Complete seu currículo antes de se candidatar: ${missingProfileFields.join(', ')}.`);
       if (onGoProfile) onGoProfile();
       return;
     }
-    const r = await sb
-      .from('job_applications')
-      .insert({ job_id: jobId, applicant_id: userId, message: 'Currículo enviado.' });
-    if (r.error) {
-      onToast('Erro: ' + r.error.message);
-      return;
+    setSendingApp(true);
+    // Garante que o perfil esteja gravado no Supabase antes de vincular a candidatura
+    if (profile && profile.display_name) {
+      await sb.from('staff_profiles').upsert(
+        {
+          user_id: userId,
+          display_name: profile.display_name,
+          avatar_url: profile.avatar_url || null,
+          resume_pdf_url: profile.resume_pdf_url || null,
+          location: profile.location || null,
+          work_mode: profile.work_mode || 'ambos',
+          experience_years: profile.experience_years || 0,
+          availability: profile.availability || null,
+          skills: profile.skills || [],
+          bio: profile.bio || null,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: 'user_id' }
+      );
     }
-    onToast('Candidatura enviada!');
+
+    const r = await sb.from('job_applications').insert({
+      job_id: jobId,
+      applicant_id: userId,
+      message: (customMessage || applyNote).trim() || 'Currículo enviado pelo app Meu Bar.',
+    });
+    setSendingApp(false);
+    if (r.error) {
+      if (r.error.code === '23505') {
+        onToast('Você já enviou seu currículo para esta vaga!');
+      } else {
+        onToast('Erro ao enviar currículo: ' + r.error.message);
+        return;
+      }
+    } else {
+      onToast('✓ Currículo enviado para a empresa com sucesso!');
+    }
+    setApplyingJobId(null);
+    setApplyNote('');
     await onRefreshJobs();
   };
 
@@ -385,66 +505,122 @@ export const JobsSection: React.FC<{
         </div>
       </div>
 
+      {myApps.length > 0 && (
+        <div className="panel mt-3 !py-2.5 !px-3.5 !border-[var(--ok)]/50">
+          <div className="text-xs font-bold text-[var(--ok)]">
+            ✓ Você já enviou currículo para {myApps.length} vaga(s)
+          </div>
+          <div className="text-[11px] text-[var(--mut)] mt-0.5">
+            A empresa recebe seu currículo completo (dados, habilidades e PDF) na aba Currículos recebidos.
+          </div>
+        </div>
+      )}
+
       <div className="list mt-3">
         {list.length > 0 ? (
           list.map((j) => {
             const applied = myApps.some((a) => a.job_id === j.id);
-            const bName = j.bars
+            const bName = j.bars?.name
               ? `${j.bars.name}${j.bars.handle ? ` (@${j.bars.handle})` : ''}`
-              : 'Estabelecimento';
+              : 'Ver perfil da loja';
             const distTxt = j._km < 9000 ? ` · ${j._km.toFixed(1)} km` : '';
+            const storePayload: Partial<Bar> = {
+              ...(j.bars || {}),
+              id: j.bar_id,
+              name: j.bars?.name || 'Estabelecimento',
+              city: j.bars?.city || j.location,
+            };
+            const isDrafting = applyingJobId === j.id;
             return (
-              <div key={j.id} className="!items-start">
-                <div className="flex-1">
-                  <b>{j.title}</b>{' '}
-                  <span className="badge-warn">
-                    {j.contract_type} · {ROLE_LABELS[j.role_needed] || j.role_needed}
-                  </span>
-                  <br />
-                  <span className="tag">
-                    {j.bars?.name ? (
+              <div key={j.id} className="!items-start !flex-col gap-2.5">
+                <div className="flex items-start justify-between gap-2.5 w-full">
+                  <div className="flex-1 min-w-0">
+                    <b>{j.title}</b>{' '}
+                    <span className="badge-warn">
+                      {j.contract_type} · {ROLE_LABELS[j.role_needed] || j.role_needed}
+                    </span>
+                    <br />
+                    <span className="tag">
                       <button
                         type="button"
                         className="lnk !p-0 !text-[var(--ac)] underline font-semibold mr-1"
-                        onClick={() => setInspectBar({ id: j.bar_id, ...j.bars })}
+                        onClick={() => setInspectBar(storePayload)}
                       >
                         🏪 {bName}
-                      </button>
-                    ) : (
-                      bName
-                    )}{' '}
-                    · 📍 {j.location}
-                    {distTxt} ·{' '}
-                    <a
-                      href={externalMapUrl(j.bars || { city: j.location })}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-[var(--ac)]"
+                      </button>{' '}
+                      · 📍 {j.location}
+                      {distTxt}
+                      {j.pay_info ? ` · 💰 ${j.pay_info}` : ''} ·{' '}
+                      <a
+                        href={externalMapUrl(j.bars || { city: j.location })}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-[var(--ac)]"
+                      >
+                        Mapa
+                      </a>
+                    </span>
+                    {j.description && <p className="mu mt-1.5 !mb-0">{j.description}</p>}
+                  </div>
+                  <div className="flex flex-col gap-1.5 shrink-0">
+                    <button
+                      type="button"
+                      className={`b sm ${applied ? 'g' : ''}`}
+                      disabled={applied || sendingApp}
+                      onClick={() => {
+                        if (applied) return;
+                        if (missingProfileFields.length > 0) {
+                          void handleApply(j.id);
+                          return;
+                        }
+                        setApplyingJobId(isDrafting ? null : j.id);
+                      }}
                     >
-                      Abrir no mapa
-                    </a>
-                  </span>
-                  {j.description && <p className="mu mt-1.5">{j.description}</p>}
-                </div>
-                <div className="flex flex-col gap-1.5 shrink-0">
-                  <button
-                    type="button"
-                    className={`b sm ${applied ? 'g' : ''}`}
-                    disabled={applied}
-                    onClick={() => void handleApply(j.id)}
-                  >
-                    {applied ? 'Candidatado' : 'Candidatar-se'}
-                  </button>
-                  {j.bars?.name && (
+                      {applied ? '✓ Enviado' : 'Enviar currículo'}
+                    </button>
                     <button
                       type="button"
                       className="b g sm"
-                      onClick={() => setInspectBar({ id: j.bar_id, ...j.bars })}
+                      onClick={() => setInspectBar(storePayload)}
                     >
-                      Ver loja
+                      🏪 Ver loja
                     </button>
-                  )}
+                  </div>
                 </div>
+
+                {isDrafting && !applied && (
+                  <div className="w-full rounded-xl p-2.5 border border-[var(--ac)]/40 bg-[var(--s2)] space-y-2">
+                    <div className="text-xs font-semibold">
+                      Mensagem de apresentação para a loja (opcional):
+                    </div>
+                    <input
+                      value={applyNote}
+                      onChange={(e) => setApplyNote(e.target.value)}
+                      placeholder="Ex: Tenho disponibilidade imediata para sextas e sábados..."
+                      className="!mt-0"
+                    />
+                    <div className="flex gap-1.5 justify-end">
+                      <button
+                        type="button"
+                        className="b g sm"
+                        onClick={() => {
+                          setApplyingJobId(null);
+                          setApplyNote('');
+                        }}
+                      >
+                        Cancelar
+                      </button>
+                      <button
+                        type="button"
+                        className="b sm ok"
+                        disabled={sendingApp}
+                        onClick={() => void handleApply(j.id)}
+                      >
+                        {sendingApp ? 'Enviando…' : 'Confirmar envio do currículo'}
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             );
           })
@@ -454,26 +630,14 @@ export const JobsSection: React.FC<{
       </div>
 
       {inspectBar && (
-        <div className="ov">
-          <div className="w narrow">
-            <button
-              type="button"
-              className="b g sm mb-3"
-              onClick={() => setInspectBar(null)}
-            >
-              ← Voltar para vagas
-            </button>
-            <StoreProfileRenderer
-              bar={inspectBar}
-              jobs={jobs.filter((x) => x.bar_id === inspectBar.id)}
-              appliedJobIds={myApps.map((a) => a.job_id)}
-              onApplyJob={(job) => void handleApply(job.id)}
-              onOpenMenu={(id) => {
-                window.location.href = menuUrl(id);
-              }}
-            />
-          </div>
-        </div>
+        <StoreProfileModal
+          bar={inspectBar}
+          jobs={jobs}
+          appliedJobIds={myApps.map((a) => a.job_id)}
+          onApplyJob={(job) => void handleApply(job.id)}
+          onClose={() => setInspectBar(null)}
+          backLabel="← Voltar para vagas"
+        />
       )}
     </div>
   );
@@ -995,72 +1159,148 @@ export const CreateJobSection: React.FC<{
   );
 };
 
-export const ReceivedAppsSection: React.FC<{ receivedApps: JobApplication[] }> = ({
-  receivedApps,
-}) => {
-  const byJob: Record<string, { title: string; items: JobApplication[] }> = {};
+export const ReceivedAppsSection: React.FC<{
+  bar?: Bar | null;
+  receivedApps: JobApplication[];
+  onRefresh?: () => Promise<void>;
+  onMembersUpdated?: (members: BarMember[]) => void;
+  onToast?: (msg: string) => void;
+}> = ({ bar, receivedApps, onRefresh, onMembersUpdated, onToast }) => {
+  const [addingId, setAddingId] = useState<string | null>(null);
+
+  const byJob: Record<string, { id: string; title: string; role?: string; items: JobApplication[] }> = {};
   receivedApps.forEach((a) => {
     const jid = a.job_id || 'geral';
-    const jTitle = a.job_posts?.title || 'Vaga';
-    if (!byJob[jid]) byJob[jid] = { title: jTitle, items: [] };
+    const jTitle = a.job_posts?.title || 'Vaga publicada';
+    if (!byJob[jid]) {
+      byJob[jid] = { id: jid, title: jTitle, role: a.job_posts?.role_needed, items: [] };
+    }
     byJob[jid].items.push(a);
   });
   const groups = Object.values(byJob);
 
+  const handleHireToTeam = async (app: JobApplication) => {
+    if (!bar) return;
+    setAddingId(app.id);
+    const sp = app.staff_profiles || ({} as StaffProfile);
+    const roleToAssign = app.job_posts?.role_needed || 'garcom';
+    const candName = sp.display_name || 'Novo membro';
+    let up = await sb.from('bar_members').upsert(
+      {
+        bar_id: bar.id,
+        user_id: app.applicant_id,
+        role: roleToAssign,
+        name: candName,
+      },
+      { onConflict: 'bar_id,user_id' }
+    );
+    if (up.error) {
+      up = await sb.from('bar_members').insert({
+        bar_id: bar.id,
+        user_id: app.applicant_id,
+        role: roleToAssign,
+        name: candName,
+      });
+    }
+    setAddingId(null);
+    if (up.error) {
+      onToast?.('Erro ao adicionar à equipe: ' + up.error.message);
+      return;
+    }
+    const mem = await sb.from('bar_members').select('*').eq('bar_id', bar.id);
+    if (!mem.error && mem.data) onMembersUpdated?.(mem.data as BarMember[]);
+    onToast?.(`✓ ${candName} adicionado à equipe como ${ROLE_LABELS[roleToAssign] || roleToAssign}!`);
+  };
+
   return (
     <div className="panel">
-      <h2>Currículos recebidos por vaga ({receivedApps.length})</h2>
+      <div className="row sp flex-wrap gap-2">
+        <h2 className="!m-0">Currículos recebidos ({receivedApps.length})</h2>
+        {onRefresh && (
+          <button type="button" className="b g sm" onClick={() => void onRefresh()}>
+            🔄 Atualizar
+          </button>
+        )}
+      </div>
+      <p className="mu text-xs mt-1">
+        Todos os candidatos que enviaram currículo para as vagas da sua loja aparecem automaticamente aqui.
+      </p>
+
       {groups.length > 0 ? (
         groups.map((g) => (
-          <div key={g.title} className="panel !bg-[var(--s2)] mt-3">
-            <h3>
-              Vaga: {g.title} ({g.items.length})
+          <div key={g.id} className="panel !bg-[var(--s2)] mt-3">
+            <h3 className="!m-0">
+              💼 Vaga: {g.title} ({g.items.length})
             </h3>
             <div className="list mt-2.5">
               {g.items.map((a) => {
                 const sp = a.staff_profiles || ({} as StaffProfile);
+                const candName = sp.display_name || 'Candidato';
+                const initials = candName.slice(0, 2).toUpperCase();
                 return (
-                  <div key={a.id} className="!items-start">
-                    <div className="row !items-start flex-1">
-                      {sp.avatar_url && (
-                        <img className="img-thumb" src={sp.avatar_url} alt="Rosto" />
+                  <div key={a.id} className="!items-start !flex-col gap-2">
+                    <div className="row !items-start w-full">
+                      {sp.avatar_url ? (
+                        <img className="img-thumb" src={sp.avatar_url} alt={candName} />
+                      ) : (
+                        <div className="w-12 h-12 rounded-xl bg-[var(--s1)] border border-[var(--bd)] flex items-center justify-center font-extrabold text-[var(--ac)] shrink-0">
+                          {initials}
+                        </div>
                       )}
-                      <div className="flex-1">
-                        <b>{sp.display_name || 'Candidato'}</b>
-                        {sp.location && (
-                          <>
-                            <br />
-                            <span className="tag">
-                              📍 {sp.location}
-                              {sp.work_mode ? ` · ${sp.work_mode}` : ''}
-                              {sp.experience_years ? ` · ${sp.experience_years}a exp.` : ''}
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <b>{candName}</b>
+                          {a.created_at && (
+                            <span className="text-[11px] text-[var(--mut)]">
+                              Enviado em {new Date(a.created_at).toLocaleDateString('pt-BR')}
                             </span>
-                          </>
+                          )}
+                        </div>
+                        {(sp.location || sp.work_mode || sp.experience_years) && (
+                          <div className="tag mt-0.5">
+                            {sp.location ? `📍 ${sp.location}` : ''}
+                            {sp.work_mode ? ` · ${sp.work_mode}` : ''}
+                            {sp.experience_years ? ` · ${sp.experience_years}a exp.` : ''}
+                          </div>
+                        )}
+                        {sp.availability && (
+                          <div className="tag">🕒 Disponibilidade: {sp.availability}</div>
                         )}
                         {Array.isArray(sp.skills) && sp.skills.length > 0 && (
-                          <>
-                            <br />
-                            <span className="tag">Funções: {sp.skills.join(', ')}</span>
-                          </>
+                          <div className="tag">⭐ Funções: {sp.skills.join(', ')}</div>
                         )}
-                        {(() => {
-                          const safePdf = safeExternalUrl(sp.resume_pdf_url);
-                          if (!safePdf) return null;
-                          return (
-                            <>
-                              <br />
+                        {a.message && (
+                          <div className="text-xs mt-1.5 p-2 rounded-lg bg-[var(--s1)] border border-[var(--bd)]">
+                            💬 <i>"{a.message}"</i>
+                          </div>
+                        )}
+                        {sp.bio && <p className="mu mt-1.5 !mb-0">{sp.bio}</p>}
+                        <div className="flex flex-wrap items-center gap-2 mt-2">
+                          {(() => {
+                            const safePdf = safeExternalUrl(sp.resume_pdf_url);
+                            if (!safePdf) return null;
+                            return (
                               <a
                                 href={safePdf}
                                 target="_blank"
                                 rel="noopener noreferrer"
-                                className="text-[var(--ac)] text-[0.82rem]"
+                                className="b g sm no-underline"
                               >
-                                📄 Ver currículo em PDF
+                                📄 Abrir currículo PDF
                               </a>
-                            </>
-                          );
-                        })()}
-                        {sp.bio && <p className="mu mt-1.5">{sp.bio}</p>}
+                            );
+                          })()}
+                          {bar && (
+                            <button
+                              type="button"
+                              className="b ok sm"
+                              disabled={addingId === a.id}
+                              onClick={() => void handleHireToTeam(a)}
+                            >
+                              {addingId === a.id ? 'Adicionando…' : '➕ Aceitar na equipe'}
+                            </button>
+                          )}
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -1070,7 +1310,9 @@ export const ReceivedAppsSection: React.FC<{ receivedApps: JobApplication[] }> =
           </div>
         ))
       ) : (
-        <p className="mu mt-2">Nenhum currículo recebido ainda.</p>
+        <p className="mu mt-2">
+          Nenhum currículo recebido ainda. Publique uma vaga na aba <b>Criar vagas</b> para receber candidatos.
+        </p>
       )}
     </div>
   );
@@ -1079,56 +1321,85 @@ export const ReceivedAppsSection: React.FC<{ receivedApps: JobApplication[] }> =
 export const MyStoreProfiles: React.FC<{
   bars: BarEntry[];
   activeBar: Bar | null;
+  jobs?: JobPost[];
+  myApps?: JobApplication[];
   onUsePersonal: () => void;
   onOpenBar: (bar: Bar, role: string) => Promise<void>;
-}> = ({ bars, activeBar, onUsePersonal, onOpenBar }) => (
-  <div className="panel">
-    <h2>Perfis de loja</h2>
-    <p className="mu">Alterne entre seu perfil pessoal e as lojas em que você trabalha.</p>
-    <div className="list">
-      <div>
-        <div className="flex-1">
-          <b>Perfil pessoal</b>
-          <br />
-          <span className="mu">Acesso completo ao app</span>
-        </div>
-        {activeBar ? (
-          <button type="button" className="b sm g" onClick={onUsePersonal}>
-            Usar pessoal
-          </button>
-        ) : (
-          <span className="chip st1">Ativo</span>
-        )}
-      </div>
-      {bars.map((x) => {
-        const active = activeBar?.id === x.bar.id;
-        return (
-          <div key={x.bar.id}>
-            <div className="flex-1">
-              <b>{x.bar.name}</b>
-              <br />
-              <span className="tag">
-                {x.role}
-                {x.bar.handle ? ` · @${x.bar.handle}` : ''}
-              </span>
-            </div>
-            {active ? (
-              <span className="chip st1">Ativo</span>
-            ) : (
-              <button
-                type="button"
-                className="b sm"
-                onClick={() => void onOpenBar(x.bar, x.role)}
-              >
-                Entrar
-              </button>
-            )}
+}> = ({ bars, activeBar, jobs = [], myApps = [], onUsePersonal, onOpenBar }) => {
+  const [inspectBar, setInspectBar] = useState<Bar | null>(null);
+
+  return (
+    <div className="panel">
+      <h2>Perfis de loja</h2>
+      <p className="mu">Alterne entre seu perfil pessoal e as lojas em que você trabalha, ou visualize o perfil público da loja.</p>
+      <div className="list">
+        <div>
+          <div className="flex-1">
+            <b>Perfil pessoal</b>
+            <br />
+            <span className="mu">Currículo, vagas e candidaturas</span>
           </div>
-        );
-      })}
+          {activeBar ? (
+            <button type="button" className="b sm g" onClick={onUsePersonal}>
+              Usar pessoal
+            </button>
+          ) : (
+            <span className="chip st1">Ativo</span>
+          )}
+        </div>
+        {bars.map((x) => {
+          const active = activeBar?.id === x.bar.id;
+          return (
+            <div key={x.bar.id}>
+              <div
+                className="flex-1 cursor-pointer min-w-0"
+                onClick={() => setInspectBar(x.bar)}
+              >
+                <b>{x.bar.name}</b>
+                <br />
+                <span className="tag">
+                  {x.role}
+                  {x.bar.handle ? ` · @${x.bar.handle}` : ''}
+                  {x.bar.city ? ` · ${x.bar.city}` : ''}
+                </span>
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0">
+                <button
+                  type="button"
+                  className="b g sm"
+                  onClick={() => setInspectBar(x.bar)}
+                >
+                  👁 Perfil
+                </button>
+                {active ? (
+                  <span className="chip st1">Ativo</span>
+                ) : (
+                  <button
+                    type="button"
+                    className="b sm"
+                    onClick={() => void onOpenBar(x.bar, x.role)}
+                  >
+                    Entrar
+                  </button>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {inspectBar && (
+        <StoreProfileModal
+          bar={inspectBar}
+          jobs={jobs}
+          appliedJobIds={myApps.map((a) => a.job_id)}
+          onClose={() => setInspectBar(null)}
+          backLabel="← Voltar para minhas lojas"
+        />
+      )}
     </div>
-  </div>
-);
+  );
+};
 
 export const CareersView: React.FC<{
   mode: 'store' | 'personal';
@@ -1255,7 +1526,13 @@ export const CareersView: React.FC<{
             onToast={onToast}
           />
         ) : subTab === 'apps' ? (
-          <ReceivedAppsSection receivedApps={receivedApps} />
+          <ReceivedAppsSection
+            bar={activeBar}
+            receivedApps={receivedApps}
+            onRefresh={onRefreshJobs}
+            onMembersUpdated={onMembersUpdated}
+            onToast={onToast}
+          />
         ) : (
           <TeamSection
             bar={activeBar}
@@ -1291,6 +1568,8 @@ export const CareersView: React.FC<{
         <MyStoreProfiles
           bars={bars}
           activeBar={activeBar}
+          jobs={jobs}
+          myApps={myApps}
           onUsePersonal={onUsePersonal}
           onOpenBar={onOpenBar}
         />
@@ -1306,6 +1585,7 @@ export const ExploreBarsView: React.FC<{
   profile?: StaffProfile;
   userId?: string;
   userCoords: UserCoords | null;
+  onOpenBar?: (bar: Bar) => void;
   onRefreshJobs?: () => Promise<void>;
   onGoProfile?: () => void;
   onToast?: (msg: string) => void;
@@ -1316,36 +1596,54 @@ export const ExploreBarsView: React.FC<{
   profile,
   userId,
   userCoords,
+  onOpenBar,
   onRefreshJobs,
   onGoProfile,
   onToast,
 }) => {
   const [selectedBar, setSelectedBar] = useState<Partial<Bar> | null>(null);
+  const [viewFilter, setViewFilter] = useState<'mine' | 'hiring'>(() =>
+    publicBars.length > 0 ? 'mine' : 'hiring'
+  );
   const [search, setSearch] = useState('');
   const origin = userCoords || { lat: -15.7942, lon: -47.8822 };
 
-  const map: Record<string, { bar: Partial<Bar>; jobs: JobPost[] }> = {};
-
+  // 1. Minhas lojas (somente as vinculadas à conta do usuário)
+  const myBarsMap: Record<string, { bar: Partial<Bar>; jobs: JobPost[]; isMine: boolean }> = {};
   publicBars.forEach((b) => {
     if (!b?.id || !b?.name) return;
-    map[b.id] = { bar: b, jobs: [] };
+    myBarsMap[b.id] = { bar: b, jobs: [], isMine: true };
   });
-
   jobs.forEach((j) => {
-    if (!j.bar_id) return;
-    if (!map[j.bar_id]) {
-      if (!j.bars?.name) return;
-      map[j.bar_id] = {
-        bar: { id: j.bar_id, ...j.bars, city: j.bars.city || j.location },
-        jobs: [],
-      };
-    } else if (j.bars) {
-      map[j.bar_id].bar = { ...j.bars, ...map[j.bar_id].bar, id: j.bar_id };
+    if (j.bar_id && myBarsMap[j.bar_id]) {
+      myBarsMap[j.bar_id].jobs.push(j);
     }
-    map[j.bar_id].jobs.push(j);
   });
 
-  const list = Object.values(map)
+  // 2. Lojas com vagas abertas (somente estabelecimentos com vaga publicada em aberto)
+  const hiringMap: Record<string, { bar: Partial<Bar>; jobs: JobPost[]; isMine: boolean }> = {};
+  jobs.forEach((j) => {
+    if (!j.bar_id || j.is_open === false) return;
+    if (!hiringMap[j.bar_id]) {
+      hiringMap[j.bar_id] = {
+        bar: {
+          ...(j.bars || {}),
+          id: j.bar_id,
+          name: j.bars?.name || myBarsMap[j.bar_id]?.bar.name || 'Estabelecimento contratando',
+          city: j.bars?.city || j.location,
+        },
+        jobs: [],
+        isMine: Boolean(myBarsMap[j.bar_id]),
+      };
+    }
+    hiringMap[j.bar_id].jobs.push(j);
+  });
+
+  const activeSource = viewFilter === 'mine' ? Object.values(myBarsMap) : Object.values(hiringMap);
+  const mineCount = Object.keys(myBarsMap).length;
+  const hiringCount = Object.keys(hiringMap).length;
+
+  const list = activeSource
     .map((entry) => {
       const b = entry.bar;
       const km =
@@ -1364,10 +1662,7 @@ export const ExploreBarsView: React.FC<{
         (entry.bar.slogan || '').toLowerCase().includes(q)
       );
     })
-    .sort((a, b) => {
-      if (a._km !== b._km) return a._km - b._km;
-      return b.jobs.length - a.jobs.length;
-    });
+    .sort((a, b) => (a.bar.name || '').localeCompare(b.bar.name || ''));
 
   const handleApplyFromProfile = async (job: JobPost) => {
     if (!userId) return;
@@ -1379,56 +1674,80 @@ export const ExploreBarsView: React.FC<{
     }
     const r = await sb
       .from('job_applications')
-      .insert({ job_id: job.id, applicant_id: userId, message: 'Currículo enviado.' });
+      .insert({ job_id: job.id, applicant_id: userId, message: 'Currículo enviado pelo perfil da loja.' });
     if (r.error) {
-      onToast?.('Erro: ' + r.error.message);
-      return;
+      if (r.error.code === '23505') {
+        onToast?.('Você já se candidatou a esta vaga!');
+      } else {
+        onToast?.('Erro: ' + r.error.message);
+        return;
+      }
+    } else {
+      onToast?.('✓ Currículo enviado para a loja!');
     }
-    onToast?.('Candidatura enviada!');
     if (onRefreshJobs) await onRefreshJobs();
   };
 
   return (
     <div>
-      <h1>🏪 Lojas & Bares próximos</h1>
+      <h1>🏪 Lojas & Perfis</h1>
       <p className="mu">
-        Toque em qualquer estabelecimento para abrir o perfil personalizado, ver fotos, informações
-        e se candidatar às vagas abertas.
+        Veja suas próprias lojas ou conheça o perfil completo de estabelecimentos que estão com vagas abertas.
       </p>
 
-      <input
-        value={search}
-        onChange={(e) => setSearch(e.target.value)}
-        placeholder="Buscar bar por nome, @ ou cidade..."
-        className="mt-2.5"
-      />
+      <div className="chips !flex-wrap !overflow-visible mt-2.5">
+        <button
+          type="button"
+          className={`chip ${viewFilter === 'mine' ? 'on' : ''}`}
+          onClick={() => setViewFilter('mine')}
+        >
+          🏪 Minhas lojas ({mineCount})
+        </button>
+        <button
+          type="button"
+          className={`chip ${viewFilter === 'hiring' ? 'on' : ''}`}
+          onClick={() => setViewFilter('hiring')}
+        >
+          💼 Contratando agora ({hiringCount})
+        </button>
+      </div>
+
+      {list.length > 2 && (
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Filtrar lojas por nome ou cidade..."
+          className="mt-2.5"
+        />
+      )}
 
       <div className="flex flex-col gap-2.5 mt-3">
         {list.length > 0 ? (
-          list.map(({ bar: b, jobs: barJobs, _km }) => {
+          list.map(({ bar: b, jobs: barJobs, _km, isMine }) => {
             const accent = b.color_accent || '#e5a93c';
             return (
               <div
                 key={b.id}
-                onClick={() => setSelectedBar(b)}
-                className="rounded-2xl overflow-hidden border border-[var(--bd)] bg-[var(--sf)] cursor-pointer hover:border-[var(--ac)] transition-all"
+                className="rounded-2xl overflow-hidden border border-[var(--bd)] bg-[var(--sf)] hover:border-[var(--ac)] transition-all"
               >
                 {b.banner_url && (
                   <div
-                    className="h-24 w-full bg-cover bg-center relative"
+                    className="h-24 w-full bg-cover bg-center relative cursor-pointer"
                     style={{ backgroundImage: `url('${b.banner_url}')` }}
+                    onClick={() => setSelectedBar(b)}
                   >
-                    <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent" />
+                    <div className="absolute inset-0 bg-gradient-to-t from-black/75 via-black/20 to-transparent" />
                   </div>
                 )}
-                <div className="p-3.5 flex items-center gap-3">
+                <div className="p-3.5 flex items-center gap-3 flex-wrap">
                   <img
                     src={b.logo_url || '/logo.png'}
                     alt={b.name || 'Bar'}
-                    className="w-12 h-12 rounded-xl object-cover shrink-0 border-2"
+                    className="w-12 h-12 rounded-xl object-cover shrink-0 border-2 cursor-pointer"
                     style={{ borderColor: accent }}
+                    onClick={() => setSelectedBar(b)}
                   />
-                  <div className="min-w-0 flex-1">
+                  <div className="min-w-0 flex-1 cursor-pointer" onClick={() => setSelectedBar(b)}>
                     <div className="flex items-center gap-2 flex-wrap">
                       <b className={`text-base truncate ${b.name_font || ''}`}>{b.name}</b>
                       {b.handle && <span className="tag">@{b.handle}</span>}
@@ -1444,45 +1763,54 @@ export const ExploreBarsView: React.FC<{
                         </span>
                       )}
                       {barJobs.length > 0 && (
-                        <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-[var(--ok)]/20 text-[var(--ok)]">
-                          💼 {barJobs.length} vaga(s)
+                        <span className="text-[11px] font-bold text-[var(--ok)]">
+                          💼 {barJobs.length} vaga(s) aberta(s)
                         </span>
                       )}
                     </div>
                   </div>
-                  <span className="b g sm shrink-0">Ver perfil →</span>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      type="button"
+                      className="b g sm"
+                      onClick={() => setSelectedBar(b)}
+                    >
+                      👁 Ver perfil
+                    </button>
+                    {isMine && onOpenBar && b.id && (
+                      <button
+                        type="button"
+                        className="b sm"
+                        onClick={() => onOpenBar(b as Bar)}
+                      >
+                        Painel →
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
             );
           })
         ) : (
           <div className="panel">
-            <p className="mu">Nenhum bar encontrado no momento.</p>
+            <p className="mu">
+              {viewFilter === 'mine'
+                ? 'Você ainda não possui nenhuma loja vinculada à sua conta. Vá em Meu bar para criar sua loja ou veja a aba Contratando agora.'
+                : 'Nenhuma loja com vagas abertas no momento.'}
+            </p>
           </div>
         )}
       </div>
 
       {selectedBar && (
-        <div className="ov">
-          <div className="w narrow">
-            <button
-              type="button"
-              className="b g sm mb-3"
-              onClick={() => setSelectedBar(null)}
-            >
-              ← Voltar para bares próximos
-            </button>
-            <StoreProfileRenderer
-              bar={selectedBar}
-              jobs={jobs.filter((x) => x.bar_id === selectedBar.id)}
-              appliedJobIds={myApps.map((a) => a.job_id)}
-              onApplyJob={userId ? (job) => void handleApplyFromProfile(job) : undefined}
-              onOpenMenu={(id) => {
-                window.location.href = menuUrl(id);
-              }}
-            />
-          </div>
-        </div>
+        <StoreProfileModal
+          bar={selectedBar}
+          jobs={jobs}
+          appliedJobIds={myApps.map((a) => a.job_id)}
+          onApplyJob={userId ? (job) => void handleApplyFromProfile(job) : undefined}
+          onClose={() => setSelectedBar(null)}
+          backLabel="← Voltar para lojas"
+        />
       )}
     </div>
   );

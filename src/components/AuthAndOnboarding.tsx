@@ -1,4 +1,12 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import {
+  clearQuickProfile,
+  getSavedQuickProfile,
+  isDeviceBiometricAvailable,
+  verifyDeviceBiometricUnlock,
+  verifyQuickPin,
+  type SavedQuickProfile,
+} from '../lib/quickAuth';
 import { sb, writeBarSafe } from '../lib/supabase';
 import { slugHandle } from '../lib/utils';
 import type { Bar, BarEntry, JobPost, StaffProfile, UserCoords } from '../types/meubar';
@@ -10,17 +18,183 @@ import { checkActionCooldown, evaluatePasswordStrength } from '../lib/security';
 import { AdSlot } from './AdSlot';
 import type { PartnerAdBanner, PlatformSaaSConfig } from '../types/meubar';
 
+export const QuickLockScreen: React.FC<{
+  profile: SavedQuickProfile;
+  onUnlocked: () => void;
+  onSwitchAccount: () => Promise<void> | void;
+}> = ({ profile, onUnlocked, onSwitchAccount }) => {
+  const [biometricSupported, setBiometricSupported] = useState(false);
+  const [pin, setPin] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const autoTriedRef = useRef(false);
+
+  const hasBiometric = Boolean(profile.credentialId);
+  const hasPin = Boolean(profile.pinHash && profile.pinSalt);
+
+  const runBiometricUnlock = async () => {
+    if (!profile.credentialId || busy) return;
+    setErr('');
+    setBusy(true);
+    const res = await verifyDeviceBiometricUnlock(profile.credentialId);
+    setBusy(false);
+    if (res.ok) {
+      onUnlocked();
+    } else {
+      setErr(res.error || 'Não foi possível validar o desbloqueio do aparelho.');
+    }
+  };
+
+  useEffect(() => {
+    void isDeviceBiometricAvailable().then((avail) => {
+      setBiometricSupported(avail);
+      if (avail && profile.credentialId && !autoTriedRef.current) {
+        autoTriedRef.current = true;
+      }
+    });
+  }, [profile.credentialId]);
+
+  const handlePinUnlock = async () => {
+    setErr('');
+    const cd = checkActionCooldown('quick_pin_unlock', 600);
+    if (!cd.allowed) {
+      setErr(`Aguarde ${cd.waitSeconds}s antes de tentar novamente.`);
+      return;
+    }
+    setBusy(true);
+    const ok = await verifyQuickPin(profile, pin);
+    setBusy(false);
+    if (ok) {
+      setPin('');
+      onUnlocked();
+    } else {
+      setErr('PIN incorreto. Tente novamente.');
+      setPin('');
+    }
+  };
+
+  const initials = (profile.displayName || profile.email || 'U')
+    .trim()
+    .slice(0, 2)
+    .toUpperCase();
+
+  return (
+    <div className="w narrow min-h-[85dvh] flex flex-col justify-center">
+      <div className="text-center mb-4">
+        <BrandMark big />
+      </div>
+
+      <div className="panel space-y-4 text-center">
+        <div className="flex flex-col items-center gap-2">
+          {profile.avatarUrl ? (
+            <img
+              src={profile.avatarUrl}
+              alt={profile.displayName}
+              className="w-20 h-20 rounded-full object-cover border-2 border-[var(--ac)]"
+            />
+          ) : (
+            <div className="w-20 h-20 rounded-full bg-[var(--s2)] border-2 border-[var(--ac)] flex items-center justify-center text-2xl font-extrabold text-[var(--ac)]">
+              {initials}
+            </div>
+          )}
+          <div>
+            <div className="text-xs font-semibold text-[var(--ac)]">
+              🔒 Acesso Rápido Protegido
+            </div>
+            <h1 className="!mt-0.5 !mb-0 text-xl">{profile.displayName}</h1>
+            <div className="text-xs text-[var(--mut)] mt-0.5">{profile.email}</div>
+            {profile.barName && (
+              <div className="text-xs font-semibold text-[var(--ok)] mt-1">
+                🏪 {profile.barName}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {hasBiometric && (
+          <button
+            type="button"
+            className="b full !py-3.5"
+            disabled={busy}
+            onClick={() => void runBiometricUnlock()}
+          >
+            {busy
+              ? 'Aguardando desbloqueio do celular…'
+              : biometricSupported
+                ? '👆 Desbloquear com Digital / Face ID / Tela'
+                : '👆 Tentar desbloqueio biométrico'}
+          </button>
+        )}
+
+        {hasPin && (
+          <div className="space-y-2 text-left pt-2 border-t border-[var(--bd)]">
+            <label className="!mt-0">
+              {hasBiometric ? 'Ou entre com seu PIN rápido (4 a 6 dígitos)' : 'Digite seu PIN rápido'}
+            </label>
+            <div className="row">
+              <input
+                type="password"
+                inputMode="numeric"
+                pattern="[0-9]*"
+                maxLength={6}
+                value={pin}
+                onChange={(e) => setPin(e.target.value.replace(/\D+/g, '').slice(0, 6))}
+                placeholder="••••"
+                className="grow text-center tracking-[0.4em] font-bold text-lg"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && pin.length >= 4) void handlePinUnlock();
+                }}
+              />
+              <button
+                type="button"
+                className="b shrink-0"
+                disabled={busy || pin.length < 4}
+                onClick={() => void handlePinUnlock()}
+              >
+                Entrar
+              </button>
+            </div>
+          </div>
+        )}
+
+        {!hasBiometric && !hasPin && (
+          <button type="button" className="b full" onClick={onUnlocked}>
+            Continuar como {profile.displayName}
+          </button>
+        )}
+
+        {err && <p className="err !mt-1">{err}</p>}
+
+        <div className="pt-2 border-t border-[var(--bd)]">
+          <button
+            type="button"
+            className="b g full sm"
+            onClick={() => void onSwitchAccount()}
+          >
+            Trocar de conta / Entrar com e-mail e senha
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 export const LoginScreen: React.FC<{
   saasConfig?: PlatformSaaSConfig;
   partnerAds?: PartnerAdBanner[];
   onOpenLegal?: (tab: 'terms' | 'privacy') => void;
   onOpenSalesSite?: () => void;
 }> = ({ saasConfig, partnerAds = [], onOpenLegal, onOpenSalesSite }) => {
-  const [email, setEmail] = useState('');
+  const [savedProfile, setSavedProfile] = useState<SavedQuickProfile | null>(() =>
+    getSavedQuickProfile()
+  );
+  const [useOtherAccount, setUseOtherAccount] = useState(false);
+  const [email, setEmail] = useState(() => getSavedQuickProfile()?.email || '');
   const [password, setPassword] = useState('');
   const [msg, setMsg] = useState('');
   const [isOk, setIsOk] = useState(false);
   const [busy, setBusy] = useState(false);
+  const passwordInputRef = useRef<HTMLInputElement | null>(null);
 
   const pwStrength = evaluatePasswordStrength(password);
 
@@ -51,9 +225,9 @@ export const LoginScreen: React.FC<{
       return;
     }
 
-    const cooldown = checkActionCooldown(`auth_${mode}`, mode === 'up' ? 3000 : 1200);
-    if (!cooldown.ok) {
-      setMsg(`Aguarde ${Math.ceil(cooldown.waitMs / 1000)}s antes de tentar novamente.`);
+    const cooldown = checkActionCooldown(`auth_${mode}`, mode === 'up' ? 2500 : 800);
+    if (!cooldown.allowed) {
+      setMsg(`Aguarde ${cooldown.waitSeconds}s antes de tentar novamente.`);
       return;
     }
 
@@ -72,7 +246,7 @@ export const LoginScreen: React.FC<{
     }
 
     // Cadastro exige senha forte (mínimo 8 caracteres com letras e números)
-    if (!pwStrength.ok) {
+    if (!pwStrength.validForSignup) {
       setMsg(pwStrength.hint);
       return;
     }
@@ -103,6 +277,7 @@ export const LoginScreen: React.FC<{
   };
 
   const trialDays = saasConfig?.trial_days ?? 14;
+  const showSavedCard = Boolean(savedProfile && !useOtherAccount);
 
   return (
     <div className="w narrow">
@@ -113,6 +288,73 @@ export const LoginScreen: React.FC<{
         Gestão completa de bar, receitas, estoque, cardápio QR, delivery 0% e equipe.
         {trialDays > 0 ? ` Comece grátis com ${trialDays} dias Pro liberados.` : ' Comece grátis.'}
       </p>
+
+      {showSavedCard && savedProfile && (
+        <div className="panel !border-[var(--ac)]/60 mb-3 space-y-3">
+          <div className="flex items-center gap-3">
+            {savedProfile.avatarUrl ? (
+              <img
+                src={savedProfile.avatarUrl}
+                alt={savedProfile.displayName}
+                className="w-12 h-12 rounded-full object-cover border-2 border-[var(--ac)] shrink-0"
+              />
+            ) : (
+              <div className="w-12 h-12 rounded-full bg-[var(--s2)] border-2 border-[var(--ac)] flex items-center justify-center font-extrabold text-[var(--ac)] shrink-0">
+                {(savedProfile.displayName || savedProfile.email).slice(0, 2).toUpperCase()}
+              </div>
+            )}
+            <div className="min-w-0 flex-1">
+              <div className="text-[11px] font-semibold text-[var(--ac)]">
+                ⚡ Último perfil salvo neste aparelho
+              </div>
+              <div className="font-bold text-sm truncate">{savedProfile.displayName}</div>
+              <div className="text-xs text-[var(--mut)] truncate">
+                {savedProfile.email}
+                {savedProfile.barName ? ` · 🏪 ${savedProfile.barName}` : ''}
+              </div>
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            <button
+              type="button"
+              className="b sm grow"
+              onClick={() => {
+                setEmail(savedProfile.email);
+                passwordInputRef.current?.focus();
+              }}
+            >
+              Continuar como {savedProfile.displayName.split(' ')[0]}
+            </button>
+            <button
+              type="button"
+              className="b g sm"
+              onClick={() => {
+                setUseOtherAccount(true);
+                setEmail('');
+                setPassword('');
+              }}
+            >
+              Outra conta
+            </button>
+            <button
+              type="button"
+              className="b g sm"
+              onClick={() => {
+                clearQuickProfile();
+                setSavedProfile(null);
+                setEmail('');
+                setPassword('');
+              }}
+            >
+              Esquecer
+            </button>
+          </div>
+          <div className="text-[11px] text-[var(--mut)]">
+            💡 Dica: dentro do app (em <b>Mais → Login Rápido</b>), ative o desbloqueio por digital/Face ID e use o botão 🔒 <b>Bloquear</b> em vez de Sair para entrar com 1 toque pelo desbloqueio do celular.
+          </div>
+        </div>
+      )}
+
       <div className="panel">
         <label>E-mail</label>
         <input
@@ -124,6 +366,7 @@ export const LoginScreen: React.FC<{
         />
         <label>Senha</label>
         <input
+          ref={passwordInputRef}
           type="password"
           autoComplete="current-password"
           placeholder="Mínimo 8 caracteres (letras e números)"
@@ -136,14 +379,14 @@ export const LoginScreen: React.FC<{
         {password.length > 0 && (
           <div className="mt-2 flex items-center justify-between gap-2 text-[0.75rem]">
             <div className="flex items-center gap-1.5 flex-1">
-              {[1, 2, 3, 4].map((lvl) => (
+              {[1, 2, 3].map((lvl) => (
                 <span
                   key={lvl}
                   className="h-1.5 flex-1 rounded-full transition-colors"
                   style={{
                     background:
                       pwStrength.score >= lvl
-                        ? pwStrength.score >= 3
+                        ? pwStrength.score >= 2
                           ? 'var(--ok)'
                           : 'var(--ac)'
                         : 'var(--bd)',
@@ -154,7 +397,7 @@ export const LoginScreen: React.FC<{
             <span
               className="font-semibold"
               style={{
-                color: pwStrength.ok ? 'var(--ok)' : 'var(--mut)',
+                color: pwStrength.validForSignup ? 'var(--ok)' : 'var(--mut)',
               }}
             >
               {pwStrength.label}

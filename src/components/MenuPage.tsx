@@ -29,6 +29,8 @@ import {
   beep,
   getActivePromotion,
   getBarMenuDesign,
+  getContrastingAccentColor,
+  getContrastingTextColor,
   getMissingIngredientsForRecipe,
   getPromoAdjustedPrice,
   getRecipeItemType,
@@ -157,6 +159,7 @@ export const MenuPage: React.FC<{
   const { prefs: alertPrefs, setPref: setAlertPref, patchPrefs: patchAlertPrefs } = useAlertPrefs();
   const clientAlertOn = alertPrefs.allEnabled && alertPrefs.clientOrderReady;
   const [toastMsg, setToastMsg] = useState('');
+  const [repeatStockAlert, setRepeatStockAlert] = useState<string | null>(null);
 
   // Order form state
   const [note, setNote] = useState('');
@@ -170,6 +173,12 @@ export const MenuPage: React.FC<{
   const [callingStaff, setCallingStaff] = useState(false);
   const [lastCallAt, setLastCallAt] = useState(0);
   const [hhTick, setHhTick] = useState(0);
+  // Customer comanda Couvert & Waiter tip preferences
+  const [clientIncludeCouvert, setClientIncludeCouvert] = useState(true);
+  const [clientIncludeTip, setClientIncludeTip] = useState(true);
+  const [clientTipMode, setClientTipMode] = useState<'pct' | 'fixed'>('pct');
+  const [clientTipPct, setClientTipPct] = useState<number | null>(null);
+  const [clientTipFixedStr, setClientTipFixedStr] = useState('');
   const [saasConfig, setSaasConfig] = useState<PlatformSaaSConfig>(() => getCachedPlatformConfig());
   const [partnerAds, setPartnerAds] = useState<PartnerAdBanner[]>(() => getCachedPartnerAds());
 
@@ -766,10 +775,36 @@ export const MenuPage: React.FC<{
   }
 
   const priced = bar.kind !== 'home' && bar.kind !== 'casa';
+  const barOps = getBarOpsData(bar);
   const deliveryCfg = getDeliveryConfig(bar);
   const isDeliveryMode = !isTableQr && customerMode === 'delivery';
   const totalCount = mine.reduce((s, o) => s + o.qty, 0);
   const totalPay = mine.reduce((s, o) => s + o.qty * (o.price || 0), 0);
+
+  // Couvert & Waiter Commission configuration from store
+  const couvertEnabled = Boolean(barOps.couvert_enabled && (barOps.couvert_price || 0) > 0);
+  const couvertPrice = Math.max(0, Number(barOps.couvert_price || 0));
+  const couvertMandatory = barOps.couvert_mode === 'mandatory';
+  const couvertLabel = barOps.couvert_label?.trim() || 'Couvert artístico';
+  const couvertApplied =
+    priced && !isDeliveryMode && couvertEnabled && (couvertMandatory || clientIncludeCouvert)
+      ? couvertPrice
+      : 0;
+
+  const defaultWaiterPct = Math.max(0, Number(barOps.default_service_fee_pct ?? 10));
+  const allowCustomTip = barOps.service_fee_allow_custom !== false;
+  const service100ToWaiter = Boolean(barOps.service_fee_100_to_waiter);
+  const effectiveTipPct = clientTipPct !== null ? clientTipPct : defaultWaiterPct;
+  const waiterTipAmount = (() => {
+    if (!priced || isDeliveryMode || !clientIncludeTip) return 0;
+    if (clientTipMode === 'fixed') {
+      const parsed = Number(clientTipFixedStr.replace(',', '.'));
+      return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed * 100) / 100 : 0;
+    }
+    return Math.round(totalPay * (Math.max(0, effectiveTipPct) / 100) * 100) / 100;
+  })();
+  const comandaEstimatedTotal =
+    Math.round((totalPay + couvertApplied + waiterTipAmount) * 100) / 100;
   const deliveryZones = deliveryCfg.zones || [];
   const activeDeliveryZone =
     deliveryZones.find((z) => z.id === selectedDeliveryZoneId) ||
@@ -788,7 +823,7 @@ export const MenuPage: React.FC<{
     deliveryCartSubtotal >= freeDeliveryThreshold;
   const deliveryFeeApplied =
     deliveryFulfillment === 'pickup' || isFreeDeliveryUnlocked ? 0 : baseDeliveryFee;
-  const deliveryEtaApplied = activeDeliveryZone?.eta || deliveryCfg.eta_minutes;
+  const deliveryEtaApplied = activeDeliveryZone?.eta_minutes || deliveryCfg.eta_minutes;
   const deliveryCartTotal = Math.round((deliveryCartSubtotal + deliveryFeeApplied) * 100) / 100;
 
   if (isTableQr && (!name || !tableSession)) {
@@ -1050,10 +1085,10 @@ export const MenuPage: React.FC<{
   const design = getBarMenuDesign(bar);
   const activePromo = getActivePromotion(bar);
   const blockOrder = normalizeBlockOrder(design.block_order);
-  const accent = bar.color_accent || '#e5a93c';
   const surface = bar.color_surface || '#141218';
   const colorBg = bar.color_bg || '#0b0a0d';
-  const colorText = bar.color_text || '#f6f1ea';
+  const accent = getContrastingAccentColor(bar.color_accent || '#e5a93c', colorBg);
+  const colorText = getContrastingTextColor(colorBg, bar.color_text);
   const bgStyle = buildMenuBackgroundStyle(colorBg, design, accent);
 
   const drinksItems = items.filter((i) => getRecipeItemType(i) === 'drink');
@@ -1133,7 +1168,7 @@ export const MenuPage: React.FC<{
 
   const handlePlaceOrder = async (recipe: MenuItem, orderQty: number, orderNote: string) => {
     const cd = checkActionCooldown(`place_order_${barId}`, 2000);
-    if (!cd.ok) {
+    if (!cd.allowed) {
       setOrderErr('Aguarde um instante antes de enviar outro pedido.');
       return;
     }
@@ -1223,7 +1258,7 @@ export const MenuPage: React.FC<{
     e.preventDefault();
     setDlvErr('');
     const cd = checkActionCooldown(`dlv_checkout_${barId}`, 4500);
-    if (!cd.ok) {
+    if (!cd.allowed) {
       setDlvErr('Aguarde alguns segundos antes de enviar um novo pedido.');
       return;
     }
@@ -1688,6 +1723,38 @@ export const MenuPage: React.FC<{
             </div>
           </div>
         )}
+        {couvertEnabled && priced && !isDeliveryMode && (
+          <div
+            className="panel mb-3 !py-2.5"
+            style={{
+              background: 'linear-gradient(135deg, rgba(168,85,247,0.18), rgba(245,158,11,0.14))',
+              borderColor: 'rgba(192,132,252,0.5)',
+            }}
+          >
+            <div className="row sp flex-wrap gap-2">
+              <div>
+                <b className="text-sm text-[var(--txt)]">
+                  🎵 Aviso da Casa: {couvertLabel} — {money(couvertPrice)}
+                  {barOps.couvert_per_person ? ' / pessoa' : ' / comanda'}
+                </b>
+                <p className="mu text-xs !mt-0.5 !mb-0">
+                  {couvertMandatory
+                    ? 'Cobrança obrigatória incluída automaticamente na sua comanda.'
+                    : 'Cobrança opcional — você pode ativar ou remover na sua comanda quando quiser.'}
+                </p>
+              </div>
+              <span
+                className="text-xs font-extrabold px-2.5 py-1 rounded-full"
+                style={{
+                  background: couvertMandatory ? 'rgba(245,158,11,0.22)' : 'rgba(52,211,153,0.22)',
+                  color: couvertMandatory ? '#fbbf24' : '#34d399',
+                }}
+              >
+                {couvertMandatory ? 'Obrigatório' : 'Opcional'}
+              </span>
+            </div>
+          </div>
+        )}
         {activeHappyHours.length > 0 && (
           <div
             className="panel mb-3 !py-2.5"
@@ -2022,18 +2089,41 @@ export const MenuPage: React.FC<{
       {showOrders && (
         <div className="ov">
           <div className="w">
-            <button type="button" className="b g" onClick={() => setShowOrders(false)}>
+            <button
+              type="button"
+              className="b g"
+              onClick={() => {
+                setRepeatStockAlert(null);
+                setShowOrders(false);
+              }}
+            >
               ← Voltar
             </button>
             <h1 className="mt-3.5 mb-1">Meus pedidos</h1>
             <p className="mu">
               {name} · hoje{mesa ? ` · ${mesa}` : ''}
             </p>
+            {repeatStockAlert && (
+              <div className="mt-2.5 rounded-xl p-3 bg-amber-500/15 border border-amber-400/50 text-xs flex items-start justify-between gap-2">
+                <div>
+                  <b className="text-amber-300">⚠️ Item fora de estoque</b>
+                  <p className="mt-0.5 !mb-0 text-[var(--tx)]">{repeatStockAlert}</p>
+                </div>
+                <button
+                  type="button"
+                  className="b g sm !py-0.5 !px-2 shrink-0"
+                  onClick={() => setRepeatStockAlert(null)}
+                >
+                  ✕
+                </button>
+              </div>
+            )}
             <div className="list mt-2.5">
               {mine.map((x) => {
                 const matchRecipe = items.find(
-                  (it) => it.id === x.recipe_id || it.name === x.name
+                  (it) => it.id === x.recipe_id || norm(it.name) === norm(x.name)
                 );
+                const isOutNow = !matchRecipe;
                 return (
                   <div key={x.id}>
                     <span>
@@ -2041,20 +2131,30 @@ export const MenuPage: React.FC<{
                         {x.qty}× {x.name}
                       </b>
                       <br />
-                      <span className="mu">{statusLabels[x.status] || ''}</span>
+                      <span className="mu">
+                        {statusLabels[x.status] || ''}
+                        {isOutNow ? ' · ⚠️ Fora de estoque agora' : ''}
+                      </span>
                     </span>
                     <div className="row">
                       {priced && x.price != null && <b>{money(x.qty * x.price)}</b>}
-                      {matchRecipe && bar.open && (
+                      {bar.open && (
                         <button
                           type="button"
-                          className="b g sm"
+                          className={`b sm ${isOutNow ? 'g opacity-80' : 'g'}`}
                           onClick={() => {
+                            if (!matchRecipe) {
+                              const msg = `"${x.name}" está fora de estoque no momento e não pode ser pedido novamente. Seu pedido anterior continua normalmente na comanda.`;
+                              setRepeatStockAlert(msg);
+                              showToast(`⚠️ ${x.name} está fora de estoque no momento!`);
+                              return;
+                            }
+                            setRepeatStockAlert(null);
                             setShowOrders(false);
                             openRecipeDetail(matchRecipe);
                           }}
                         >
-                          Repetir
+                          Pedir novamente
                         </button>
                       )}
                     </div>
@@ -2062,18 +2162,142 @@ export const MenuPage: React.FC<{
                 );
               })}
             </div>
-            <div className="pay mt-4.5">
+            <div className="pay mt-4.5 space-y-2.5">
               <div className="row sp">
                 <span>Total de itens</span>
                 <b>{totalCount}</b>
               </div>
               {priced && (
                 <>
-                  <div className="row sp mt-1.5">
-                    <span>Total a pagar</span>
-                    <span className="tt">{money(totalPay)}</span>
+                  <div className="row sp">
+                    <span>Consumo dos itens</span>
+                    <b>{money(totalPay)}</b>
                   </div>
-                  <p className="mu mt-2">O pagamento é feito direto no caixa.</p>
+
+                  {/* COUVERT NA COMANDA DO CLIENTE */}
+                  {couvertEnabled && !isDeliveryMode && (
+                    <div className="rounded-xl p-2.5 bg-white/5 border border-white/10 space-y-1">
+                      <div className="row sp gap-2">
+                        <label className="!m-0 flex items-center gap-2 text-xs font-bold cursor-pointer">
+                          <input
+                            type="checkbox"
+                            className="!w-4 !h-4"
+                            checked={couvertMandatory ? true : clientIncludeCouvert}
+                            disabled={couvertMandatory}
+                            onChange={(e) => setClientIncludeCouvert(e.target.checked)}
+                          />
+                          <span>
+                            🎵 {couvertLabel}{' '}
+                            <span className="text-[10px] font-semibold opacity-75">
+                              ({couvertMandatory ? 'Obrigatório' : 'Opcional'})
+                            </span>
+                          </span>
+                        </label>
+                        <b className="text-xs">{money(couvertApplied)}</b>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* OPCIONAL DO GARÇOM NA COMANDA DO CLIENTE */}
+                  {!isDeliveryMode && (
+                    <div className="rounded-xl p-2.5 bg-white/5 border border-white/10 space-y-2">
+                      <div className="row sp gap-2">
+                        <label className="!m-0 flex items-center gap-2 text-xs font-bold cursor-pointer">
+                          <input
+                            type="checkbox"
+                            className="!w-4 !h-4"
+                            checked={clientIncludeTip}
+                            onChange={(e) => setClientIncludeTip(e.target.checked)}
+                          />
+                          <span>
+                            🙋 Opcional do garçom (
+                            {clientTipMode === 'fixed'
+                              ? 'valor fixo'
+                              : `${effectiveTipPct}%`}
+                            )
+                          </span>
+                        </label>
+                        <b className="text-xs">{money(waiterTipAmount)}</b>
+                      </div>
+
+                      {clientIncludeTip && allowCustomTip && (
+                        <div className="space-y-1.5 pt-1">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            {[defaultWaiterPct, 12, 15, 20]
+                              .filter((v, idx, arr) => v > 0 && arr.indexOf(v) === idx)
+                              .map((pctOpt) => (
+                                <button
+                                  key={pctOpt}
+                                  type="button"
+                                  className={`b sm !py-0.5 !px-2 !text-[11px] ${
+                                    clientTipMode === 'pct' && effectiveTipPct === pctOpt ? '' : 'g'
+                                  }`}
+                                  onClick={() => {
+                                    setClientTipMode('pct');
+                                    setClientTipPct(pctOpt);
+                                  }}
+                                >
+                                  {pctOpt}%
+                                </button>
+                              ))}
+                            <button
+                              type="button"
+                              className={`b sm !py-0.5 !px-2 !text-[11px] ${
+                                clientTipMode === 'fixed' ? '' : 'g'
+                              }`}
+                              onClick={() => setClientTipMode('fixed')}
+                            >
+                              R$ Fixo
+                            </button>
+                          </div>
+
+                          {clientTipMode === 'pct' ? (
+                            <div className="flex items-center gap-2">
+                              <span className="text-[11px] text-[var(--mut)]">Outra %:</span>
+                              <input
+                                type="number"
+                                min={0}
+                                max={50}
+                                step={1}
+                                value={effectiveTipPct}
+                                onChange={(e) =>
+                                  setClientTipPct(Math.max(0, Math.min(50, Number(e.target.value) || 0)))
+                                }
+                                className="!w-20 !py-1 text-xs"
+                              />
+                            </div>
+                          ) : (
+                            <div className="flex items-center gap-2">
+                              <span className="text-[11px] text-[var(--mut)]">Valor (R$):</span>
+                              <input
+                                type="number"
+                                min={0}
+                                step={1}
+                                value={clientTipFixedStr}
+                                onChange={(e) => setClientTipFixedStr(e.target.value)}
+                                placeholder="Ex: 15,00"
+                                className="!w-28 !py-1 text-xs"
+                              />
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {service100ToWaiter && (
+                        <div className="text-[11px] font-bold text-emerald-300 bg-emerald-500/15 border border-emerald-400/35 rounded-lg px-2.5 py-1.5">
+                          💚 100% deste valor vai diretamente para o garçom!
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="row sp mt-1.5 pt-2 border-t border-white/10">
+                    <span className="font-bold">Total estimado da comanda</span>
+                    <span className="tt">{money(comandaEstimatedTotal)}</span>
+                  </div>
+                  <p className="mu mt-1 !mb-0 text-xs">
+                    O fechamento e pagamento são feitos direto no caixa ou com o garçom.
+                  </p>
                 </>
               )}
               <div className="row sp mt-3 pt-2.5 border-t border-white/10">
@@ -2120,8 +2344,12 @@ export const MenuPage: React.FC<{
             </div>
             <p className="mu text-xs mb-3">
               {cleanMesa ? `Mesa: ${cleanMesa} · ` : ''}Cliente: <b>{name}</b>
-              {callModal === 'bill' && priced && totalPay > 0
-                ? ` · Consumo estimado: ${money(totalPay)}`
+              {callModal === 'bill' && priced && comandaEstimatedTotal > 0
+                ? ` · Total estimado: ${money(comandaEstimatedTotal)}${
+                    couvertApplied > 0 ? ` (incl. ${couvertLabel} ${money(couvertApplied)})` : ''
+                  }${
+                    waiterTipAmount > 0 ? ` (incl. garçom ${money(waiterTipAmount)})` : ''
+                  }`
                 : ''}
             </p>
 
@@ -2181,7 +2409,23 @@ export const MenuPage: React.FC<{
               type="button"
               className="b ok full mt-3"
               disabled={callingStaff}
-              onClick={() => void handleSendStaffCall(callModal, callNote)}
+              onClick={() => {
+                const extras: string[] = [];
+                if (callModal === 'bill' && priced) {
+                  if (couvertApplied > 0) extras.push(`${couvertLabel}: ${money(couvertApplied)}`);
+                  if (waiterTipAmount > 0) {
+                    extras.push(
+                      `Garçom: ${money(waiterTipAmount)}${
+                        clientTipMode === 'pct' ? ` (${effectiveTipPct}%)` : ' (fixo)'
+                      }`
+                    );
+                  } else if (!clientIncludeTip) {
+                    extras.push('Sem taxa de serviço');
+                  }
+                }
+                const composed = [callNote.trim(), extras.join(' · ')].filter(Boolean).join(' | ');
+                void handleSendStaffCall(callModal, composed);
+              }}
             >
               {callingStaff
                 ? 'Avisando equipe…'
@@ -2350,7 +2594,7 @@ export const MenuPage: React.FC<{
                           {deliveryZones.map((z) => (
                             <option key={z.id} value={z.id}>
                               {z.name} — {money(z.fee)}
-                              {z.eta ? ` (${z.eta})` : ''}
+                              {z.eta_minutes ? ` (${z.eta_minutes})` : ''}
                             </option>
                           ))}
                         </select>

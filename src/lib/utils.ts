@@ -135,28 +135,243 @@ export function menuUrl(barId: string, tableVal?: string): string {
   return base + q;
 }
 
-export function applyBarTheme(bar: Partial<Bar> | null): void {
-  const root = document.documentElement.style;
-  if (!bar) {
-    ['--bg', '--s1', '--ac', '--ok', '--tx'].forEach((k) => root.removeProperty(k));
-    document.body.style.background = '';
+export type UiThemeMode = 'dark' | 'light';
+
+const UI_THEME_STORAGE_KEY = 'meubar_ui_theme_mode';
+
+export function getStoredUiThemeMode(): UiThemeMode {
+  try {
+    const v = localStorage.getItem(UI_THEME_STORAGE_KEY);
+    if (v === 'light' || v === 'dark') return v;
+  } catch {
+    // ignore storage errors
+  }
+  return 'dark';
+}
+
+export function setStoredUiThemeMode(mode: UiThemeMode): void {
+  try {
+    localStorage.setItem(UI_THEME_STORAGE_KEY, mode);
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export function parseHexColor(color?: string | null): { r: number; g: number; b: number } | null {
+  if (!color) return null;
+  const raw = String(color).trim();
+  const hexMatch = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(raw);
+  if (hexMatch) {
+    let h = hexMatch[1];
+    if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
+    const num = parseInt(h, 16);
+    return { r: (num >> 16) & 255, g: (num >> 8) & 255, b: num & 255 };
+  }
+  const rgbMatch = /^rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})/i.exec(raw);
+  if (rgbMatch) {
+    return {
+      r: Math.min(255, Number(rgbMatch[1])),
+      g: Math.min(255, Number(rgbMatch[2])),
+      b: Math.min(255, Number(rgbMatch[3])),
+    };
+  }
+  return null;
+}
+
+export function getRelativeLuminance(color?: string | null): number {
+  const rgb = parseHexColor(color);
+  if (!rgb) return 0.05;
+  const toLin = (c: number) => {
+    const s = c / 255;
+    return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+  };
+  return 0.2126 * toLin(rgb.r) + 0.7152 * toLin(rgb.g) + 0.0722 * toLin(rgb.b);
+}
+
+export function isColorLight(color?: string | null): boolean {
+  return getRelativeLuminance(color) > 0.38;
+}
+
+export function getContrastRatio(c1?: string | null, c2?: string | null): number {
+  const l1 = getRelativeLuminance(c1);
+  const l2 = getRelativeLuminance(c2);
+  const lighter = Math.max(l1, l2);
+  const darker = Math.min(l1, l2);
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+/**
+ * Garante contraste alto: tema claro -> fonte preta; tema escuro -> fonte branca.
+ * Se a cor solicitada já tiver contraste >= 4.5:1 contra o fundo, preserva; caso contrário força o oposto.
+ */
+export function getContrastingTextColor(
+  bgColor?: string | null,
+  preferredTextColor?: string | null
+): string {
+  const bgIsLight = isColorLight(bgColor);
+  if (preferredTextColor && parseHexColor(preferredTextColor)) {
+    const ratio = getContrastRatio(bgColor, preferredTextColor);
+    const prefIsLight = isColorLight(preferredTextColor);
+    if (ratio >= 4.5 && bgIsLight !== prefIsLight) {
+      return preferredTextColor;
+    }
+  }
+  return bgIsLight ? '#111114' : '#f6f1ea';
+}
+
+export function getContrastingMutedColor(bgColor?: string | null): string {
+  return isColorLight(bgColor) ? '#4b5563' : '#b2a8ba';
+}
+
+export function getContrastingAccentColor(
+  accentColor?: string | null,
+  bgColor?: string | null
+): string {
+  const fallback = isColorLight(bgColor) ? '#b45309' : '#e5a93c';
+  if (!accentColor || !parseHexColor(accentColor)) return fallback;
+  if (getContrastRatio(bgColor, accentColor) >= 3.1) return accentColor;
+  return fallback;
+}
+
+function rgbaFromColor(color: string, alpha: number, fallback: string): string {
+  const rgb = parseHexColor(color);
+  if (!rgb) return fallback;
+  return `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${alpha})`;
+}
+
+export function applyBarTheme(bar: Partial<Bar> | null, forcedMode?: UiThemeMode): void {
+  const docEl = document.documentElement;
+  const root = docEl.style;
+
+  const setTokens = (params: {
+    light: boolean;
+    bg: string;
+    s1: string;
+    s2: string;
+    tx: string;
+    mu: string;
+    ac: string;
+    ok: string;
+    bodyBg: string;
+  }) => {
+    docEl.classList.toggle('theme-light', params.light);
+    docEl.classList.toggle('dark', !params.light);
+    root.setProperty('--bg', params.bg);
+    root.setProperty('--bg2', params.s2);
+    root.setProperty('--s1', params.s1);
+    root.setProperty('--s2', params.s2);
+    root.setProperty('--sf', params.s1);
+    root.setProperty('--sf2', params.s2);
+    root.setProperty('--tx', params.tx);
+    root.setProperty('--txt', params.tx);
+    root.setProperty('--fg', params.tx);
+    root.setProperty('--mu', params.mu);
+    root.setProperty('--mut', params.mu);
+    root.setProperty('--ac', params.ac);
+    root.setProperty('--ok', params.ok);
+    root.setProperty('--dn', params.light ? '#b91c1c' : '#f87171');
+    root.setProperty('--on-ac', isColorLight(params.ac) ? '#111114' : '#ffffff');
+    root.setProperty(
+      '--bd',
+      params.light ? 'rgba(17, 17, 20, 0.14)' : 'rgba(246, 241, 234, 0.12)'
+    );
+    root.setProperty(
+      '--bd-strong',
+      rgbaFromColor(params.ac, params.light ? 0.48 : 0.38, 'rgba(229, 169, 60, 0.38)')
+    );
+    root.setProperty(
+      '--top-bg',
+      rgbaFromColor(params.bg, 0.9, params.light ? 'rgba(246, 244, 239, 0.92)' : 'rgba(11, 10, 13, 0.88)')
+    );
+    root.setProperty(
+      '--bnav-bg',
+      rgbaFromColor(params.s1, 0.96, params.light ? 'rgba(255, 255, 255, 0.96)' : 'rgba(16, 14, 19, 0.95)')
+    );
+    root.setProperty(
+      '--pill-bg',
+      params.light ? 'rgba(17, 17, 20, 0.06)' : 'rgba(255, 255, 255, 0.07)'
+    );
+    root.setProperty(
+      '--pill-hover',
+      params.light ? 'rgba(17, 17, 20, 0.11)' : 'rgba(255, 255, 255, 0.13)'
+    );
+    document.body.style.background = params.bodyBg;
+  };
+
+  if (forcedMode === 'light') {
+    const bg = '#f6f4ef';
+    const ac = getContrastingAccentColor(bar?.color_accent, bg);
+    const ok = bar?.color_ok && getContrastRatio(bg, bar.color_ok) >= 3.2 ? bar.color_ok : '#047857';
+    setTokens({
+      light: true,
+      bg,
+      s1: '#ffffff',
+      s2: '#ebe7df',
+      tx: '#111114',
+      mu: '#4b5563',
+      ac,
+      ok,
+      bodyBg: 'linear-gradient(180deg, #faf8f4 0%, #f3efe8 100%)',
+    });
     return;
   }
-  if (bar.color_bg) {
-    root.setProperty('--bg', bar.color_bg);
-    document.body.style.background = bar.color_bg;
-  } else {
-    root.removeProperty('--bg');
-    document.body.style.background = '';
+
+  if (forcedMode === 'dark') {
+    const bg = '#0b0a0d';
+    const ac = getContrastingAccentColor(bar?.color_accent, bg);
+    const ok = bar?.color_ok && getContrastRatio(bg, bar.color_ok) >= 3.2 ? bar.color_ok : '#34d399';
+    setTokens({
+      light: false,
+      bg,
+      s1: '#141218',
+      s2: '#1d1a24',
+      tx: '#f6f1ea',
+      mu: '#b2a8ba',
+      ac,
+      ok,
+      bodyBg: 'radial-gradient(circle at top, #181421 0%, #0b0a0d 52%)',
+    });
+    return;
   }
-  if (bar.color_surface) root.setProperty('--s1', bar.color_surface);
-  else root.removeProperty('--s1');
-  if (bar.color_accent) root.setProperty('--ac', bar.color_accent);
-  else root.removeProperty('--ac');
-  if (bar.color_ok) root.setProperty('--ok', bar.color_ok);
-  else root.removeProperty('--ok');
-  if (bar.color_text) root.setProperty('--tx', bar.color_text);
-  else root.removeProperty('--tx');
+
+  if (!bar) {
+    const stored = getStoredUiThemeMode();
+    applyBarTheme(null, stored);
+    return;
+  }
+
+  // Modo automático do bar (ex: Cardápio Público ou Preview no Editor)
+  const bg = bar.color_bg || '#0b0a0d';
+  const bgIsLight = isColorLight(bg);
+  const s1 =
+    bar.color_surface && isColorLight(bar.color_surface) === bgIsLight
+      ? bar.color_surface
+      : bgIsLight
+        ? '#ffffff'
+        : '#141218';
+  const s2 = bgIsLight ? '#eae5dc' : '#1d1a24';
+  // Contraste garantido: fundo claro -> fonte preta; fundo escuro -> fonte branca
+  const tx = getContrastingTextColor(s1, bar.color_text);
+  const mu = getContrastingMutedColor(s1);
+  const ac = getContrastingAccentColor(bar.color_accent, s1);
+  const ok =
+    bar.color_ok && getContrastRatio(s1, bar.color_ok) >= 3.2
+      ? bar.color_ok
+      : bgIsLight
+        ? '#047857'
+        : '#34d399';
+
+  setTokens({
+    light: bgIsLight,
+    bg,
+    s1,
+    s2,
+    tx,
+    mu,
+    ac,
+    ok,
+    bodyBg: bg,
+  });
 }
 
 export function getRecipeItemType(r: Partial<Recipe>): ItemType {
@@ -298,6 +513,7 @@ export function makeDrink(recipe: Recipe, items: BarItem[]): boolean {
 export function estimateRecipeCost(recipe: Recipe, items: BarItem[], bar?: Bar | null): number {
   if (Number(recipe.base_cost) > 0) return Number(recipe.base_cost);
   const itemMap: Record<string, BarItem> = {};
+  const costBasisMap = bar?.ops_data?.stock_cost_basis || {};
   items.forEach((it) => {
     itemMap[norm(it.name)] = it;
   });
@@ -307,26 +523,30 @@ export function estimateRecipeCost(recipe: Recipe, items: BarItem[], bar?: Bar |
     const it = itemMap[k];
     if (!it || !(Number(it.unit_cost) > 0)) return;
     const rawCost = Number(it.unit_cost);
-    const unit = it.unit || '';
+    const basis = it.cost_basis || costBasisMap[it.id] || it.unit || '';
     const qStr = norm(ing.q || '');
     const mlMatch = qStr.match(/(\d+(?:[.,]\d+)?)\s*ml/);
     const mlUsed = mlMatch ? Number(mlMatch[1].replace(',', '.')) : 0;
 
-    if ((unit === 'garrafa' || unit === 'lata' || (!unit && (it.size_ml || 0) >= 150)) && (it.size_ml || 750) > 0) {
-      const bottleMl = Number(it.size_ml) || (unit === 'lata' ? 350 : 750);
+    if ((basis === 'garrafa' || basis === 'lata' || (!basis && (it.size_ml || 0) >= 150)) && (it.size_ml || 750) > 0) {
+      const bottleMl = Number(it.size_ml) || (basis === 'lata' ? 350 : 750);
       const portion = mlUsed > 0 ? mlUsed : qStr.includes('completar') ? 150 : 50;
       sum += (rawCost * Math.min(portion, bottleMl)) / bottleMl;
-    } else if (unit === 'litro') {
+    } else if (basis === 'litro') {
       const portion = mlUsed > 0 ? mlUsed : 120;
       sum += (rawCost * portion) / 1000;
-    } else if (unit === 'kg') {
-      // Ex: 1 limão/fruta (~80g) ou açúcar (~20g)
+    } else if (basis === '100ml') {
+      const portion = mlUsed > 0 ? mlUsed : 50;
+      sum += (rawCost * portion) / 100;
+    } else if (basis === 'kg') {
       sum += rawCost * (k.includes('acucar') || k === 'sal' ? 0.03 : 0.09);
-    } else if (unit === 'maco') {
+    } else if (basis === '100g') {
+      sum += rawCost * 0.5;
+    } else if (basis === 'maco') {
       sum += rawCost * 0.15;
-    } else if (unit === 'unidade') {
+    } else if (basis === 'unidade') {
       sum += rawCost * (k.includes('abacaxi') || k.includes('melancia') ? 0.12 : 0.35);
-    } else if (unit === 'pote' || unit === 'pacote' || unit === 'bandeja' || unit === 'g') {
+    } else if (basis === 'pote' || basis === 'pacote' || basis === 'bandeja' || basis === 'g') {
       sum += rawCost * 0.12;
     } else {
       sum += rawCost;
@@ -414,7 +634,6 @@ export function getMissingProfileFields(profile: Partial<StaffProfile> | null | 
   if (!profile) return ['Currículo completo'];
   const missing: string[] = [];
   if (!profile.display_name || profile.display_name.trim().length < 2) missing.push('Nome profissional');
-  if (!profile.avatar_url || !profile.avatar_url.trim()) missing.push('Foto de rosto');
   if (!profile.location || !profile.location.trim()) missing.push('Localidade exata');
   if (!profile.availability || !profile.availability.trim()) missing.push('Disponibilidade');
   if (!Array.isArray(profile.skills) || profile.skills.length === 0) missing.push('Qualidades / funções');

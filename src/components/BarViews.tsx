@@ -8,20 +8,33 @@ import {
   ALL_TAGS,
   CAT,
   CATS,
+  getCostBasisMeta,
+  getCostBasisOptionsForUnit,
+  getDefaultCostBasisForUnit,
   getDefaultUnitForIngredient,
   getUnitMeta,
   STARTER_KITS,
   STOCK_UNITS,
+  type StockCostBasisId,
   type StockUnitId,
 } from '../lib/catalog';
 import {
   autoDeductStockForOrder,
   getActiveHappyHours,
+  getBarOpsData,
   getDeliveryConfig,
   logBarAudit,
   parseDeliveryOrderMeta,
   playStationAlert,
+  saveBarOpsData,
 } from '../lib/opsUtils';
+import {
+  getSavedQuickProfile,
+  registerDeviceBiometricUnlock,
+  saveQuickPin,
+  saveQuickProfile,
+  type SavedQuickProfile,
+} from '../lib/quickAuth';
 import { broadcastMenuUpdate, sb } from '../lib/supabase';
 import {
   estimateRecipeCost,
@@ -36,6 +49,7 @@ import {
   norm,
   recipeTags,
   suggestedPrice,
+  type UiThemeMode,
 } from '../lib/utils';
 import type { Bar, BarItem, BarMember, Order, Recipe, TableCallAlert, TableTab } from '../types/meubar';
 import { PWAInstallButton } from './PWAControls';
@@ -50,7 +64,11 @@ export const RecipesView: React.FC<{
   prices: Record<string, number>;
   hasPricing: boolean;
   unpricedCount?: number;
+  canEditMenu?: boolean;
   onGoPrices?: () => void;
+  onOpenCreateDrink?: (editExisting: boolean) => void;
+  onOpenCatalog?: () => void;
+  onOpenShakers?: () => void;
   onSelectRecipe: (recipe: Recipe) => void;
 }> = ({
   bar,
@@ -59,7 +77,11 @@ export const RecipesView: React.FC<{
   prices,
   hasPricing,
   unpricedCount = 0,
+  canEditMenu = false,
   onGoPrices,
+  onOpenCreateDrink,
+  onOpenCatalog,
+  onOpenShakers,
   onSelectRecipe,
 }) => {
   const [rFilter, setRFilter] = useState<'can' | 'missing' | 'all'>('can');
@@ -91,9 +113,9 @@ export const RecipesView: React.FC<{
     <div>
       <div className="row sp items-start">
         <div>
-          <h1>Receitas</h1>
+          <h1>Cardápio & Receitas</h1>
           <p className="mu">
-            {bar.name} · você faz {canList.length}
+            {bar.name} · você faz {canList.length} drinks agora
           </p>
         </div>
         <div className="row">
@@ -114,11 +136,50 @@ export const RecipesView: React.FC<{
         </div>
       </div>
 
+      {/* Ações rápidas unificadas do Cardápio (sem poluir a aba Mais) */}
+      {(onOpenCreateDrink || onOpenCatalog || onOpenShakers) && (
+        <div className="flex flex-wrap gap-1.5 mt-3">
+          {onOpenCreateDrink && (
+            <button
+              type="button"
+              className="b sm"
+              onClick={() => onOpenCreateDrink(false)}
+            >
+              + Novo drink
+            </button>
+          )}
+          {onOpenCreateDrink && (
+            <button
+              type="button"
+              className="b g sm"
+              onClick={() => onOpenCreateDrink(true)}
+            >
+              ✏️ Editar receita
+            </button>
+          )}
+          {onOpenCatalog && (
+            <button type="button" className="b g sm" onClick={onOpenCatalog}>
+              🍟 Petiscos & Avulsos
+            </button>
+          )}
+          {onOpenShakers && (
+            <button type="button" className="b g sm" onClick={onOpenShakers}>
+              🍸 Coqueteleiras
+            </button>
+          )}
+          {canEditMenu && onGoPrices && hasPricing && (
+            <button type="button" className="b g sm" onClick={onGoPrices}>
+              💰 Preços{unpricedCount > 0 ? ` (${unpricedCount})` : ''}
+            </button>
+          )}
+        </div>
+      )}
+
       <input
         value={rQuery}
         onChange={(e) => setRQuery(e.target.value)}
-        placeholder="Buscar drink"
-        className="mt-3.5"
+        placeholder="Buscar drink ou ingrediente..."
+        className="mt-3"
       />
 
       <div className="chips mt-2.5">
@@ -240,6 +301,7 @@ export const StockView: React.FC<{
   canEditMenu: boolean;
   hasPricing: boolean;
   onItemsChange: (items: BarItem[]) => void;
+  onBarUpdated?: (bar: Bar) => void;
   onGoPrices: () => void;
   onOpenCompras?: () => void;
   onToast: (msg: string) => void;
@@ -251,25 +313,33 @@ export const StockView: React.FC<{
   canEditMenu,
   hasPricing,
   onItemsChange,
+  onBarUpdated,
   onGoPrices,
   onOpenCompras,
   onToast,
 }) => {
   const cats = Object.keys(CAT);
+  const ops = getBarOpsData(bar);
+  const costBasisMap = ops.stock_cost_basis || {};
   const [stockCat, setStockCat] = useState('');
   const [stockQ, setStockQ] = useState('');
+  const [showSearchDropdown, setShowSearchDropdown] = useState(false);
   const [selectedName, setSelectedName] = useState('');
   const [customName, setCustomName] = useState('');
   const [customCat, setCustomCat] = useState(cats[0] || 'Outros');
   const unpricedAvailable = getUnpricedAvailableDrinks(recipes, items, prices, bar);
   const [brand, setBrand] = useState('');
   const [unit, setUnit] = useState<StockUnitId>('garrafa');
+  const [costBasis, setCostBasis] = useState<StockCostBasisId>('garrafa');
   const [sizeMl, setSizeMl] = useState('750');
   const [variant, setVariant] = useState('');
   const [cost, setCost] = useState('');
   const [err, setErr] = useState('');
   const [showShopping, setShowShopping] = useState(false);
-  const [showStarterKits, setShowStarterKits] = useState(() => items.length < 5);
+  const [showStarterKits, setShowStarterKits] = useState(false);
+  const [stockStatusFilter, setStockStatusFilter] = useState<'all' | 'in' | 'out'>('all');
+  const [confirmClearAll, setConfirmClearAll] = useState(false);
+  const [clearingAll, setClearingAll] = useState(false);
   const [addingKitId, setAddingKitId] = useState<string | null>(null);
   const [quickAddingIng, setQuickAddingIng] = useState<string | null>(null);
   const [editingItem, setEditingItem] = useState<BarItem | null>(null);
@@ -278,6 +348,7 @@ export const StockView: React.FC<{
   const [edBrand, setEdBrand] = useState('');
   const [edVariant, setEdVariant] = useState('');
   const [edUnit, setEdUnit] = useState<StockUnitId>('garrafa');
+  const [edCostBasis, setEdCostBasis] = useState<StockCostBasisId>('garrafa');
   const [edSize, setEdSize] = useState('');
   const [edCost, setEdCost] = useState('');
   const [edQty, setEdQty] = useState('');
@@ -328,11 +399,32 @@ export const StockView: React.FC<{
     : allCatalogEntries
   ).filter((e) => !q || e.name.toLowerCase().includes(q) || e.category.toLowerCase().includes(q));
 
-  const list = items.filter((i) => {
+  const barItemsOnly = items.filter((i) => i.bar_id === bar.id);
+  const inStockCount = barItemsOnly.filter((i) => i.in_stock).length;
+  const outStockCount = barItemsOnly.length - inStockCount;
+
+  const list = barItemsOnly.filter((i) => {
+    if (stockStatusFilter === 'in' && !i.in_stock) return false;
+    if (stockStatusFilter === 'out' && i.in_stock) return false;
     const matchCat = !stockCat || i.category === stockCat || namesInCat.includes(i.name);
     const matchQ = !q || i.name.toLowerCase().includes(q) || (i.brand || '').toLowerCase().includes(q);
     return matchCat && matchQ;
   });
+
+  const handleClearAllStock = async () => {
+    if (!barItemsOnly.length) return;
+    setClearingAll(true);
+    const del = await sb.from('bar_items').delete().eq('bar_id', bar.id);
+    setClearingAll(false);
+    setConfirmClearAll(false);
+    if (del.error) {
+      onToast(`Não foi possível limpar o estoque: ${del.error.message}`);
+      return;
+    }
+    onItemsChange([]);
+    void broadcastMenuUpdate(bar.id);
+    onToast('Estoque limpo! Agora cadastre apenas os itens que você usa.');
+  };
 
   const handleAdd = async () => {
     setErr('');
@@ -375,10 +467,22 @@ export const StockView: React.FC<{
       setErr(r.error.message);
       return;
     }
-    const insertedItem: BarItem = { ...(r.data as BarItem), unit: (r.data as BarItem).unit || unit };
+    const insertedItem: BarItem = {
+      ...(r.data as BarItem),
+      unit: (r.data as BarItem).unit || unit,
+      cost_basis: costBasis,
+    };
     const next = [...items, insertedItem].sort((a, b) => a.name.localeCompare(b.name));
     onItemsChange(next);
+    if (insertedItem.id) {
+      void saveBarOpsData(
+        bar,
+        { stock_cost_basis: { ...costBasisMap, [insertedItem.id]: costBasis } },
+        onBarUpdated
+      );
+    }
     void broadcastMenuUpdate(bar.id);
+    setStockQ('');
     setSelectedName('');
     setCustomName('');
     setBrand('');
@@ -495,7 +599,15 @@ export const StockView: React.FC<{
     setEdBrand(it.brand || '');
     setEdVariant(it.variant || '');
     const def = getDefaultUnitForIngredient(it.name, it.category);
-    setEdUnit((it.unit as StockUnitId) || def.unit);
+    const resolvedUnit = (it.unit as StockUnitId) || def.unit;
+    setEdUnit(resolvedUnit);
+    const savedBasis = (it.cost_basis || costBasisMap[it.id]) as StockCostBasisId | undefined;
+    const validBases = getCostBasisOptionsForUnit(resolvedUnit);
+    setEdCostBasis(
+      savedBasis && validBases.some((b) => b.id === savedBasis)
+        ? savedBasis
+        : getDefaultCostBasisForUnit(resolvedUnit)
+    );
     setEdSize(it.size_ml != null ? String(it.size_ml) : def.defaultSize ? String(def.defaultSize) : '');
     setEdCost(it.unit_cost != null ? String(it.unit_cost) : '');
     setEdQty(it.qty != null ? String(it.qty) : '');
@@ -554,12 +666,18 @@ export const StockView: React.FC<{
               ...(r.data as BarItem),
               in_stock: nextInStock,
               unit: edUnit,
+              cost_basis: edCostBasis,
               qty: parsedQty !== null ? parsedQty : x.qty,
               min_qty: edMinQty !== '' ? Math.max(0, parseInt(edMinQty, 10) || 0) : x.min_qty,
               supplier: edSupplier.trim() || null,
             }
           : x
       )
+    );
+    void saveBarOpsData(
+      bar,
+      { stock_cost_basis: { ...costBasisMap, [editingItem.id]: edCostBasis } },
+      onBarUpdated
     );
     void broadcastMenuUpdate(bar.id);
     setEditingItem(null);
@@ -699,6 +817,23 @@ export const StockView: React.FC<{
 
   const activeUnitMeta = getUnitMeta(unit);
   const editUnitMeta = getUnitMeta(edUnit);
+  const activeCostBasisOptions = getCostBasisOptionsForUnit(unit);
+  const activeCostBasisMeta = getCostBasisMeta(costBasis, unit);
+  const editCostBasisOptions = getCostBasisOptionsForUnit(edUnit);
+  const editCostBasisMeta = getCostBasisMeta(edCostBasis, edUnit);
+
+  const handleSelectCatalogEntry = (entryName: string, entryCategory?: string | null) => {
+    const resolvedCat =
+      entryCategory || allCatalogEntries.find((en) => en.name === entryName)?.category || '';
+    setStockQ(entryName);
+    if (resolvedCat) setStockCat(resolvedCat);
+    setSelectedName(entryName);
+    const def = getDefaultUnitForIngredient(entryName, resolvedCat || null);
+    setUnit(def.unit);
+    setCostBasis(getDefaultCostBasisForUnit(def.unit));
+    setSizeMl(def.defaultSize ? String(def.defaultSize) : '');
+    setShowSearchDropdown(false);
+  };
 
   return (
     <div>
@@ -909,14 +1044,87 @@ export const StockView: React.FC<{
       )}
 
       <div className="panel">
-        <label className="!mt-0">1. Buscar item pelo nome (em todas as categorias ou na escolhida)</label>
-        <input
-          value={stockQ}
-          onChange={(e) => setStockQ(e.target.value)}
-          placeholder="Ex: Gin, Vodka, Limão, Xarope de morango…"
-        />
+        <label className="!mt-0">
+          1. Buscar item pelo nome (em todas as categorias ou na escolhida)
+        </label>
+        <div className="relative">
+          <div className="flex items-center gap-1.5">
+            <input
+              value={stockQ}
+              onFocus={() => setShowSearchDropdown(true)}
+              onChange={(e) => {
+                setStockQ(e.target.value);
+                setShowSearchDropdown(true);
+              }}
+              placeholder="Digite ou toque para selecionar (ex: Gin, Vodka, Limão…)"
+              className="!mt-1 flex-1"
+            />
+            {stockQ && (
+              <button
+                type="button"
+                className="b g sm !mt-1 shrink-0"
+                onClick={() => {
+                  setStockQ('');
+                  setSelectedName('');
+                  setShowSearchDropdown(true);
+                }}
+                title="Limpar busca"
+              >
+                ✕
+              </button>
+            )}
+          </div>
 
-        <label>2. Tipo / categoria (opcional)</label>
+          {showSearchDropdown && (
+            <div className="mt-1.5 rounded-xl border border-[var(--ac)]/45 bg-[var(--s1)] shadow-xl max-h-56 overflow-y-auto divide-y divide-[var(--bd)]">
+              <div className="px-3 py-1.5 flex items-center justify-between text-[11px] text-[var(--mut)] bg-[var(--s2)] sticky top-0">
+                <span>
+                  Toque em um item para preencher automaticamente Categoria, Item e Unidade ({catalogMatches.length})
+                </span>
+                <button
+                  type="button"
+                  className="bg-transparent border-0 text-[var(--ac)] font-bold cursor-pointer text-[11px]"
+                  onClick={() => setShowSearchDropdown(false)}
+                >
+                  Fechar
+                </button>
+              </div>
+              {catalogMatches.slice(0, 40).map((entry) => {
+                const isSelected = selectedName === entry.name;
+                return (
+                  <button
+                    key={`pick-${entry.category}-${entry.name}`}
+                    type="button"
+                    className={`w-full text-left px-3 py-2 border-0 cursor-pointer flex items-center justify-between gap-2 transition-colors ${
+                      isSelected
+                        ? 'bg-[var(--ac)]/20 text-[var(--tx)] font-bold'
+                        : 'bg-transparent text-[var(--tx)] hover:bg-[var(--s2)]'
+                    }`}
+                    onClick={() => handleSelectCatalogEntry(entry.name, entry.category)}
+                  >
+                    <span className="text-xs font-semibold truncate">{entry.name}</span>
+                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-[var(--s2)] text-[var(--mut)] shrink-0">
+                      {entry.category}
+                    </span>
+                  </button>
+                );
+              })}
+              <button
+                type="button"
+                className="w-full text-left px-3 py-2 border-0 cursor-pointer bg-[var(--s2)] text-[var(--ac)] font-bold text-xs hover:opacity-90"
+                onClick={() => {
+                  setSelectedName('__custom__');
+                  if (stockQ.trim()) setCustomName(stockQ.trim());
+                  setShowSearchDropdown(false);
+                }}
+              >
+                ➕ Cadastrar item novo{stockQ.trim() ? `: "${stockQ.trim()}"` : '…'}
+              </button>
+            </div>
+          )}
+        </div>
+
+        <label>2. Tipo / categoria (preenchido ao selecionar acima)</label>
         <select
           value={stockCat}
           onChange={(e) => {
@@ -939,13 +1147,10 @@ export const StockView: React.FC<{
           value={selectedName}
           onChange={(e) => {
             const val = e.target.value;
-            setSelectedName(val);
             if (val && val !== '__custom__') {
-              const catFound =
-                stockCat || allCatalogEntries.find((en) => en.name === val)?.category || null;
-              const def = getDefaultUnitForIngredient(val, catFound);
-              setUnit(def.unit);
-              setSizeMl(def.defaultSize ? String(def.defaultSize) : '');
+              handleSelectCatalogEntry(val, stockCat || undefined);
+            } else {
+              setSelectedName(val);
             }
           }}
         >
@@ -970,6 +1175,7 @@ export const StockView: React.FC<{
                   if (v.trim().length >= 3) {
                     const def = getDefaultUnitForIngredient(v, stockCat || customCat);
                     setUnit(def.unit);
+                    setCostBasis(getDefaultCostBasisForUnit(def.unit));
                     if (def.defaultSize) setSizeMl(String(def.defaultSize));
                   }
                 }}
@@ -991,10 +1197,17 @@ export const StockView: React.FC<{
           </div>
         )}
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-2">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mt-2">
           <div>
             <label className="!mt-0">Unidade de medida (como você compra)</label>
-            <select value={unit} onChange={(e) => setUnit(e.target.value as StockUnitId)}>
+            <select
+              value={unit}
+              onChange={(e) => {
+                const nextU = e.target.value as StockUnitId;
+                setUnit(nextU);
+                setCostBasis(getDefaultCostBasisForUnit(nextU));
+              }}
+            >
               {STOCK_UNITS.map((u) => (
                 <option key={u.id} value={u.id}>
                   {u.label}
@@ -1003,14 +1216,27 @@ export const StockView: React.FC<{
             </select>
           </div>
           <div>
-            <label className="!mt-0">{activeUnitMeta.costLabel}</label>
+            <label className="!mt-0">Tipo de custo (conforme a unidade)</label>
+            <select
+              value={costBasis}
+              onChange={(e) => setCostBasis(e.target.value as StockCostBasisId)}
+            >
+              {activeCostBasisOptions.map((opt) => (
+                <option key={opt.id} value={opt.id}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="!mt-0">{activeCostBasisMeta.costLabel}</label>
             <input
               type="number"
               step="0.1"
               min="0"
               value={cost}
               onChange={(e) => setCost(e.target.value)}
-              placeholder={`Ex: R$ por ${activeUnitMeta.short}`}
+              placeholder={`Ex: R$ por ${activeCostBasisMeta.short}`}
             />
           </div>
         </div>
@@ -1046,6 +1272,74 @@ export const StockView: React.FC<{
         {err && <p className="err">{err}</p>}
       </div>
 
+      <div className="row sp flex-wrap gap-2 mt-4">
+        <div>
+          <h2 className="!m-0">
+            📦 Seu estoque cadastrado ({barItemsOnly.length}{' '}
+            {barItemsOnly.length === 1 ? 'item' : 'itens'})
+          </h2>
+          <p className="mu text-xs !mt-0.5 !mb-0">
+            Exibindo apenas os itens salvos no banco deste bar. O Kit inicial só abre quando você
+            tocar no botão acima.
+          </p>
+        </div>
+        {barItemsOnly.length > 0 && (
+          <div className="row flex-wrap gap-1.5">
+            <button
+              type="button"
+              className={`chip ${stockStatusFilter === 'all' ? 'on' : ''}`}
+              onClick={() => setStockStatusFilter('all')}
+            >
+              Todos ({barItemsOnly.length})
+            </button>
+            <button
+              type="button"
+              className={`chip ${stockStatusFilter === 'in' ? 'on' : ''}`}
+              onClick={() => setStockStatusFilter('in')}
+            >
+              OK ({inStockCount})
+            </button>
+            {outStockCount > 0 && (
+              <button
+                type="button"
+                className={`chip ${stockStatusFilter === 'out' ? 'on' : ''}`}
+                onClick={() => setStockStatusFilter('out')}
+              >
+                Falta ({outStockCount})
+              </button>
+            )}
+            {confirmClearAll ? (
+              <>
+                <button
+                  type="button"
+                  className="b d sm"
+                  disabled={clearingAll}
+                  onClick={() => void handleClearAllStock()}
+                >
+                  {clearingAll ? 'Limpando...' : 'Confirmar zerar estoque'}
+                </button>
+                <button
+                  type="button"
+                  className="b g sm"
+                  onClick={() => setConfirmClearAll(false)}
+                >
+                  Cancelar
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                className="b g sm"
+                onClick={() => setConfirmClearAll(true)}
+                title="Remove todos os itens cadastrados deste bar para começar do zero"
+              >
+                🗑 Zerar estoque
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+
       <div className="chips !flex-wrap !overflow-visible mt-2.5">
         <span
           className={`chip ${!stockCat ? 'on' : ''}`}
@@ -1076,6 +1370,7 @@ export const StockView: React.FC<{
             const unitId =
               (i.unit as StockUnitId) || getDefaultUnitForIngredient(i.name, i.category).unit;
             const uMeta = getUnitMeta(unitId);
+            const itemBasisMeta = getCostBasisMeta(i.cost_basis || costBasisMap[i.id], unitId);
             const meta: string[] = [];
             meta.push(`📏 ${uMeta.label}`);
             if (i.brand) meta.push(i.brand);
@@ -1084,9 +1379,9 @@ export const StockView: React.FC<{
             if (i.qty != null) meta.push(`qtd: ${i.qty} ${uMeta.short}`);
             if (i.min_qty != null && Number(i.min_qty) > 0) meta.push(`mín: ${i.min_qty}`);
             if (i.unit_cost != null && Number(i.unit_cost) > 0) {
-              meta.push(`custo ${money(i.unit_cost)} / ${uMeta.short}`);
+              meta.push(`custo ${money(i.unit_cost)} / ${itemBasisMeta.short}`);
             } else {
-              meta.push(`custo não informado (R$/${uMeta.short})`);
+              meta.push(`custo não informado (R$/${itemBasisMeta.short})`);
             }
             const isLowStock =
               i.in_stock && Number(i.min_qty || 0) > 0 && Number(i.qty || 0) <= Number(i.min_qty || 0);
@@ -1139,7 +1434,11 @@ export const StockView: React.FC<{
             );
           })
         ) : (
-          <p className="mu">Nenhum item listado.</p>
+          <p className="mu">
+            {barItemsOnly.length === 0
+              ? 'Seu estoque está vazio. Cadastre acima apenas os ingredientes que você realmente tem.'
+              : 'Nenhum item encontrado com este filtro.'}
+          </p>
         )}
       </div>
 
@@ -1151,20 +1450,38 @@ export const StockView: React.FC<{
             </button>
             <h1 className="mt-3">Editar {editingItem.name}</h1>
             <label>Unidade de medida (como você compra)</label>
-            <select value={edUnit} onChange={(e) => setEdUnit(e.target.value as StockUnitId)}>
+            <select
+              value={edUnit}
+              onChange={(e) => {
+                const nextU = e.target.value as StockUnitId;
+                setEdUnit(nextU);
+                setEdCostBasis(getDefaultCostBasisForUnit(nextU));
+              }}
+            >
               {STOCK_UNITS.map((u) => (
                 <option key={u.id} value={u.id}>
                   {u.label}
                 </option>
               ))}
             </select>
-            <label>{editUnitMeta.costLabel}</label>
+            <label>Tipo de custo (conforme a unidade)</label>
+            <select
+              value={edCostBasis}
+              onChange={(e) => setEdCostBasis(e.target.value as StockCostBasisId)}
+            >
+              {editCostBasisOptions.map((opt) => (
+                <option key={opt.id} value={opt.id}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+            <label>{editCostBasisMeta.costLabel}</label>
             <input
               type="number"
               step="0.1"
               value={edCost}
               onChange={(e) => setEdCost(e.target.value)}
-              placeholder={`R$ por ${editUnitMeta.short}`}
+              placeholder={`R$ por ${editCostBasisMeta.short}`}
             />
             {editUnitMeta.showSize && (
               <>
@@ -1227,12 +1544,14 @@ export const QueueView: React.FC<{
   tableTabs?: TableTab[];
   tableCalls?: TableCallAlert[];
   defaultStation?: 'all' | 'bar' | 'cozinha' | 'garcom';
+  lockedStation?: 'bar' | 'cozinha' | 'garcom';
   onBarUpdated: (bar: Bar) => void;
   onItemsChange?: (items: BarItem[]) => void;
   onRefreshOrders: () => Promise<void>;
   onRefreshTableTabs?: () => Promise<void>;
   onResolveCall?: (id: string) => Promise<void>;
   onRecipesUpdated?: () => Promise<void>;
+  onSelectRecipe?: (recipe: Recipe) => void;
   onGoStock?: () => void;
   onOpenCatalog?: () => void;
   onToast?: (msg: string) => void;
@@ -1248,33 +1567,43 @@ export const QueueView: React.FC<{
   tableTabs = [],
   tableCalls = [],
   defaultStation = 'all',
+  lockedStation,
   onBarUpdated,
   onItemsChange,
   onRefreshOrders,
   onRefreshTableTabs,
   onResolveCall,
   onRecipesUpdated,
+  onSelectRecipe,
   onGoStock,
   onOpenCatalog,
   onToast,
 }) => {
   const [stationMode, setStationMode] = useState<'all' | 'bar' | 'cozinha' | 'garcom'>(
-    defaultStation
+    lockedStation || defaultStation
   );
   const [clientFilter, setClientFilter] = useState('');
   const [clientSearch, setClientSearch] = useState('');
+  const [expandedGroupKey, setExpandedGroupKey] = useState<string | null>(null);
 
   useEffect(() => {
-    setStationMode(defaultStation);
-  }, [defaultStation]);
+    setStationMode(lockedStation || defaultStation);
+  }, [defaultStation, lockedStation]);
 
   const open = bar.accepting_orders !== false;
   const activeAll = orders.filter((o) => o.status !== 'done');
   const recipeMapById = new Map(recipes.map((r) => [r.id, r]));
+  const recipeMapByName = new Map<string, Recipe>();
+  recipes.forEach((r) => {
+    const k = norm(r.name);
+    if (k && !recipeMapByName.has(k)) recipeMapByName.set(k, r);
+  });
+  const resolveRecipe = (o: Order): Recipe | undefined =>
+    recipeMapById.get(o.recipe_id) || recipeMapByName.get(norm(o.recipe_name || ''));
   const recipeNameById = new Map(recipes.map((r) => [r.id, r.name]));
 
   const barStationCount = activeAll.filter((o) => {
-    const rec = recipeMapById.get(o.recipe_id);
+    const rec = resolveRecipe(o);
     return (o.station || (rec && getRecipeItemType(rec) === 'petisco' ? 'cozinha' : 'bar')) === 'bar';
   }).length;
   const kitchenStationCount = activeAll.filter((o) => {
@@ -1317,6 +1646,8 @@ export const QueueView: React.FC<{
 
   interface OrderGroup {
     key: string;
+    recipeId: string;
+    recipe?: Recipe;
     recipeName: string;
     status: string;
     note: string;
@@ -1329,13 +1660,16 @@ export const QueueView: React.FC<{
   const map: Record<string, OrderGroup> = {};
 
   active.forEach((o) => {
-    const rName = o.recipe_name || recipeNameById.get(o.recipe_id) || 'Drink';
+    const rec = resolveRecipe(o);
+    const rName = o.recipe_name || rec?.name || recipeNameById.get(o.recipe_id) || 'Drink';
     const dlv = parseDeliveryOrderMeta(o);
     const displayNote = dlv ? dlv.cleanItemNote : o.note || '';
     const key = `${o.recipe_id || rName}|${o.status || 'pending'}|${displayNote}`;
     if (!map[key]) {
       map[key] = {
         key,
+        recipeId: o.recipe_id,
+        recipe: rec,
         recipeName: rName,
         status: o.status,
         note: displayNote,
@@ -1345,6 +1679,7 @@ export const QueueView: React.FC<{
       };
       groups.push(map[key]);
     }
+    if (!map[key].recipe && rec) map[key].recipe = rec;
     map[key].qty += o.qty || 1;
     map[key].orders.push(o);
     const client = (o.client_name || o.customer_name || 'Cliente').trim();
@@ -1429,49 +1764,53 @@ export const QueueView: React.FC<{
 
   return (
     <div>
-      <div className="row sp">
-        <h1>Fila & Estações</h1>
-        <button
-          type="button"
-          className={`b sm ${open ? 'g' : 'ok'}`}
-          onClick={() => void handleToggleOpen()}
-        >
-          {open ? 'Pausar pedidos' : 'Retomar pedidos'}
-        </button>
-      </div>
-      {!open && <p className="warn-txt">Pedidos pausados no cardápio agora.</p>}
+      {!lockedStation && (
+        <>
+          <div className="row sp">
+            <h1>Fila & Estações</h1>
+            <button
+              type="button"
+              className={`b sm ${open ? 'g' : 'ok'}`}
+              onClick={() => void handleToggleOpen()}
+            >
+              {open ? 'Pausar pedidos' : 'Retomar pedidos'}
+            </button>
+          </div>
+          {!open && <p className="warn-txt">Pedidos pausados no cardápio agora.</p>}
 
-      {/* Seletor de Estações Operacionais: Geral | Barman | Cozinha | Garçom */}
-      <div className="chips !flex-wrap !overflow-visible mt-2.5 mb-3">
-        <button
-          type="button"
-          className={`chip ${stationMode === 'all' ? 'on' : ''}`}
-          onClick={() => setStationMode('all')}
-        >
-          📋 Geral ({activeAll.length})
-        </button>
-        <button
-          type="button"
-          className={`chip ${stationMode === 'bar' ? 'on' : ''}`}
-          onClick={() => setStationMode('bar')}
-        >
-          🍸 Barman ({barStationCount})
-        </button>
-        <button
-          type="button"
-          className={`chip ${stationMode === 'cozinha' ? 'on' : ''}`}
-          onClick={() => setStationMode('cozinha')}
-        >
-          🍳 Cozinha ({kitchenStationCount})
-        </button>
-        <button
-          type="button"
-          className={`chip ${stationMode === 'garcom' ? 'on' : ''}`}
-          onClick={() => setStationMode('garcom')}
-        >
-          🍽️ Garçom {readyWaiterCount > 0 ? `(🔔 ${readyWaiterCount})` : ''}
-        </button>
-      </div>
+          {/* Seletor de Estações Operacionais: Geral | Barman | Cozinha | Garçom */}
+          <div className="chips !flex-wrap !overflow-visible mt-2.5 mb-3">
+            <button
+              type="button"
+              className={`chip ${stationMode === 'all' ? 'on' : ''}`}
+              onClick={() => setStationMode('all')}
+            >
+              📋 Geral ({activeAll.length})
+            </button>
+            <button
+              type="button"
+              className={`chip ${stationMode === 'bar' ? 'on' : ''}`}
+              onClick={() => setStationMode('bar')}
+            >
+              🍸 Barman ({barStationCount})
+            </button>
+            <button
+              type="button"
+              className={`chip ${stationMode === 'cozinha' ? 'on' : ''}`}
+              onClick={() => setStationMode('cozinha')}
+            >
+              🍳 Cozinha ({kitchenStationCount})
+            </button>
+            <button
+              type="button"
+              className={`chip ${stationMode === 'garcom' ? 'on' : ''}`}
+              onClick={() => setStationMode('garcom')}
+            >
+              🍽️ Garçom {readyWaiterCount > 0 ? `(🔔 ${readyWaiterCount})` : ''}
+            </button>
+          </div>
+        </>
+      )}
 
       {stationMode === 'bar' && (
         <BarmanStationView
@@ -1482,6 +1821,7 @@ export const QueueView: React.FC<{
           recipes={recipes}
           onSetOrderStatus={handleSingleStatus}
           onCancelOrder={handleCancelOrder}
+          onSelectRecipe={onSelectRecipe}
           onGoStock={onGoStock}
           onRefresh={onRefreshOrders}
         />
@@ -1495,6 +1835,7 @@ export const QueueView: React.FC<{
           recipes={recipes}
           onSetOrderStatus={handleSingleStatus}
           onCancelOrder={handleCancelOrder}
+          onSelectRecipe={onSelectRecipe}
           onRecipesUpdated={onRecipesUpdated || (async () => {})}
           onOpenCatalog={onOpenCatalog}
           onRefresh={onRefreshOrders}
@@ -1606,6 +1947,15 @@ export const QueueView: React.FC<{
           groups.map((g) => {
             const isReady = g.status === 'ready';
             const ids = g.orders.map((o) => o.id);
+            const rec =
+              g.recipe ||
+              recipeMapById.get(g.recipeId) ||
+              recipeMapByName.get(norm(g.recipeName));
+            const cleanIngs = (rec?.ingredients || []).filter((i) => !i.n.startsWith('__'));
+            const hasRecipeDetails = Boolean(
+              rec && (cleanIngs.length > 0 || rec.steps || rec.instructions || rec.description)
+            );
+            const isExpanded = expandedGroupKey === g.key;
             return (
               <div key={g.key} className={`ord ${isReady ? 'ready' : ''}`}>
                 <div className="row sp">
@@ -1623,7 +1973,58 @@ export const QueueView: React.FC<{
                     <span className="mu">Obs: {g.note}</span>
                   </div>
                 )}
-                <div className="acts">
+
+                {isExpanded && rec && (
+                  <div className="mt-2.5 rounded-xl bg-[var(--bg2)] border border-[var(--bd)] p-3 text-xs space-y-1.5">
+                    <div className="font-bold text-[var(--ac)]">
+                      📖 Receita · {rec.glass || 'Copo padrão'}
+                      {rec.technique ? ` · ${rec.technique}` : ''}
+                    </div>
+                    {cleanIngs.length > 0 && (
+                      <ul className="list-disc pl-4 m-0 space-y-0.5">
+                        {cleanIngs.map((ing, idx) => (
+                          <li key={idx}>
+                            <strong>{ing.n}</strong>
+                            {ing.q ? ` — ${ing.q}` : ''}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    {(rec.steps || rec.instructions || rec.description) && (
+                      <div className="text-[var(--mut)] pt-1 border-t border-[var(--bd)]">
+                        <strong className="text-[var(--txt)]">Modo de preparo:</strong>{' '}
+                        {rec.steps || rec.instructions || rec.description}
+                      </div>
+                    )}
+                    {rec.garnish && (
+                      <div className="text-[var(--ok)]">
+                        <strong>Guarnição:</strong> {rec.garnish}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <div className="acts flex-wrap">
+                  {rec && hasRecipeDetails && (
+                    <button
+                      type="button"
+                      className="b sm g"
+                      onClick={() =>
+                        setExpandedGroupKey(isExpanded ? null : g.key)
+                      }
+                    >
+                      {isExpanded ? 'Ocultar receita' : '📖 Ver receita'}
+                    </button>
+                  )}
+                  {rec && onSelectRecipe && (
+                    <button
+                      type="button"
+                      className="b sm g"
+                      onClick={() => onSelectRecipe(rec)}
+                    >
+                      🍸 Modo preparo
+                    </button>
+                  )}
                   {!isReady && (
                     <button
                       type="button"
@@ -2310,21 +2711,9 @@ export const PricesView: React.FC<{
               .join(' · ')}
           </p>
           <div className="row mt-2 flex-wrap">
-            {allMissingForPriced.length > 0 && (
-              <button
-                type="button"
-                className="b sm ok"
-                disabled={addingStock}
-                onClick={() => void addMissingToStock(allMissingForPriced)}
-              >
-                {addingStock
-                  ? 'Adicionando...'
-                  : `+ Repor faltantes no Estoque (${allMissingForPriced.slice(0, 3).join(', ')}${allMissingForPriced.length > 3 ? '…' : ''})`}
-              </button>
-            )}
             {onGoStock && (
-              <button type="button" className="b sm g" onClick={onGoStock}>
-                Ir para Estoque
+              <button type="button" className="b sm" onClick={onGoStock}>
+                🍾 Gerenciar no Estoque
               </button>
             )}
           </div>
@@ -2571,6 +2960,8 @@ export const MoreView: React.FC<{
   unreadAdminAlerts?: number;
   activeDeliveryCount?: number;
   supportWhatsAppHref?: string | null;
+  uiThemeMode?: UiThemeMode;
+  onToggleTheme?: () => void;
   onBarUpdated: (bar: Bar) => void;
   onOpenQr: () => void;
   onOpenShakers: () => void;
@@ -2592,8 +2983,16 @@ export const MoreView: React.FC<{
   onOpenAlertSettings?: () => void;
   onOpenPlans?: () => void;
   onOpenSuperAdmin?: () => void;
+  onOpenSupportDesk?: () => void;
+  onOpenSupportChat?: () => void;
+  unreadSupportCount?: number;
+  isSupportAgent?: boolean;
+  quickProfile?: SavedQuickProfile | null;
+  onQuickProfileChanged?: (next: SavedQuickProfile | null) => void;
+  onLockApp?: () => void;
   onOpenSalesSite?: () => void;
   onOpenLegal?: (tab: 'terms' | 'privacy') => void;
+  onToast?: (msg: string) => void;
 }> = ({
   bar,
   isManager,
@@ -2603,28 +3002,39 @@ export const MoreView: React.FC<{
   planLabel = 'Plano Grátis',
   isProPlan = true,
   isPlatformAdmin = false,
+  isSupportAgent = false,
   unreadAdminAlerts = 0,
+  unreadSupportCount = 0,
   activeDeliveryCount = 0,
   supportWhatsAppHref = null,
+  uiThemeMode = 'dark',
+  quickProfile = null,
+  onToggleTheme,
   onBarUpdated,
   onOpenQr,
-  onOpenShakers,
-  onOpenCreateDrink,
-  onOpenStation,
   onOpenManagement,
   onNavigate,
   onOpenSwitchBar,
   onOpenAlertSettings,
   onOpenPlans,
   onOpenSuperAdmin,
+  onOpenSupportDesk,
+  onOpenSupportChat,
+  onQuickProfileChanged,
+  onLockApp,
   onOpenSalesSite,
   onOpenLegal,
+  onToast,
 }) => {
   const open = bar.accepting_orders !== false;
   const deliveryCfg = getDeliveryConfig(bar);
   const { prefs: alertPrefs } = useAlertPrefs();
   const alertSummary = getAlertPrefsSummary(alertPrefs, isPlatformAdmin);
   const showLowStockAlerts = alertPrefs.allEnabled && alertPrefs.lowStock;
+  const activeHhCount = isProPlan ? getActiveHappyHours(bar).length : 0;
+  const [showQuickPinInput, setShowQuickPinInput] = useState(false);
+  const [quickPinVal, setQuickPinVal] = useState('');
+  const [quickBusy, setQuickBusy] = useState(false);
 
   const handleToggleOrders = async () => {
     const r = await sb
@@ -2636,452 +3046,529 @@ export const MoreView: React.FC<{
     if (!r.error && r.data) onBarUpdated(r.data as Bar);
   };
 
+  const handleEnableBiometric = async () => {
+    const base = quickProfile || getSavedQuickProfile();
+    if (!base) {
+      onToast?.('Aguarde o perfil carregar para ativar a biometria.');
+      return;
+    }
+    setQuickBusy(true);
+    const res = await registerDeviceBiometricUnlock(base);
+    setQuickBusy(false);
+    if (!res.ok) {
+      onToast?.(res.error || 'Biometria indisponível. Use o PIN rápido abaixo.');
+      setShowQuickPinInput(true);
+      return;
+    }
+    onQuickProfileChanged?.(getSavedQuickProfile());
+    onToast?.('👆 Desbloqueio por digital/Face ID ativado neste celular!');
+  };
+
+  const handleSaveQuickPin = async () => {
+    const base = quickProfile || getSavedQuickProfile();
+    if (!base) return;
+    setQuickBusy(true);
+    const res = await saveQuickPin(base, quickPinVal);
+    setQuickBusy(false);
+    if (!res.ok) {
+      onToast?.(res.error || 'Digite de 4 a 6 números.');
+      return;
+    }
+    setQuickPinVal('');
+    setShowQuickPinInput(false);
+    onQuickProfileChanged?.(getSavedQuickProfile());
+    onToast?.('🔒 PIN rápido salvo! Agora você pode bloquear a tela e voltar em 1 toque.');
+  };
+
+  const handleDisableQuickLock = () => {
+    const base = quickProfile || getSavedQuickProfile();
+    if (!base) return;
+    const next = saveQuickProfile({
+      ...base,
+      biometricEnabled: false,
+      credentialId: undefined,
+      pinHash: undefined,
+      pinSalt: undefined,
+    });
+    onQuickProfileChanged?.(next);
+    onToast?.('Bloqueio rápido desativado neste aparelho.');
+  };
+
   return (
-    <div>
-      <h1>Mais</h1>
-      <p className="mu">
-        {bar.name}
-        {' · '}
-        <span className={isProPlan ? 'text-[var(--ok)] font-semibold' : 'text-[var(--ac)] font-semibold'}>
-          {planLabel}
-        </span>
-        {bar.city && (
-          <>
-            {' · '}
-            <a
-              href={externalMapUrl(bar)}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-[var(--ac)] no-underline"
-            >
-              📍 {bar.city} (Abrir mapa)
-            </a>
-          </>
-        )}
-      </p>
-
-      <div className="menu-row-list">
-        {isPlatformAdmin && onOpenSuperAdmin && (
-          <button
-            type="button"
-            className="menu-row-item !border-[var(--ac)]/60"
-            onClick={onOpenSuperAdmin}
+    <div className="space-y-5">
+      <div>
+        <h1>Mais</h1>
+        <p className="mu">
+          {bar.name}
+          {' · '}
+          <span
+            className={
+              isProPlan ? 'text-[var(--ok)] font-semibold' : 'text-[var(--ac)] font-semibold'
+            }
           >
-            <div className="menu-row-text">
-              <div className="menu-row-title text-[var(--ac)]">
-                👑 Painel Admin SaaS (Contas, VIP & Anúncios)
-                {unreadAdminAlerts > 0 && (
-                  <span className="badge-warn !bg-emerald-500/20 !text-emerald-200 ml-1.5">
-                    🔔 {unreadAdminAlerts} nova(s)
-                  </span>
-                )}
-              </div>
-              <div className="menu-row-sub">
-                Liberar VIP grátis, gerenciar lojas, banners de parceiros e Google AdSense
-              </div>
-            </div>
-            <span className="menu-row-chev">›</span>
-          </button>
-        )}
+            {planLabel}
+          </span>
+          {bar.city && (
+            <>
+              {' · '}
+              <a
+                href={externalMapUrl(bar)}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-[var(--ac)] no-underline"
+              >
+                📍 {bar.city}
+              </a>
+            </>
+          )}
+        </p>
+      </div>
 
-        {onOpenPlans && (
-          <button type="button" className="menu-row-item" onClick={onOpenPlans}>
-            <div className="menu-row-text">
-              <div className="menu-row-title">
-                ⭐ Plano & Assinatura ({planLabel})
-              </div>
-              <div className="menu-row-sub">
-                {isProPlan
-                  ? 'Ver benefícios ativos, validade e opções de download grátis'
-                  : 'Remova anúncios e libere Happy Hour, Fidelidade, Equipe e Bluetooth'}
-              </div>
-            </div>
-            <span className="menu-row-chev">›</span>
-          </button>
-        )}
-
-        <div className="menu-row-item !cursor-default">
-          <div className="menu-row-text">
-            <div className="menu-row-title">Receber pedidos</div>
-            <div className="menu-row-sub">{open ? 'Ligado' : 'Pausado'}</div>
-          </div>
-          <button
-            type="button"
-            className="b sm g"
-            onClick={() => void handleToggleOrders()}
-          >
-            {open ? 'Pausar' : 'Ligar'}
-          </button>
+      {/* 1. OPERAÇÃO & VENDAS */}
+      <section className="space-y-2">
+        <div className="text-[11px] font-bold uppercase tracking-wider text-[var(--mut)] px-1">
+          Operação & Vendas
         </div>
-
-        {onOpenAlertSettings && (
-          <button type="button" className="menu-row-item" onClick={onOpenAlertSettings}>
+        <div className="menu-row-list !mt-0">
+          <button
+            type="button"
+            className="menu-row-item"
+            onClick={() => onNavigate('cashier')}
+          >
             <div className="menu-row-text">
-              <div className="menu-row-title">
-                {alertSummary.isMuted ? '🔕' : '🔔'} Alertas & Notificações
-                <span
-                  className={`badge-warn ml-1.5 ${
-                    alertSummary.isMuted
-                      ? '!bg-red-500/20 !text-red-200'
-                      : '!bg-emerald-500/20 !text-emerald-200'
-                  }`}
-                >
-                  {alertSummary.label}
-                </span>
-              </div>
+              <div className="menu-row-title">💵 Caixa & Turno {!isProPlan ? '· Pro' : ''}</div>
               <div className="menu-row-sub">
-                Ative ou desative sons, vibração, pedidos, mesas, estoque e alertas do app
+                Abertura/fechamento, Pix, maquininha, 10%, divisão e pré-conta
               </div>
             </div>
             <span className="menu-row-chev">›</span>
           </button>
-        )}
 
-        <button type="button" className="menu-row-item" onClick={onOpenQr}>
-          <div className="menu-row-text">
-            <div className="menu-row-title">📱 QR do cardápio</div>
-            <div className="menu-row-sub">Para convidados ou clientes (inclui mesas)</div>
-          </div>
-          <span className="menu-row-chev">›</span>
-        </button>
-
-        <button type="button" className="menu-row-item" onClick={onOpenShakers}>
-          <div className="menu-row-text">
-            <div className="menu-row-title">🍸 Coqueteleiras</div>
-            <div className="menu-row-sub">Tamanhos que você usa</div>
-          </div>
-          <span className="menu-row-chev">›</span>
-        </button>
-
-        <button
-          type="button"
-          className="menu-row-item"
-          onClick={() => onOpenCreateDrink(false)}
-        >
-          <div className="menu-row-text">
-            <div className="menu-row-title">➕ Criar drink</div>
-            <div className="menu-row-sub">Receita nova, com foto e história</div>
-          </div>
-          <span className="menu-row-chev">›</span>
-        </button>
-
-        <button
-          type="button"
-          className="menu-row-item"
-          onClick={() => onOpenCreateDrink(true)}
-        >
-          <div className="menu-row-text">
-            <div className="menu-row-title">✏️ Editar receita</div>
-            <div className="menu-row-sub">Importe, ajuste e atualize ou crie nova</div>
-          </div>
-          <span className="menu-row-chev">›</span>
-        </button>
-
-        <button
-          type="button"
-          className="menu-row-item"
-          onClick={() => onNavigate('catalog')}
-        >
-          <div className="menu-row-text">
-            <div className="menu-row-title">🍟 Petiscos, Comidas & Avulsos</div>
-            <div className="menu-row-sub">
-              Cadastre porções, lanches, cervejas, energéticos e latas no cardápio
-            </div>
-          </div>
-          <span className="menu-row-chev">›</span>
-        </button>
-
-        {onOpenStation && (
-          <div className="panel mt-1 mb-1">
-            <div className="text-xs font-bold uppercase tracking-wider text-[var(--ac)] mb-2">
-              🎯 Áreas Operacionais da Equipe {!isProPlan ? '· Pro' : ''}
-            </div>
-            <div className="grid grid-cols-3 gap-2">
-              <button
-                type="button"
-                className="b g sm"
-                onClick={() => onOpenStation('bar')}
-              >
-                🍸 Barman
-              </button>
-              <button
-                type="button"
-                className="b g sm"
-                onClick={() => onOpenStation('cozinha')}
-              >
-                🍳 Cozinha
-              </button>
-              <button
-                type="button"
-                className="b g sm"
-                onClick={() => onOpenStation('garcom')}
-              >
-                🍽️ Garçom
-              </button>
-            </div>
-          </div>
-        )}
-
-        <button
-          type="button"
-          className="menu-row-item"
-          onClick={() => onNavigate('delivery')}
-        >
-          <div className="menu-row-text">
-            <div className="menu-row-title">
-              🛵 Delivery & Motoboys
-              {activeDeliveryCount > 0 ? (
-                <span className="badge-warn !bg-sky-500/25 !text-sky-200 ml-1.5">
-                  {activeDeliveryCount} ativo(s)
-                </span>
-              ) : deliveryCfg.enabled ? (
-                <span className="badge-warn !bg-emerald-500/20 !text-emerald-300 ml-1.5">
-                  ATIVO
-                </span>
-              ) : null}
-            </div>
-            <div className="menu-row-sub">
-              App externo de pedidos (0% comissão), fila de entrega e despacho p/ motoboy no WhatsApp
-            </div>
-          </div>
-          <span className="menu-row-chev">›</span>
-        </button>
-
-        <button
-          type="button"
-          className="menu-row-item"
-          onClick={() => onNavigate('cashier')}
-        >
-          <div className="menu-row-text">
-            <div className="menu-row-title">💵 Caixa & Turno {!isProPlan ? '· Pro' : ''}</div>
-            <div className="menu-row-sub">
-              Abertura/fechamento, maquininha/Pix/dinheiro, 10%, divisão e pré-conta
-            </div>
-          </div>
-          <span className="menu-row-chev">›</span>
-        </button>
-
-        {onOpenManagement && (
-          <>
-            <button
-              type="button"
-              className="menu-row-item"
-              onClick={() => onOpenManagement('garcons')}
-            >
-              <div className="menu-row-text">
-                <div className="menu-row-title">🍽️ Escala de Garçons & Praças</div>
-                <div className="menu-row-sub">
-                  Modo Híbrido, Praças Fixas por mesas, Fila Livre e comissões da equipe
-                </div>
+          <button
+            type="button"
+            className="menu-row-item"
+            onClick={() => onNavigate('delivery')}
+          >
+            <div className="menu-row-text">
+              <div className="menu-row-title">
+                🛵 Delivery & Motoboys
+                {activeDeliveryCount > 0 ? (
+                  <span className="badge-warn ml-1.5">{activeDeliveryCount} ativo(s)</span>
+                ) : deliveryCfg.enabled ? (
+                  <span className="text-[11px] font-bold text-[var(--ok)] ml-2">ATIVO</span>
+                ) : null}
               </div>
-              <span className="menu-row-chev">›</span>
-            </button>
+              <div className="menu-row-sub">
+                App próprio (0% taxa), taxas por bairro e despacho no WhatsApp
+              </div>
+            </div>
+            <span className="menu-row-chev">›</span>
+          </button>
+
+          <div className="menu-row-item !cursor-default flex-wrap gap-2">
+            <div
+              className="menu-row-text cursor-pointer"
+              onClick={() => (canEditMenu ? onNavigate('studio') : onOpenQr())}
+            >
+              <div className="menu-row-title">🎨 Cardápio, Perfil & QR Code</div>
+              <div className="menu-row-sub">
+                Personalize o visual no Modo Canva ou compartilhe o QR das mesas
+              </div>
+            </div>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button type="button" className="b g sm" onClick={onOpenQr}>
+                📱 QR
+              </button>
+              {canEditMenu && (
+                <button
+                  type="button"
+                  className="b sm"
+                  onClick={() => onNavigate('studio')}
+                >
+                  Editar
+                </button>
+              )}
+            </div>
+          </div>
+
+          {canEditMenu && (
             <button
               type="button"
               className="menu-row-item"
-              onClick={() => onOpenManagement('happyhour')}
+              onClick={() => onNavigate('prices')}
             >
               <div className="menu-row-text">
                 <div className="menu-row-title">
-                  🍻 Happy Hour Automático {!isProPlan ? '· Pro' : ''}
-                  {isProPlan && getActiveHappyHours(bar).length > 0 && (
-                    <span className="badge-warn !bg-emerald-500/20 !text-emerald-300">
-                      ATIVO AGORA
-                    </span>
+                  💰 Precificação
+                  {hasPricing && unpricedCount > 0 && showLowStockAlerts && (
+                    <span className="badge-warn">{unpricedCount} sem preço</span>
                   )}
                 </div>
                 <div className="menu-row-sub">
-                  Cadastre promoções por dia e horário que ligam e desligam sozinhas
+                  Defina preços de venda e margem sugerida sobre o estoque
                 </div>
               </div>
               <span className="menu-row-chev">›</span>
             </button>
+          )}
+        </div>
+      </section>
 
+      {/* 2. CENTRAL DE GESTÃO UNIFICADA (SUBSTITUI 7 TELAS REPETIDAS) */}
+      {onOpenManagement && (
+        <section className="space-y-2">
+          <div className="text-[11px] font-bold uppercase tracking-wider text-[var(--mut)] px-1">
+            Gestão do Negócio
+          </div>
+          <div className="panel space-y-3">
             <button
               type="button"
-              className="menu-row-item"
-              onClick={() => onOpenManagement('fidelidade')}
-            >
-              <div className="menu-row-text">
-                <div className="menu-row-title">
-                  🎁 Cartão Fidelidade & Cashback {!isProPlan ? '· Pro' : ''}
-                </div>
-                <div className="menu-row-sub">
-                  Carimbos ou cashback % por cliente com resgate automático no Caixa
-                </div>
-              </div>
-              <span className="menu-row-chev">›</span>
-            </button>
-
-            <button
-              type="button"
-              className="menu-row-item"
+              className="w-full flex items-center justify-between gap-2 bg-transparent border-0 p-0 text-left cursor-pointer text-[var(--tx)]"
               onClick={() => onOpenManagement('dashboard')}
             >
-              <div className="menu-row-text">
-                <div className="menu-row-title">
-                  📊 Relatórios, Financeiro & Lucro {!isProPlan ? '· Pro' : ''}
+              <div>
+                <div className="font-bold text-[15px]">
+                  📊 Central de Gestão {!isProPlan ? '· Pro' : ''}
                 </div>
-                <div className="menu-row-sub">
-                  Faturamento, CMV, lucro líquido, top vendidos, picos e exportação CSV
+                <div className="text-xs text-[var(--mut)] mt-0.5">
+                  Financeiro, garçons, promoções, compras, reservas e impressora
                 </div>
               </div>
-              <span className="menu-row-chev">›</span>
+              <span className="text-xl text-[var(--mut)]">›</span>
             </button>
 
-            <button
-              type="button"
-              className="menu-row-item"
-              onClick={() => onOpenManagement('compras')}
-            >
-              <div className="menu-row-text">
-                <div className="menu-row-title">
-                  🛒 Compras, Fornecedores & Perdas {!isProPlan ? '· Pro' : ''}
-                </div>
-                <div className="menu-row-sub">
-                  Lista automática de reposição, WhatsApp, quebras e cortesias
-                </div>
-              </div>
-              <span className="menu-row-chev">›</span>
-            </button>
-
-            <button
-              type="button"
-              className="menu-row-item"
-              onClick={() => onOpenManagement('reservas')}
-            >
-              <div className="menu-row-text">
-                <div className="menu-row-title">
-                  📅 Reservas de Mesa & Clientes (CRM) {!isProPlan ? '· Pro' : ''}
-                </div>
-                <div className="menu-row-sub">
-                  Agenda de reservas e ranking automático dos clientes frequentes
-                </div>
-              </div>
-              <span className="menu-row-chev">›</span>
-            </button>
-
-            <button
-              type="button"
-              className="menu-row-item"
-              onClick={() => onOpenManagement('config')}
-            >
-              <div className="menu-row-text">
-                <div className="menu-row-title">🛡️ Pix, Bluetooth, Adicionais & Permissões</div>
-                <div className="menu-row-sub">
-                  Chave Pix da loja, impressora Bluetooth ESC/POS, baixa automática e RBAC
-                </div>
-              </div>
-              <span className="menu-row-chev">›</span>
-            </button>
-          </>
-        )}
-
-        {canEditMenu && (
-          <button
-            type="button"
-            className="menu-row-item"
-            onClick={() => onNavigate('studio')}
-          >
-            <div className="menu-row-text">
-              <div className="menu-row-title">🎨 Editor: Perfil, Cardápio & Arte QR</div>
-              <div className="menu-row-sub">
-                Personalize o perfil da loja, cardápio, promoções e placas de QR Code
-              </div>
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 pt-2 border-t border-[var(--bd)]">
+              <button
+                type="button"
+                className="b g sm !justify-start"
+                onClick={() => onOpenManagement('dashboard')}
+              >
+                📈 Financeiro & CMV
+              </button>
+              <button
+                type="button"
+                className="b g sm !justify-start"
+                onClick={() => onOpenManagement('garcons')}
+              >
+                🍽️ Garçons & Praças
+              </button>
+              <button
+                type="button"
+                className="b g sm !justify-start"
+                onClick={() => onOpenManagement('happyhour')}
+              >
+                🍻 Happy Hour{activeHhCount > 0 ? ' · ON' : ''}
+              </button>
+              <button
+                type="button"
+                className="b g sm !justify-start"
+                onClick={() => onOpenManagement('fidelidade')}
+              >
+                🎁 Fidelidade
+              </button>
+              <button
+                type="button"
+                className="b g sm !justify-start"
+                onClick={() => onOpenManagement('compras')}
+              >
+                🛒 Compras & Perdas
+              </button>
+              <button
+                type="button"
+                className="b g sm !justify-start"
+                onClick={() => onOpenManagement('reservas')}
+              >
+                📅 Reservas & CRM
+              </button>
+              <button
+                type="button"
+                className="b g sm !justify-start col-span-2 sm:col-span-3"
+                onClick={() => onOpenManagement('config')}
+              >
+                🛡️ Chave Pix, Impressora Bluetooth & Permissões (RBAC)
+              </button>
             </div>
-            <span className="menu-row-chev">›</span>
-          </button>
-        )}
+          </div>
+        </section>
+      )}
 
-        {canEditMenu && (
-          <button
-            type="button"
-            className="menu-row-item"
-            onClick={() => onNavigate('prices')}
-          >
+      {/* 3. APARÊNCIA & PREFERÊNCIAS */}
+      <section className="space-y-2">
+        <div className="text-[11px] font-bold uppercase tracking-wider text-[var(--mut)] px-1">
+          Aparência & Preferências
+        </div>
+        <div className="menu-row-list !mt-0">
+          {onToggleTheme && (
+            <div className="menu-row-item !cursor-default">
+              <div className="menu-row-text">
+                <div className="menu-row-title">
+                  {uiThemeMode === 'dark' ? '🌙 Modo Noturno' : '☀️ Modo Diurno'}
+                </div>
+                <div className="menu-row-sub">
+                  Contraste automático: letras claras no escuro e letras escuras no claro
+                </div>
+              </div>
+              <button type="button" className="b sm g" onClick={onToggleTheme}>
+                {uiThemeMode === 'dark' ? '☀️ Diurno' : '🌙 Noturno'}
+              </button>
+            </div>
+          )}
+
+          <div className="menu-row-item !cursor-default">
             <div className="menu-row-text">
-              <div className="menu-row-title">
-                💰 Precificação
-                {hasPricing && unpricedCount > 0 && showLowStockAlerts && (
-                  <span className="badge-warn">{unpricedCount} sem preço</span>
+              <div className="menu-row-title">Receber pedidos no cardápio</div>
+              <div className="menu-row-sub">{open ? 'Ligado e aceitando pedidos' : 'Pausado'}</div>
+            </div>
+            <button
+              type="button"
+              className={`b sm ${open ? 'g' : 'ok'}`}
+              onClick={() => void handleToggleOrders()}
+            >
+              {open ? 'Pausar' : 'Ligar'}
+            </button>
+          </div>
+
+          {/* LOGIN RÁPIDO COM BIOMETRIA / DESBLOQUEIO DO CELULAR */}
+          <div className="menu-row-item !cursor-default !flex-col !items-stretch gap-2.5">
+            <div className="flex items-start justify-between gap-2 flex-wrap">
+              <div className="menu-row-text">
+                <div className="menu-row-title">
+                  👆 Login Rápido & Desbloqueio do Celular
+                  {quickProfile?.biometricEnabled && (
+                    <span className="text-[11px] font-bold text-[var(--ok)] ml-2">ATIVO</span>
+                  )}
+                </div>
+                <div className="menu-row-sub">
+                  {quickProfile?.credentialId
+                    ? 'Digital / Face ID / Tela do celular configurado neste aparelho'
+                    : quickProfile?.pinHash
+                      ? 'PIN rápido configurado neste aparelho'
+                      : 'Salva seu perfil e permite destravar com digital, Face ID ou PIN rápido'}
+                </div>
+              </div>
+              <div className="flex items-center gap-1.5 flex-wrap shrink-0">
+                <button
+                  type="button"
+                  className="b sm"
+                  disabled={quickBusy}
+                  onClick={() => void handleEnableBiometric()}
+                >
+                  {quickProfile?.credentialId ? '🔄 Recadastrar Biometria' : '👆 Ativar Biometria'}
+                </button>
+                <button
+                  type="button"
+                  className="b g sm"
+                  onClick={() => setShowQuickPinInput((v) => !v)}
+                >
+                  🔢 {quickProfile?.pinHash ? 'Trocar PIN' : 'Definir PIN'}
+                </button>
+                {quickProfile?.biometricEnabled && onLockApp && (
+                  <button type="button" className="b ok sm" onClick={onLockApp}>
+                    🔒 Bloquear agora
+                  </button>
                 )}
               </div>
+            </div>
+
+            {showQuickPinInput && (
+              <div className="flex items-center gap-2 pt-2 border-t border-[var(--bd)]">
+                <input
+                  type="password"
+                  inputMode="numeric"
+                  maxLength={6}
+                  value={quickPinVal}
+                  onChange={(e) => setQuickPinVal(e.target.value.replace(/\D+/g, '').slice(0, 6))}
+                  placeholder="Digite 4 a 6 números"
+                  className="grow !mt-0"
+                />
+                <button
+                  type="button"
+                  className="b sm ok shrink-0"
+                  disabled={quickBusy || quickPinVal.length < 4}
+                  onClick={() => void handleSaveQuickPin()}
+                >
+                  Salvar PIN
+                </button>
+                {quickProfile?.biometricEnabled && (
+                  <button
+                    type="button"
+                    className="b g sm shrink-0"
+                    onClick={handleDisableQuickLock}
+                  >
+                    Desativar
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+
+          {onOpenAlertSettings && (
+            <button type="button" className="menu-row-item" onClick={onOpenAlertSettings}>
+              <div className="menu-row-text">
+                <div className="menu-row-title">
+                  {alertSummary.isMuted ? '🔕' : '🔔'} Alertas & Sons ({alertSummary.label})
+                </div>
+                <div className="menu-row-sub">
+                  Configure avisos sonoros de novos pedidos, mesas e estoque baixo
+                </div>
+              </div>
+              <span className="menu-row-chev">›</span>
+            </button>
+          )}
+        </div>
+      </section>
+
+      {/* 4. EQUIPE, CONTA & DIVULGAÇÃO */}
+      <section className="space-y-2">
+        <div className="text-[11px] font-bold uppercase tracking-wider text-[var(--mut)] px-1">
+          Equipe, Conta & Suporte
+        </div>
+        <div className="menu-row-list !mt-0">
+          {isPlatformAdmin && onOpenSuperAdmin && (
+            <button
+              type="button"
+              className="menu-row-item !border-[var(--ac)]/60"
+              onClick={onOpenSuperAdmin}
+            >
+              <div className="menu-row-text">
+                <div className="menu-row-title text-[var(--ac)]">
+                  👑 Entrar na Área ADM (Separada)
+                  {unreadAdminAlerts > 0 && (
+                    <span className="badge-warn ml-1.5">🔔 {unreadAdminAlerts} nova(s)</span>
+                  )}
+                </div>
+                <div className="menu-row-sub">
+                  Área dedicada somente à administração: contas, planos, chat suporte e anúncios
+                </div>
+              </div>
+              <span className="menu-row-chev">›</span>
+            </button>
+          )}
+
+          {!isPlatformAdmin && isSupportAgent && onOpenSupportDesk && (
+            <button
+              type="button"
+              className="menu-row-item !border-[var(--ok)]/60"
+              onClick={onOpenSupportDesk}
+            >
+              <div className="menu-row-text">
+                <div className="menu-row-title text-[var(--ok)]">
+                  🎧 Central de Atendimento (Equipe Suporte)
+                </div>
+                <div className="menu-row-sub">
+                  Responder mensagens das lojas em tempo real
+                </div>
+              </div>
+              <span className="menu-row-chev">›</span>
+            </button>
+          )}
+
+          <div className="menu-row-item !cursor-default flex-wrap gap-2">
+            <div
+              className="menu-row-text cursor-pointer"
+              onClick={() => onNavigate('careers', isManager ? 'store' : 'personal')}
+            >
+              <div className="menu-row-title">👥 Equipe, Vagas & Currículo</div>
               <div className="menu-row-sub">
-                {hasPricing && unpricedCount > 0 && showLowStockAlerts
-                  ? `${unpricedCount} item(ns) do estoque aguardando preço para o cardápio`
-                  : 'Preços dos drinks (cardápio pago)'}
+                Gerencie funcionários da loja, vagas publicadas ou seu perfil profissional
               </div>
             </div>
-            <span className="menu-row-chev">›</span>
-          </button>
-        )}
+            <div className="flex items-center gap-1.5 shrink-0">
+              {isManager && (
+                <button
+                  type="button"
+                  className="b g sm"
+                  onClick={() => onNavigate('careers', 'store')}
+                >
+                  Equipe
+                </button>
+              )}
+              <button
+                type="button"
+                className="b g sm"
+                onClick={() => onNavigate('careers', 'personal')}
+              >
+                Currículo
+              </button>
+            </div>
+          </div>
 
-        {isManager && (
-          <button
-            type="button"
-            className="menu-row-item"
-            onClick={() => onNavigate('careers', 'store')}
-          >
+          <button type="button" className="menu-row-item" onClick={onOpenSwitchBar}>
             <div className="menu-row-text">
-              <div className="menu-row-title">👥 Equipe & Vagas da loja</div>
-              <div className="menu-row-sub">Criar vagas, currículos recebidos e equipe</div>
+              <div className="menu-row-title">🏠 Meus bares</div>
+              <div className="menu-row-sub">Trocar de unidade ou criar novo bar</div>
             </div>
             <span className="menu-row-chev">›</span>
           </button>
-        )}
 
-        <button
-          type="button"
-          className="menu-row-item"
-          onClick={() => onNavigate('careers', 'personal')}
-        >
-          <div className="menu-row-text">
-            <div className="menu-row-title">📄 Meu currículo & Vagas</div>
-            <div className="menu-row-sub">Currículo, vagas na região e entrar em loja</div>
-          </div>
-          <span className="menu-row-chev">›</span>
-        </button>
-
-        <button type="button" className="menu-row-item" onClick={onOpenSwitchBar}>
-          <div className="menu-row-text">
-            <div className="menu-row-title">🏠 Meus bares</div>
-            <div className="menu-row-sub">Trocar ou criar bar</div>
-          </div>
-          <span className="menu-row-chev">›</span>
-        </button>
-
-        <PWAInstallButton variant="row" />
-
-        {onOpenSalesSite && (
-          <button type="button" className="menu-row-item" onClick={onOpenSalesSite}>
-            <div className="menu-row-text">
-              <div className="menu-row-title">🌐 Site Oficial de Vendas (divulgar Meu Bar)</div>
-              <div className="menu-row-sub">
-                Abrir página de apresentação comercial e calculadora de economia (?vendas=1)
+          {onOpenPlans && (
+            <button type="button" className="menu-row-item" onClick={onOpenPlans}>
+              <div className="menu-row-text">
+                <div className="menu-row-title">⭐ Plano & Assinatura ({planLabel})</div>
+                <div className="menu-row-sub">
+                  {isProPlan
+                    ? 'Ver benefícios ativos e status da assinatura'
+                    : 'Remova anúncios e libere todos os módulos profissionais'}
+                </div>
               </div>
-            </div>
-            <span className="menu-row-chev">›</span>
-          </button>
-        )}
+              <span className="menu-row-chev">›</span>
+            </button>
+          )}
 
-        {supportWhatsAppHref && (
-          <a
-            href={supportWhatsAppHref}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="menu-row-item no-underline"
-          >
-            <div className="menu-row-text">
-              <div className="menu-row-title">💬 Suporte & Atendimento (WhatsApp)</div>
-              <div className="menu-row-sub">Dúvidas sobre o app, configuração ou Plano Pro</div>
-            </div>
-            <span className="menu-row-chev">›</span>
-          </a>
-        )}
-      </div>
+          {onOpenSalesSite && (
+            <button type="button" className="menu-row-item" onClick={onOpenSalesSite}>
+              <div className="menu-row-text">
+                <div className="menu-row-title">🌐 Conhecer o Meu Bar (Apresentação)</div>
+                <div className="menu-row-sub">
+                  Apresentação interativa por problema do cliente com telas e exemplos
+                </div>
+              </div>
+              <span className="menu-row-chev">›</span>
+            </button>
+          )}
+
+          <PWAInstallButton variant="row" />
+
+          {onOpenSupportChat && (
+            <button
+              type="button"
+              className="menu-row-item"
+              onClick={onOpenSupportChat}
+            >
+              <div className="menu-row-text">
+                <div className="menu-row-title">
+                  💬 Chat Direto com o Suporte (no app)
+                  {unreadSupportCount > 0 && (
+                    <span className="badge-warn ml-1.5">{unreadSupportCount} nova(s)</span>
+                  )}
+                </div>
+                <div className="menu-row-sub">
+                  Fale direto com nossa equipe dentro do Meu Bar em tempo real
+                </div>
+              </div>
+              <span className="menu-row-chev">›</span>
+            </button>
+          )}
+
+          {supportWhatsAppHref && (
+            <a
+              href={supportWhatsAppHref}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="menu-row-item no-underline"
+            >
+              <div className="menu-row-text">
+                <div className="menu-row-title">💬 Suporte no WhatsApp</div>
+                <div className="menu-row-sub">Dúvidas sobre implantação, impressora ou Plano Pro</div>
+              </div>
+              <span className="menu-row-chev">›</span>
+            </a>
+          )}
+        </div>
+      </section>
 
       {onOpenLegal && (
-        <div className="mt-4 flex items-center justify-center gap-3 text-xs text-[var(--mut)]">
+        <div className="pt-2 flex items-center justify-center gap-3 text-xs text-[var(--mut)]">
           <button
             type="button"
             className="bg-transparent border-0 text-[var(--mut)] hover:text-[var(--fg)] underline cursor-pointer p-0"

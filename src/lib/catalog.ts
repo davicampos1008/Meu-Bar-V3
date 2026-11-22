@@ -1158,6 +1158,57 @@ export function getUnitMeta(unitId?: string | null) {
   return STOCK_UNITS.find((u) => u.id === unitId) || STOCK_UNITS[0];
 }
 
+export const STOCK_COST_BASIS = [
+  { id: 'unidade', label: 'Por unidade (R$/un)', short: 'un', costLabel: 'Custo por unidade (R$/un)' },
+  { id: 'garrafa', label: 'Por garrafa (R$/garrafa)', short: 'garrafa', costLabel: 'Custo por garrafa (R$)' },
+  { id: 'lata', label: 'Por lata / long neck (R$/lata)', short: 'lata', costLabel: 'Custo por lata / long neck (R$)' },
+  { id: 'litro', label: 'Por litro (R$/L)', short: 'L', costLabel: 'Custo por litro (R$/L)' },
+  { id: '100ml', label: 'Por 100 ml (R$/100ml)', short: '100ml', costLabel: 'Custo por 100 ml (R$)' },
+  { id: 'kg', label: 'Por quilo (R$/kg)', short: 'kg', costLabel: 'Custo por quilo (R$/kg)' },
+  { id: '100g', label: 'Por 100 gramas (R$/100g)', short: '100g', costLabel: 'Custo por 100 g (R$)' },
+  { id: 'maco', label: 'Por maço (R$/maço)', short: 'maço', costLabel: 'Custo por maço (R$)' },
+  { id: 'bandeja', label: 'Por bandeja / caixa (R$/cx)', short: 'bandeja', costLabel: 'Custo por bandeja / caixa (R$)' },
+  { id: 'pacote', label: 'Por pacote / saco (R$/pct)', short: 'pacote', costLabel: 'Custo por pacote / saco (R$)' },
+  { id: 'pote', label: 'Por pote / vidro (R$/pote)', short: 'pote', costLabel: 'Custo por pote / vidro (R$)' },
+] as const;
+
+export type StockCostBasisId = (typeof STOCK_COST_BASIS)[number]['id'];
+
+const UNIT_COMPATIBLE_COST_BASIS: Record<StockUnitId, StockCostBasisId[]> = {
+  garrafa: ['garrafa', 'litro', '100ml', 'unidade'],
+  lata: ['lata', 'unidade', 'bandeja', 'litro'],
+  litro: ['litro', '100ml', 'garrafa'],
+  kg: ['kg', '100g', 'pacote'],
+  g: ['100g', 'kg', 'pacote', 'pote'],
+  unidade: ['unidade', 'bandeja', 'pacote'],
+  maco: ['maco', 'unidade'],
+  bandeja: ['bandeja', 'unidade'],
+  pacote: ['pacote', 'unidade', 'kg', '100g'],
+  pote: ['pote', 'unidade', '100g', 'kg', 'litro'],
+};
+
+export function getCostBasisOptionsForUnit(unitId?: string | null) {
+  const safeUnit = (STOCK_UNITS.some((u) => u.id === unitId) ? unitId : 'garrafa') as StockUnitId;
+  const ids = UNIT_COMPATIBLE_COST_BASIS[safeUnit] || ['unidade'];
+  return ids
+    .map((id) => STOCK_COST_BASIS.find((b) => b.id === id)!)
+    .filter(Boolean);
+}
+
+export function getDefaultCostBasisForUnit(unitId?: string | null): StockCostBasisId {
+  const opts = getCostBasisOptionsForUnit(unitId);
+  return opts[0]?.id || 'unidade';
+}
+
+export function getCostBasisMeta(basisId?: string | null, fallbackUnit?: string | null) {
+  if (basisId) {
+    const found = STOCK_COST_BASIS.find((b) => b.id === basisId);
+    if (found) return found;
+  }
+  const defId = getDefaultCostBasisForUnit(fallbackUnit);
+  return STOCK_COST_BASIS.find((b) => b.id === defId) || STOCK_COST_BASIS[0];
+}
+
 export function getDefaultUnitForIngredient(
   name: string,
   category?: string | null

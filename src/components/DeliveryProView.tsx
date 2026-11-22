@@ -384,7 +384,7 @@ export const DeliveryProView: React.FC<DeliveryProViewProps> = ({
       id: 'zn_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
       name: zName,
       fee: feeVal,
-      eta: newZoneEta.trim() || undefined,
+      eta_minutes: newZoneEta.trim() || undefined,
     };
     setCfg((prev) => ({
       ...prev,
@@ -1078,7 +1078,7 @@ export const DeliveryProView: React.FC<DeliveryProViewProps> = ({
                   >
                     <div>
                       <b>{z.name}</b> · <span className="text-[var(--ok)] font-bold">{money(z.fee)}</span>
-                      {z.eta && <span className="text-[var(--mut)]"> · {z.eta}</span>}
+                      {z.eta_minutes && <span className="text-[var(--mut)]"> · {z.eta_minutes}</span>}
                     </div>
                     <button
                       type="button"

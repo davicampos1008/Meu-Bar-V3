@@ -1061,6 +1061,7 @@ begin
   set
     plan_tier = v_tier,
     plan_expires_at = case when v_tier = 'pro' then p_expires_at else null end,
+    trial_ends_at = case when v_tier = 'free' then (now() - interval '1 minute') else null end,
     plan_note = nullif(left(trim(coalesce(p_note, '')), 140), '')
   where id = p_bar_id;
 end $$;
@@ -1821,3 +1822,195 @@ where not exists (
   select 1 from recipes r
   where translate(lower(trim(r.name)), 'áàâãäéèêëíìîïóòôõöúùûüçñ', 'aaaaaeeeeiiiiooooouuuucn') = s.norm_name
 );
+
+-- =============================================================================
+-- CHAT DIRETO DE SUPORTE (LOJAS <-> ADMIN / EQUIPE DE SUPORTE)
+-- =============================================================================
+create or replace function public.is_support_staff()
+returns boolean
+language plpgsql
+stable
+security definer
+set search_path = public
+as $$
+declare
+  v_email text := lower(trim(coalesce(auth.jwt() ->> 'email', '')));
+  v_agents jsonb;
+begin
+  if public.is_platform_admin() then
+    return true;
+  end if;
+  if v_email = '' then
+    return false;
+  end if;
+  select config -> 'support_agent_emails'
+    into v_agents
+    from public.platform_settings
+   where id = 'default'
+   limit 1;
+  if v_agents is null or jsonb_typeof(v_agents) <> 'array' then
+    return false;
+  end if;
+  return exists (
+    select 1
+      from jsonb_array_elements_text(v_agents) as elem(val)
+     where lower(trim(elem.val)) = v_email
+  );
+end;
+$$;
+grant execute on function public.is_support_staff() to authenticated;
+
+create table if not exists public.support_threads (
+  id uuid primary key default gen_random_uuid(),
+  bar_id uuid references public.bars(id) on delete set null,
+  bar_name text not null default 'Minha conta',
+  user_id uuid not null,
+  user_email text,
+  subject text not null default 'Atendimento Meu Bar',
+  status text not null default 'open' check (status in ('open','pending','resolved')),
+  assigned_agent_email text,
+  last_message text,
+  last_sender_role text check (last_sender_role in ('store','support')),
+  last_message_at timestamptz not null default now(),
+  unread_for_support int not null default 0,
+  unread_for_store int not null default 0,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.support_messages (
+  id uuid primary key default gen_random_uuid(),
+  thread_id uuid not null references public.support_threads(id) on delete cascade,
+  sender_id uuid not null,
+  sender_name text not null,
+  sender_email text,
+  sender_role text not null check (sender_role in ('store','support')),
+  body text not null check (char_length(trim(body)) between 1 and 2000),
+  created_at timestamptz not null default now()
+);
+
+create index if not exists idx_support_threads_user on public.support_threads(user_id, last_message_at desc);
+create index if not exists idx_support_threads_bar on public.support_threads(bar_id, last_message_at desc);
+create index if not exists idx_support_messages_thread on public.support_messages(thread_id, created_at asc);
+
+alter table public.support_threads enable row level security;
+alter table public.support_messages enable row level security;
+
+drop policy if exists support_threads_select on public.support_threads;
+create policy support_threads_select on public.support_threads for select
+using (
+  public.is_support_staff()
+  or user_id = auth.uid()
+  or (bar_id is not null and exists (
+    select 1 from public.bars b where b.id = support_threads.bar_id and b.owner = auth.uid()
+  ))
+  or (bar_id is not null and exists (
+    select 1 from public.bar_members m where m.bar_id = support_threads.bar_id and m.user_id = auth.uid()
+  ))
+);
+
+drop policy if exists support_threads_insert on public.support_threads;
+create policy support_threads_insert on public.support_threads for insert
+with check (
+  auth.uid() is not null
+  and (
+    public.is_support_staff()
+    or user_id = auth.uid()
+  )
+);
+
+drop policy if exists support_threads_update on public.support_threads;
+create policy support_threads_update on public.support_threads for update
+using (
+  public.is_support_staff()
+  or user_id = auth.uid()
+  or (bar_id is not null and exists (
+    select 1 from public.bars b where b.id = support_threads.bar_id and b.owner = auth.uid()
+  ))
+)
+with check (
+  public.is_support_staff()
+  or user_id = auth.uid()
+  or (bar_id is not null and exists (
+    select 1 from public.bars b where b.id = support_threads.bar_id and b.owner = auth.uid()
+  ))
+);
+
+drop policy if exists support_messages_select on public.support_messages;
+create policy support_messages_select on public.support_messages for select
+using (
+  public.is_support_staff()
+  or exists (
+    select 1 from public.support_threads t
+     where t.id = support_messages.thread_id
+       and (
+         t.user_id = auth.uid()
+         or (t.bar_id is not null and exists (
+           select 1 from public.bars b where b.id = t.bar_id and b.owner = auth.uid()
+         ))
+         or (t.bar_id is not null and exists (
+           select 1 from public.bar_members m where m.bar_id = t.bar_id and m.user_id = auth.uid()
+         ))
+       )
+  )
+);
+
+drop policy if exists support_messages_insert on public.support_messages;
+create policy support_messages_insert on public.support_messages for insert
+with check (
+  auth.uid() is not null
+  and sender_id = auth.uid()
+  and (
+    (sender_role = 'support' and public.is_support_staff())
+    or (
+      sender_role = 'store'
+      and exists (
+        select 1 from public.support_threads t
+         where t.id = support_messages.thread_id
+           and (
+             t.user_id = auth.uid()
+             or (t.bar_id is not null and exists (
+               select 1 from public.bars b where b.id = t.bar_id and b.owner = auth.uid()
+             ))
+             or (t.bar_id is not null and exists (
+               select 1 from public.bar_members m where m.bar_id = t.bar_id and m.user_id = auth.uid()
+             ))
+           )
+      )
+    )
+  )
+);
+
+create or replace function public.touch_support_thread_on_message()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  update public.support_threads
+     set last_message = left(trim(new.body), 160),
+         last_sender_role = new.sender_role,
+         last_message_at = new.created_at,
+         status = case when new.sender_role = 'store' and status = 'resolved' then 'open' else status end,
+         unread_for_support = case when new.sender_role = 'store' then coalesce(unread_for_support, 0) + 1 else 0 end,
+         unread_for_store = case when new.sender_role = 'support' then coalesce(unread_for_store, 0) + 1 else 0 end
+   where id = new.thread_id;
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_support_message_touch_thread on public.support_messages;
+create trigger trg_support_message_touch_thread
+after insert on public.support_messages
+for each row execute function public.touch_support_thread_on_message();
+
+do $$ begin
+  alter publication supabase_realtime add table public.support_threads;
+exception when others then null;
+end $$;
+
+do $$ begin
+  alter publication supabase_realtime add table public.support_messages;
+exception when others then null;
+end $$;
+

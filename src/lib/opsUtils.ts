@@ -134,6 +134,14 @@ export function getBarOpsData(bar?: Partial<Bar> | null): BarOperationalData {
   const fromCol = bar?.ops_data || {};
   const merged: BarOperationalData = {
     default_service_fee_pct: 10,
+    service_fee_allow_custom: true,
+    service_fee_100_to_waiter: false,
+    couvert_enabled: false,
+    couvert_price: 0,
+    couvert_mode: 'optional',
+    couvert_label: 'Couvert artístico',
+    couvert_per_person: false,
+    staff_login_enabled: false,
     printer_width: '80mm',
     auto_deduct_stock: true,
     ...fromPreset,
@@ -194,6 +202,7 @@ export async function saveBarOpsData(
   };
   if (onBarUpdated) onBarUpdated(updated);
   void broadcastMenuUpdate(bar.id, updated);
+  void broadcastBarOpsSync(bar.id);
   return updated;
 }
 
@@ -426,8 +435,11 @@ export function printCustomerBill(params: {
   subtitle?: string;
   lines: { label: string; amount: number }[];
   subtotal: number;
+  couvert?: number;
+  couvertLabel?: string;
   serviceFee: number;
   serviceFeePct: number;
+  service100ToWaiter?: boolean;
   discount: number;
   total: number;
   paymentInfo?: string;
@@ -437,6 +449,8 @@ export function printCustomerBill(params: {
   const ops = getBarOpsData(params.bar);
   const widthMm = ops.printer_width === '58mm' ? '58mm' : '80mm';
   const nowStr = new Date().toLocaleString('pt-BR');
+  const couvertAmt = Number(params.couvert) || 0;
+  const couvertLbl = params.couvertLabel || ops.couvert_label || 'Couvert artístico';
 
   const rowsHtml = params.lines
     .map(
@@ -444,6 +458,9 @@ export function printCustomerBill(params: {
         `<div class="row"><span>${escHtml(l.label)}</span><span>${escHtml(money(l.amount))}</span></div>`
     )
     .join('');
+
+  const serviceLabel =
+    params.serviceFeePct > 0 ? `Comissão Garçom (${params.serviceFeePct}%)` : 'Comissão Garçom';
 
   const html = `<!doctype html><html><head><meta charset="utf-8"><style>
     @page { size: ${widthMm} auto; margin: 2mm; }
@@ -465,7 +482,9 @@ export function printCustomerBill(params: {
     ${rowsHtml || '<div>Sem itens lançados</div>'}
     <div class="hr"></div>
     <div class="row"><span>Subtotal</span><span>${escHtml(money(params.subtotal))}</span></div>
-    ${params.serviceFee > 0 ? `<div class="row"><span>Serviço (${params.serviceFeePct}%)</span><span>${escHtml(money(params.serviceFee))}</span></div>` : ''}
+    ${couvertAmt > 0 ? `<div class="row"><span>${escHtml(couvertLbl)}</span><span>${escHtml(money(couvertAmt))}</span></div>` : ''}
+    ${params.serviceFee > 0 ? `<div class="row"><span>${escHtml(serviceLabel)}</span><span>${escHtml(money(params.serviceFee))}</span></div>` : ''}
+    ${params.serviceFee > 0 && params.service100ToWaiter ? `<div class="c" style="font-size:10px;margin-top:2px;">* 100% da comissão repassada ao garçom *</div>` : ''}
     ${params.discount > 0 ? `<div class="row"><span>Desconto</span><span>- ${escHtml(money(params.discount))}</span></div>` : ''}
     <div class="hr"></div>
     <div class="row tot"><span>TOTAL</span><span>${escHtml(money(params.total))}</span></div>
@@ -495,8 +514,14 @@ export function printCustomerBill(params: {
         : [{ text: 'Sem itens lancados' }]),
       { text: '', hr: true },
       { text: '', pair: ['Subtotal', money(params.subtotal)] },
+      ...(couvertAmt > 0
+        ? [{ text: '', pair: [couvertLbl.slice(0, 20), money(couvertAmt)] as [string, string] }]
+        : []),
       ...(params.serviceFee > 0
-        ? [{ text: '', pair: [`Servico (${params.serviceFeePct}%)`, money(params.serviceFee)] as [string, string] }]
+        ? [{ text: '', pair: [serviceLabel.slice(0, 20), money(params.serviceFee)] as [string, string] }]
+        : []),
+      ...(params.serviceFee > 0 && params.service100ToWaiter
+        ? [{ text: '100% repassado ao garcom', align: 'center' as const }]
         : []),
       ...(params.discount > 0
         ? [{ text: '', pair: ['Desconto', `- ${money(params.discount)}`] as [string, string] }]

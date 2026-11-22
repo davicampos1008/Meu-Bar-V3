@@ -2,7 +2,11 @@ import React from 'react';
 import { CREST_ICONS, CREST_ORNAMENTS, MENU_BLOCK_LABELS } from '../lib/catalog';
 import {
   DEFAULT_MENU_DESIGN,
+  getContrastingAccentColor,
+  getContrastingMutedColor,
+  getContrastingTextColor,
   getPromoAdjustedPrice,
+  isColorLight,
   money,
   recipeTags,
 } from '../lib/utils';
@@ -1040,12 +1044,15 @@ export const MenuDrinksCatalog: React.FC<{
   onSelectDrink,
 }) => {
   const mode = displayMode || 'grid-classic';
+  const safeTextColor = getContrastingTextColor(surface, textColor);
+  const safeAccent = getContrastingAccentColor(accent, surface);
+  const surfaceIsLight = isColorLight(surface);
 
   const getCardStyleObj = (isPolaroid: boolean): React.CSSProperties => {
     const base: React.CSSProperties = {
       background: surface,
-      borderColor: `${accent}2b`,
-      color: textColor,
+      borderColor: surfaceIsLight ? 'rgba(17,17,20,0.16)' : `${safeAccent}38`,
+      color: safeTextColor,
     };
 
     switch (design.card_style) {
@@ -1320,9 +1327,9 @@ export const MenuDrinksCatalog: React.FC<{
             <SectionHeadingRibbon
               title={cat}
               styleId={design.section_style}
-              accent={accent}
+              accent={safeAccent}
               surface={surface}
-              text={textColor}
+              text={safeTextColor}
             />
             <div className="menu-items mode-grouped-sections">{list.map(renderSingleCard)}</div>
           </div>
@@ -1337,9 +1344,9 @@ export const MenuDrinksCatalog: React.FC<{
         <SectionHeadingRibbon
           title="Carta de Drinks"
           styleId={design.section_style}
-          accent={accent}
+          accent={safeAccent}
           surface={surface}
-          text={textColor}
+          text={safeTextColor}
         />
       )}
       <div className={`menu-items ${mode} mt-2`}>{recipes.map(renderSingleCard)}</div>
@@ -1515,9 +1522,12 @@ export const MenuHeaderCard: React.FC<{
   interactiveLogoDrag?: boolean;
   onLogoOffsetChange?: (x: number, y: number) => void;
 }> = ({ bar, design, mesa, interactiveLogoDrag, onLogoOffsetChange }) => {
-  const accent = bar.color_accent || '#e5a93c';
+  const rawAccent = bar.color_accent || '#e5a93c';
   const surface = bar.color_surface || '#141218';
-  const text = bar.color_text || '#f6f1ea';
+  const surfaceIsLight = isColorLight(surface);
+  const accent = getContrastingAccentColor(rawAccent, surface);
+  const text = getContrastingTextColor(surface, bar.color_text);
+  const mutedText = getContrastingMutedColor(surface);
   const borderCls = bar.crest_border || 'crest-border-gold';
   const fontCls = bar.name_font || 'store-font-serif';
   const alignMap: Record<string, string> = {
@@ -1589,7 +1599,9 @@ export const MenuHeaderCard: React.FC<{
           <div
             className="absolute inset-0"
             style={{
-              background: `linear-gradient(180deg, rgba(11,10,13,.52), ${surface}ee)`,
+              background: surfaceIsLight
+                ? `linear-gradient(180deg, rgba(255,255,255,0.68), ${surface}f2)`
+                : `linear-gradient(180deg, rgba(11,10,13,.52), ${surface}ee)`,
             }}
           />
         </div>
@@ -1719,8 +1731,16 @@ export const MenuHeaderCard: React.FC<{
           <h1 className={`${fontCls} !m-0 leading-tight`} style={{ color: accent }}>
             {bar.name || 'Meu Bar'}
           </h1>
-          {bar.slogan && <p className="text-sm opacity-80 mt-1">{bar.slogan}</p>}
-          {bar.city && <p className="text-xs opacity-65 mt-1">📍 {bar.city}</p>}
+          {bar.slogan && (
+            <p className="text-sm mt-1" style={{ color: text }}>
+              {bar.slogan}
+            </p>
+          )}
+          {bar.city && (
+            <p className="text-xs mt-1" style={{ color: mutedText }}>
+              📍 {bar.city}
+            </p>
+          )}
         </div>
       </div>
     </div>

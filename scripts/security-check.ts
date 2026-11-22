@@ -29,7 +29,8 @@ function check(category: string, name: string, passed: boolean, detail: string) 
 
 function makeFakeFile(name: string, type: string, content: Uint8Array | string): File {
   const bytes = typeof content === 'string' ? new TextEncoder().encode(content) : content;
-  return new File([bytes], name, { type });
+  const buf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+  return new File([buf], name, { type });
 }
 
 async function run() {
@@ -49,8 +50,8 @@ async function run() {
     check(
       'XSS / Protocol Injection',
       `Bloqueia payload "${payload.slice(0, 32)}"`,
-      out === '',
-      out === '' ? 'Rejeitado com sucesso' : `FALHA: retornou "${out}"`
+      out === null,
+      out === null ? 'Rejeitado com sucesso' : `FALHA: retornou "${out}"`
     );
   }
   const validHttps = safeExternalUrl('meubar.com.br/cardapio');
@@ -95,7 +96,7 @@ async function run() {
     'Path Traversal & Uploads',
     'Bloqueia upload de SVG com script embutido',
     !svgRes.ok,
-    svgRes.error || 'FALHA: aceitou SVG'
+    !svgRes.ok ? svgRes.error : 'FALHA: aceitou SVG'
   );
 
   const htmlAsJpg = makeFakeFile('shell.html', 'text/html', '<html><script>alert(1)</script></html>');
@@ -104,16 +105,16 @@ async function run() {
     'Path Traversal & Uploads',
     'Bloqueia HTML disfarçado no upload de imagem',
     !htmlRes.ok,
-    htmlRes.error || 'FALHA: aceitou HTML'
+    !htmlRes.ok ? htmlRes.error : 'FALHA: aceitou HTML'
   );
 
   const hugeImg = new File([new Uint8Array(10 * 1024 * 1024)], 'huge.jpg', { type: 'image/jpeg' });
   const hugeRes = validateImageUpload(hugeImg);
   check(
     'Path Traversal & Uploads',
-    'Bloqueia imagem acima de 8 MB (DoS de Storage)',
+    'Bloqueia imagem acima de 6 MB (DoS de Storage)',
     !hugeRes.ok,
-    hugeRes.error || 'FALHA: aceitou 10MB'
+    !hugeRes.ok ? hugeRes.error : 'FALHA: aceitou 10MB'
   );
 
   const fakePdf = makeFakeFile('curriculo.pdf', 'application/pdf', '<html><script>alert(1)</script></html>');
@@ -122,7 +123,7 @@ async function run() {
     'Path Traversal & Uploads',
     'Bloqueia PDF falso sem assinatura binária %PDF-',
     !fakePdfRes.ok,
-    fakePdfRes.error || 'FALHA: aceitou falso PDF'
+    !fakePdfRes.ok ? fakePdfRes.error : 'FALHA: aceitou falso PDF'
   );
 
   const realPdf = makeFakeFile('curriculo.pdf', 'application/pdf', '%PDF-1.7\n1 0 obj\n<<>>\nendobj');
@@ -131,7 +132,7 @@ async function run() {
     'Path Traversal & Uploads',
     'Aceita PDF legítimo com assinatura %PDF-',
     realPdfRes.ok,
-    realPdfRes.ok ? 'Validado com sucesso' : realPdfRes.error || 'FALHA'
+    realPdfRes.ok ? 'Validado com sucesso' : realPdfRes.error
   );
 
   // 4. Força de Senha & Anti-Flood Client-Side
@@ -141,20 +142,20 @@ async function run() {
   check(
     'Autenticação & Anti-Flood',
     'Bloqueia senha curta no cadastro (123456)',
-    !weakPw.ok,
+    !weakPw.validForSignup,
     weakPw.hint
   );
   check(
     'Autenticação & Anti-Flood',
     'Bloqueia senha só numérica no cadastro',
-    !numericOnly.ok,
+    !numericOnly.validForSignup,
     numericOnly.hint
   );
   check(
     'Autenticação & Anti-Flood',
     'Aprova senha forte com letras, números e símbolo',
-    strongPw.ok && strongPw.score >= 3,
-    `Score ${strongPw.score}/4 (${strongPw.label})`
+    strongPw.validForSignup && strongPw.score >= 3,
+    `Score ${strongPw.score}/3 (${strongPw.label})`
   );
 
   const burst1 = checkActionCooldown('pentest_burst_key', 5000);
@@ -162,8 +163,8 @@ async function run() {
   check(
     'Autenticação & Anti-Flood',
     'Bloqueia disparo repetido (flood/double-submit)',
-    burst1.ok && !burst2.ok && burst2.waitMs > 0,
-    burst2.ok ? 'FALHA: permitiu flood' : `2º disparo bloqueado (${burst2.waitMs}ms restantes)`
+    burst1.allowed && !burst2.allowed && burst2.waitSeconds > 0,
+    burst2.allowed ? 'FALHA: permitiu flood' : `2º disparo bloqueado (${burst2.waitSeconds}s restantes)`
   );
 
   // 5. Auditoria de Banco de Dados (RLS, Escalação de Privilégio, Vazamento Multi-Tenant e DoS)
@@ -267,7 +268,11 @@ async function run() {
 
   const dangerousHits: string[] = [];
   for (const file of srcFiles) {
-    const content = fs.readFileSync(file, 'utf8');
+    const rawContent = fs.readFileSync(file, 'utf8');
+    // Ignora comentários para evitar falsos positivos em documentação
+    const content = rawContent
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '');
     if (/\bdangerouslySetInnerHTML\b/.test(content)) dangerousHits.push(`${file}: dangerouslySetInnerHTML`);
     if (/\beval\s*\(/.test(content)) dangerousHits.push(`${file}: eval()`);
     if (/\bnew\s+Function\s*\(/.test(content)) dangerousHits.push(`${file}: new Function()`);

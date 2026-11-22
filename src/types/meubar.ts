@@ -162,9 +162,15 @@ export interface CashSaleRecord {
   tab_label: string;
   client_name: string;
   subtotal: number;
+  couvert?: number;
+  couvert_label?: string;
   service_fee: number;
+  service_100_to_waiter?: boolean;
+  waiter_name?: string;
+  waiter_commission?: number;
   discount: number;
   discount_reason?: string;
+  discount_approved_by?: string;
   total: number;
   payment_method: PaymentMethod;
   splits?: PaymentSplit[];
@@ -368,14 +374,47 @@ export interface DeliveryDispatchRecord {
   updated_at: string;
 }
 
+export type StaffRoleKey =
+  | 'garcom'
+  | 'barman'
+  | 'cozinha'
+  | 'caixa'
+  | 'delivery'
+  | 'estoque'
+  | 'gerente';
+
+export interface StaffAccount {
+  id: string;
+  name: string;
+  username: string;
+  password_hash: string;
+  password_salt: string;
+  roles: StaffRoleKey[];
+  active: boolean;
+  created_at: string;
+  updated_at?: string;
+}
+
 export interface BarOperationalData {
   pix_key?: string;
   pix_merchant_name?: string;
   pix_city?: string;
   default_service_fee_pct?: number;
+  service_fee_allow_custom?: boolean;
+  service_fee_100_to_waiter?: boolean;
+  couvert_enabled?: boolean;
+  couvert_price?: number;
+  couvert_mode?: 'mandatory' | 'optional';
+  couvert_label?: string;
+  couvert_per_person?: boolean;
+  manager_pin_hash?: string;
+  manager_pin_salt?: string;
+  staff_login_enabled?: boolean;
+  staff_accounts?: StaffAccount[];
   printer_width?: '80mm' | '58mm';
   bluetooth_printer_enabled?: boolean;
   auto_deduct_stock?: boolean;
+  stock_cost_basis?: Record<string, string>;
   role_permissions?: Record<string, Partial<Record<PermissionKey, boolean>>>;
   cash_shifts?: CashRegisterShift[];
   stock_losses?: StockLossRecord[];
@@ -417,6 +456,14 @@ export interface PartnerAdBanner {
   created_at?: string;
 }
 
+export interface BarPlanOverride {
+  tier: BarPlanTier;
+  expires_at?: string | null;
+  trial_ends_at?: string | null;
+  note?: string | null;
+  updated_at: string;
+}
+
 export interface PlatformSaaSConfig {
   pro_price_monthly: number;
   pro_price_yearly: number;
@@ -433,6 +480,36 @@ export interface PlatformSaaSConfig {
   adsense_slot_menu_free: string;
   ads_rotation_mode: 'partner_first' | 'adsense_first' | 'rotate';
   free_user_emails: string[];
+  support_agent_emails?: string[];
+  bar_plan_overrides?: Record<string, BarPlanOverride>;
+}
+
+export interface SupportThread {
+  id: string;
+  bar_id?: string | null;
+  bar_name: string;
+  user_id: string;
+  user_email?: string | null;
+  subject: string;
+  status: 'open' | 'pending' | 'resolved';
+  assigned_agent_email?: string | null;
+  last_message?: string | null;
+  last_sender_role?: 'store' | 'support' | null;
+  last_message_at: string;
+  unread_for_support: number;
+  unread_for_store: number;
+  created_at: string;
+}
+
+export interface SupportMessage {
+  id: string;
+  thread_id: string;
+  sender_id: string;
+  sender_name: string;
+  sender_email?: string | null;
+  sender_role: 'store' | 'support';
+  body: string;
+  created_at: string;
 }
 
 export interface AdminBarOverview {
@@ -540,6 +617,7 @@ export interface BarItem {
   brand?: string | null;
   variant?: string | null;
   unit?: string | null;
+  cost_basis?: string | null;
   size_ml?: number | null;
   level?: string | null;
   qty?: number | null;
@@ -670,6 +748,7 @@ export interface JobApplication {
   job_id: string;
   applicant_id: string;
   message?: string | null;
+  created_at?: string;
   job_posts?: { id?: string; title?: string; role_needed?: string } | null;
   staff_profiles?: StaffProfile | null;
 }

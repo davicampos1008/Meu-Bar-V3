@@ -1,0 +1,2 @@
+# Cloudflare Pages / Render Static SPA routing (arquivos reais como /menu.html são servidos antes do fallback)
+/* /index.html 200

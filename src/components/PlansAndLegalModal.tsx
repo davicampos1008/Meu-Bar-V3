@@ -51,6 +51,7 @@ export const PlansView: React.FC<{
   planStatus: BarPlanStatus;
   config?: PlatformSaaSConfig;
   onOpenLegal: (tab: 'terms' | 'privacy') => void;
+  onOpenSupportChat?: (prefill?: string) => void;
   onBack: () => void;
   onToast: (msg: string) => void;
 }> = ({
@@ -59,6 +60,7 @@ export const PlansView: React.FC<{
   planStatus,
   config = DEFAULT_SAAS_CONFIG,
   onOpenLegal,
+  onOpenSupportChat,
   onBack,
   onToast,
 }) => {
@@ -221,32 +223,47 @@ export const PlansView: React.FC<{
         </div>
 
         <div className="mt-4 flex flex-wrap gap-2">
-          {safeExternalUrl(primaryUpgradeHref) ? (
-            <a
-              href={safeExternalUrl(primaryUpgradeHref)}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="b full text-center no-underline"
+          {(() => {
+            const safeUpgradeHref = safeExternalUrl(primaryUpgradeHref);
+            return safeUpgradeHref ? (
+              <a
+                href={safeUpgradeHref}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="b full text-center no-underline"
+              >
+                {planStatus.effectiveTier === 'pro'
+                  ? 'Renovar / Gerenciar Plano Pro'
+                  : 'Assinar Plano Pro agora'}
+              </a>
+            ) : (
+              <button type="button" className="b full" onClick={handleCopyRequest}>
+                Copiar pedido de ativação do Plano Pro
+              </button>
+            );
+          })()}
+          {onOpenSupportChat && (
+            <button
+              type="button"
+              className="b g full"
+              onClick={() => onOpenSupportChat(waMsg)}
             >
-              {planStatus.effectiveTier === 'pro'
-                ? 'Renovar / Gerenciar Plano Pro'
-                : 'Assinar Plano Pro agora'}
-            </a>
-          ) : (
-            <button type="button" className="b full" onClick={handleCopyRequest}>
-              Copiar pedido de ativação do Plano Pro
+              💬 Falar com o suporte aqui no app para ativar
             </button>
           )}
-          {safeExternalUrl(waLink) && checkoutUrl && (
-            <a
-              href={safeExternalUrl(waLink)}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="b g full text-center no-underline"
-            >
-              Falar com consultor no WhatsApp
-            </a>
-          )}
+          {(() => {
+            const safeWaHref = safeExternalUrl(waLink);
+            return safeWaHref && checkoutUrl ? (
+              <a
+                href={safeWaHref}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="b g full text-center no-underline"
+              >
+                Falar com consultor no WhatsApp
+              </a>
+            ) : null;
+          })()}
         </div>
       </div>
 
