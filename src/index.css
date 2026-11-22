@@ -50,11 +50,19 @@
   --pill-hover: rgba(17, 17, 20, .12);
 }
 
-* {
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
-  -webkit-tap-highlight-color: transparent;
+@layer base {
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    -webkit-tap-highlight-color: transparent;
+  }
+}
+
+html {
+  max-width: 100%;
+  overflow-x: clip;
+  -webkit-text-size-adjust: 100%;
 }
 
 body {
@@ -62,7 +70,9 @@ body {
   color: var(--tx);
   font-family: 'DM Sans', system-ui, -apple-system, sans-serif;
   min-height: 100dvh;
-  padding-bottom: 96px;
+  max-width: 100%;
+  overflow-x: clip;
+  padding-bottom: calc(96px + env(safe-area-inset-bottom, 0px));
   transition: background-color .18s ease, color .18s ease;
 }
 
@@ -127,14 +137,21 @@ h3 {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 12px;
-  padding: 12px 18px;
+  gap: 10px;
+  padding: max(10px, env(safe-area-inset-top, 10px)) 16px 10px;
+  min-height: 56px;
   border-bottom: 1px solid var(--bd);
   position: sticky;
   top: 0;
   background: var(--top-bg);
   backdrop-filter: blur(14px);
-  z-index: 10;
+  z-index: 22;
+}
+
+.top > .row {
+  flex-wrap: nowrap;
+  flex-shrink: 0;
+  gap: 6px;
 }
 
 .brand {
@@ -142,6 +159,7 @@ h3 {
   align-items: center;
   gap: 10px;
   min-width: 0;
+  flex: 1 1 auto;
 }
 
 .brand .logo {
@@ -538,19 +556,20 @@ label {
 /* Carrinho e overlays */
 .cart {
   position: fixed;
-  left: 16px;
-  right: 16px;
-  bottom: 16px;
+  left: 14px;
+  right: 14px;
+  bottom: max(14px, calc(12px + env(safe-area-inset-bottom, 0px)));
   background: linear-gradient(135deg, #f0b94b, var(--ac));
   color: #16120c;
   border: 0;
   border-radius: 16px;
-  padding: 15px 18px;
+  padding: 14px 18px;
   font-weight: 700;
-  font-size: .98rem;
+  font-size: .96rem;
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 10px;
   box-shadow: 0 14px 34px rgba(0, 0, 0, .55);
   cursor: pointer;
   z-index: 20;
@@ -562,7 +581,68 @@ label {
   background: var(--bg);
   z-index: 30;
   overflow: auto;
-  padding-bottom: 90px;
+  padding-bottom: calc(90px + env(safe-area-inset-bottom, 0px));
+  -webkit-overflow-scrolling: touch;
+}
+
+.ov:has(> .modal) {
+  background: rgba(7, 6, 9, 0.78);
+  backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.modal {
+  width: 100%;
+  max-width: 560px;
+  max-height: 90dvh;
+  overflow-y: auto;
+  background: var(--s1);
+  color: var(--tx);
+  border: 1px solid var(--bd-strong);
+  border-radius: 20px;
+  padding: 20px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, .6);
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Controle segmentado responsivo */
+.seg {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px;
+  background: var(--s2);
+  border: 1px solid var(--bd);
+  border-radius: 14px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.seg::-webkit-scrollbar {
+  display: none;
+}
+
+.seg > button {
+  flex: 1 0 auto;
+  border: 0;
+  background: transparent;
+  color: var(--mu);
+  font-weight: 600;
+  font-size: .84rem;
+  padding: 8px 12px;
+  border-radius: 10px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color .15s ease, color .15s ease;
+}
+
+.seg > button.on {
+  background: var(--ac);
+  color: var(--on-ac);
+  font-weight: 700;
 }
 
 .hero {
@@ -671,18 +751,22 @@ label {
 
 .toast {
   position: fixed;
-  top: 68px;
+  top: max(66px, calc(58px + env(safe-area-inset-top, 0px)));
   left: 50%;
   transform: translateX(-50%);
   background: var(--s2);
   color: var(--tx);
   border: 1px solid var(--bd-strong);
-  border-radius: 999px;
-  padding: 9px 16px;
-  font-size: .88rem;
-  z-index: 60;
+  border-radius: 14px;
+  padding: 10px 16px;
+  font-size: .86rem;
+  line-height: 1.35;
+  text-align: center;
+  max-width: calc(100vw - 24px);
+  z-index: 160;
   box-shadow: 0 10px 26px rgba(0, 0, 0, .55);
-  white-space: nowrap;
+  white-space: normal;
+  word-break: break-word;
 }
 
 .pill-tag {
@@ -707,6 +791,7 @@ label {
   border-top: 1px solid var(--bd);
   display: flex;
   align-items: stretch;
+  padding-bottom: env(safe-area-inset-bottom, 0px);
   z-index: 25;
 }
 
@@ -716,14 +801,22 @@ label {
   background: none;
   border: 0;
   color: var(--mu);
-  padding: 9px 4px 11px;
+  padding: 9px 4px 10px;
   display: flex;
   flex-direction: column;
   align-items: center;
+  justify-content: center;
   gap: 3px;
   font-size: .72rem;
   cursor: pointer;
   white-space: nowrap;
+  overflow: hidden;
+}
+
+.bnav-btn > span:last-child {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .bnav-btn .ico {
@@ -1196,4 +1289,261 @@ label {
   max-height: 40vh;
   overflow-y: auto;
 }
+
+/* Barra Voltar fixa e retrátil em fluxo (zero sobreposição em todas as telas) */
+.back-bar-shell {
+  position: sticky;
+  top: 58px;
+  z-index: 18;
+  width: 100%;
+  background: var(--top-bg);
+  backdrop-filter: blur(14px);
+  border-bottom: 1px solid var(--bd);
+  transition: transform 200ms cubic-bezier(0.16, 1, 0.3, 1), opacity 160ms ease;
+  will-change: transform, opacity;
+}
+
+.back-bar-shell.dark-surface {
+  background: rgba(15, 13, 16, 0.94);
+  border-bottom: 1px solid rgba(229, 169, 60, 0.24);
+}
+
+.back-bar-shell.is-hidden {
+  transform: translate3d(0, -115%, 0);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.back-bar-inner {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 7px 18px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+}
+
+.back-bar-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 7px 14px;
+  border-radius: 11px;
+  font-size: 0.85rem;
+  font-weight: 700;
+  line-height: 1.15;
+  cursor: pointer;
+  background: var(--s2);
+  color: var(--tx);
+  border: 1px solid var(--bd);
+  transition: transform 120ms ease, border-color 150ms ease, background-color 150ms ease;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.back-bar-btn:hover {
+  border-color: var(--bd-strong);
+}
+
+.back-bar-btn:active {
+  transform: scale(0.97);
+}
+
+.back-bar-shell.dark-surface .back-bar-btn {
+  background: rgba(28, 25, 22, 0.96);
+  color: #f5f0e8;
+  border-color: rgba(229, 169, 60, 0.48);
+}
+
+.back-bar-arrow {
+  font-size: 0.95rem;
+  line-height: 1;
+  color: var(--ac);
+  flex-shrink: 0;
+}
+
+.back-bar-shell.dark-surface .back-bar-arrow {
+  color: #e5a93c;
+}
+
+.back-bar-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ==========================================================================
+ * RESPONSIVIDADE COMPLETA (CELULARES, TABLETS E DESKTOPS)
+ * ========================================================================== */
+@media (max-width: 640px) {
+  .w {
+    padding: 14px 12px 36px;
+  }
+
+  .top {
+    padding: max(8px, env(safe-area-inset-top, 8px)) 12px 8px;
+    min-height: 52px;
+    gap: 6px;
+  }
+
+  .top > .row {
+    gap: 4px;
+  }
+
+  .brand {
+    gap: 8px;
+  }
+
+  .brand .logo {
+    width: 30px;
+    height: 30px;
+    border-radius: 9px;
+  }
+
+  .brand .bn {
+    font-size: .95rem;
+  }
+
+  .bar-switcher-pill {
+    padding: 5px 8px;
+    font-size: .75rem;
+  }
+
+  .lnk {
+    font-size: .8rem;
+    padding: 5px 4px;
+  }
+
+  .back-bar-shell {
+    top: 52px;
+  }
+
+  .back-bar-inner {
+    padding: 6px 12px;
+  }
+
+  .back-bar-btn {
+    min-height: 34px;
+    padding: 6px 12px;
+    font-size: .82rem;
+  }
+
+  h1 {
+    font-size: 1.38rem;
+    line-height: 1.2;
+  }
+
+  h2 {
+    font-size: 1.06rem;
+    margin: 16px 0 8px;
+  }
+
+  .panel {
+    padding: 13px;
+    border-radius: 14px;
+    margin-top: 10px;
+  }
+
+  .b {
+    padding: 10px 14px;
+    font-size: .88rem;
+    border-radius: 13px;
+    min-height: 40px;
+  }
+
+  .b.sm {
+    padding: 7px 11px;
+    font-size: .8rem;
+    min-height: 34px;
+    border-radius: 10px;
+  }
+
+  /* Evita zoom automático no iOS Safari ao tocar campos */
+  input, select, textarea {
+    font-size: 16px;
+    padding: 10px 12px;
+    border-radius: 11px;
+  }
+
+  .list > div {
+    padding: 12px;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .ord {
+    padding: 13px;
+  }
+
+  .menu-items {
+    gap: 10px;
+  }
+
+  .card .t {
+    padding: 9px 10px;
+    font-size: .86rem;
+    gap: 6px;
+  }
+
+  .tabs {
+    padding: 8px 12px;
+    gap: 6px;
+  }
+
+  .chip {
+    padding: 6px 11px;
+    font-size: .8rem;
+  }
+
+  .ov:has(> .modal) {
+    padding: 10px;
+    align-items: flex-end;
+  }
+
+  .modal {
+    padding: 15px;
+    border-radius: 18px;
+    max-height: 88dvh;
+  }
+
+  .bnav-btn {
+    padding: 7px 2px 9px;
+    font-size: .67rem;
+    gap: 2px;
+  }
+
+  .bnav-btn .ico {
+    font-size: 1.08rem;
+  }
+
+  .gate {
+    padding: 22px 14px 40px;
+  }
+
+  .gate h1 {
+    font-size: 1.55rem;
+  }
+}
+
+@media (max-width: 390px) {
+  .brand .bn {
+    font-size: .88rem;
+  }
+
+  .bar-switcher-pill {
+    padding: 4px 7px;
+    font-size: .72rem;
+  }
+
+  .bnav-btn {
+    font-size: .63rem;
+  }
+
+  .menu-items {
+    gap: 8px;
+  }
+}
+
+
 

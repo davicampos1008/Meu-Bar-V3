@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   getBarOpsData,
   getDeliveryConfig,
@@ -95,6 +95,18 @@ export const OwnerSummaryView: React.FC<OwnerSummaryViewProps> = ({
 }) => {
   const [period, setPeriod] = useState<SummaryPeriod>('today');
   const [refreshing, setRefreshing] = useState(false);
+  const [activeBlockModal, setActiveBlockModal] = useState<
+    null | 'revenue' | 'profit' | 'tickets' | 'channels' | 'topItems' | 'payments' | 'alerts'
+  >(null);
+
+  useEffect(() => {
+    if (!activeBlockModal) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setActiveBlockModal(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [activeBlockModal]);
 
   const ops = useMemo(() => getBarOpsData(bar), [bar]);
   const deliveryCfg = useMemo(() => getDeliveryConfig(bar), [bar]);
@@ -364,49 +376,63 @@ export const OwnerSummaryView: React.FC<OwnerSummaryViewProps> = ({
         </div>
       </div>
 
-      {/* Faixa principal de 4 KPIs (single-elevation, tabular-nums) */}
+      {/* Faixa principal de 4 Blocos Clicáveis (ao clicar abre modal completo e fecha o anterior) */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        <div className="panel !mt-0 flex flex-col justify-between">
-          <div className="text-xs font-medium text-[var(--mu)]">Faturamento fechado</div>
-          <div className="text-2xl font-bold tabular-nums mt-1.5 text-[var(--ok)]">
+        <button
+          type="button"
+          onClick={() => setActiveBlockModal('revenue')}
+          className="panel !mt-0 !p-4 text-left flex flex-col justify-between cursor-pointer hover:border-[var(--ok)] transition-colors"
+        >
+          <div className="text-sm font-semibold text-[var(--mu)]">💰 Faturamento</div>
+          <div className="text-2xl font-extrabold tabular-nums mt-1.5 text-[var(--ok)]">
             {money(metrics.realizedRevenue)}
           </div>
           <div className="text-xs text-[var(--mu)] mt-1.5 tabular-nums">
-            Em aberto agora: <strong className="text-[var(--tx)]">{money(metrics.openRevenue)}</strong>
+            Em aberto: <strong className="text-[var(--tx)]">{money(metrics.openRevenue)}</strong> · Ver →
           </div>
-        </div>
+        </button>
 
-        <div className="panel !mt-0 flex flex-col justify-between">
-          <div className="text-xs font-medium text-[var(--mu)]">Lucro líquido estimado</div>
-          <div className="text-2xl font-bold tabular-nums mt-1.5 text-[var(--tx)]">
+        <button
+          type="button"
+          onClick={() => setActiveBlockModal('profit')}
+          className="panel !mt-0 !p-4 text-left flex flex-col justify-between cursor-pointer hover:border-[var(--ac)] transition-colors"
+        >
+          <div className="text-sm font-semibold text-[var(--mu)]">📈 Lucro estimado</div>
+          <div className="text-2xl font-extrabold tabular-nums mt-1.5 text-[var(--tx)]">
             {money(metrics.estimatedProfit)}
           </div>
           <div className="text-xs text-[var(--mu)] mt-1.5 tabular-nums">
-            Margem: <strong className="text-[var(--ok)]">{metrics.marginPct}%</strong> · CMV{' '}
-            {money(metrics.realizedCmv)}
+            Margem <strong className="text-[var(--ok)]">{metrics.marginPct}%</strong> · Detalhes →
           </div>
-        </div>
+        </button>
 
-        <div className="panel !mt-0 flex flex-col justify-between">
-          <div className="text-xs font-medium text-[var(--mu)]">Pedidos & ticket médio</div>
-          <div className="text-2xl font-bold tabular-nums mt-1.5 text-[var(--tx)]">
+        <button
+          type="button"
+          onClick={() => setActiveBlockModal('tickets')}
+          className="panel !mt-0 !p-4 text-left flex flex-col justify-between cursor-pointer hover:border-[var(--ac)] transition-colors"
+        >
+          <div className="text-sm font-semibold text-[var(--mu)]">🧾 Pedidos & ticket</div>
+          <div className="text-2xl font-extrabold tabular-nums mt-1.5 text-[var(--tx)]">
             {metrics.totalTickets}
           </div>
           <div className="text-xs text-[var(--mu)] mt-1.5 tabular-nums">
-            Média: <strong className="text-[var(--tx)]">{money(metrics.avgTicket)}</strong> ·{' '}
-            {metrics.activeQueueCount} na fila
+            Média <strong className="text-[var(--tx)]">{money(metrics.avgTicket)}</strong> · Detalhes →
           </div>
-        </div>
+        </button>
 
-        <div className="panel !mt-0 flex flex-col justify-between">
-          <div className="text-xs font-medium text-[var(--mu)]">Salão vs Delivery</div>
-          <div className="text-2xl font-bold tabular-nums mt-1.5 text-[var(--ac)]">
+        <button
+          type="button"
+          onClick={() => setActiveBlockModal('channels')}
+          className="panel !mt-0 !p-4 text-left flex flex-col justify-between cursor-pointer hover:border-[var(--ac)] transition-colors"
+        >
+          <div className="text-sm font-semibold text-[var(--mu)]">🏪 Salão vs Delivery</div>
+          <div className="text-2xl font-extrabold tabular-nums mt-1.5 text-[var(--ac)]">
             {money(metrics.totalProjected)}
           </div>
           <div className="text-xs text-[var(--mu)] mt-1.5 tabular-nums">
-            Salão {salonPct}% · Delivery {deliveryPct}%
+            Salão {salonPct}% · Delivery {deliveryPct}% →
           </div>
-        </div>
+        </button>
       </div>
 
       {/* Operação ao vivo agora (cliques diretos para agir) */}
@@ -416,11 +442,11 @@ export const OwnerSummaryView: React.FC<OwnerSummaryViewProps> = ({
           onClick={() => onGoQueue('bar')}
           className="panel !mt-0 text-left cursor-pointer hover:border-[var(--ac)] transition-colors"
         >
-          <div className="text-xs text-[var(--mu)]">🍸 Fila do Barman</div>
-          <div className="text-xl font-bold tabular-nums mt-1 text-[var(--tx)]">
+          <div className="text-sm font-semibold text-[var(--mu)]">🍸 Fila do Barman</div>
+          <div className="text-2xl font-bold tabular-nums mt-1 text-[var(--tx)]">
             {metrics.pendingBar}
           </div>
-          <div className="text-[11px] text-[var(--mu)] mt-0.5">em preparo agora</div>
+          <div className="text-xs text-[var(--mu)] mt-0.5">em preparo agora</div>
         </button>
 
         <button
@@ -428,11 +454,11 @@ export const OwnerSummaryView: React.FC<OwnerSummaryViewProps> = ({
           onClick={() => onGoQueue('cozinha')}
           className="panel !mt-0 text-left cursor-pointer hover:border-[var(--ac)] transition-colors"
         >
-          <div className="text-xs text-[var(--mu)]">🍳 Cozinha (KDS)</div>
-          <div className="text-xl font-bold tabular-nums mt-1 text-[var(--tx)]">
+          <div className="text-sm font-semibold text-[var(--mu)]">🍳 Cozinha (KDS)</div>
+          <div className="text-2xl font-bold tabular-nums mt-1 text-[var(--tx)]">
             {metrics.pendingKitchen}
           </div>
-          <div className="text-[11px] text-[var(--mu)] mt-0.5">petiscos pendentes</div>
+          <div className="text-xs text-[var(--mu)] mt-0.5">petiscos pendentes</div>
         </button>
 
         <button
@@ -440,11 +466,11 @@ export const OwnerSummaryView: React.FC<OwnerSummaryViewProps> = ({
           onClick={() => onGoQueue('garcom')}
           className="panel !mt-0 text-left cursor-pointer hover:border-[var(--ac)] transition-colors"
         >
-          <div className="text-xs text-[var(--mu)]">🪑 Mesas & Garçom</div>
-          <div className="text-xl font-bold tabular-nums mt-1 text-[var(--tx)]">
+          <div className="text-sm font-semibold text-[var(--mu)]">🪑 Mesas & Garçom</div>
+          <div className="text-2xl font-bold tabular-nums mt-1 text-[var(--tx)]">
             {tableTabs.length}
           </div>
-          <div className="text-[11px] text-[var(--mu)] mt-0.5">
+          <div className="text-xs text-[var(--mu)] mt-0.5">
             {metrics.readyToServe} pronto(s) · {tableCalls.length} chamado(s)
           </div>
         </button>
@@ -454,11 +480,11 @@ export const OwnerSummaryView: React.FC<OwnerSummaryViewProps> = ({
           onClick={onGoDelivery}
           className="panel !mt-0 text-left cursor-pointer hover:border-[var(--ac)] transition-colors"
         >
-          <div className="text-xs text-[var(--mu)]">🛵 Delivery 0%</div>
-          <div className="text-xl font-bold tabular-nums mt-1 text-[var(--tx)]">
+          <div className="text-sm font-semibold text-[var(--mu)]">🛵 Delivery 0%</div>
+          <div className="text-2xl font-bold tabular-nums mt-1 text-[var(--tx)]">
             {metrics.activeDeliveryCodes}
           </div>
-          <div className="text-[11px] text-[var(--mu)] mt-0.5">
+          <div className="text-xs text-[var(--mu)] mt-0.5">
             {deliveryCfg.enabled ? 'Recebendo pedidos' : 'Delivery pausado'}
           </div>
         </button>
@@ -632,6 +658,198 @@ export const OwnerSummaryView: React.FC<OwnerSummaryViewProps> = ({
           </section>
         </div>
       </div>
+
+      {/* MODAL EXCLUSIVO DE DETALHES DO BLOCO (clicar em outro fecha o antigo; clicar fora fecha todos) */}
+      {activeBlockModal && (
+        <div className="ov" onClick={() => setActiveBlockModal(null)}>
+          <div
+            className="modal !max-w-lg !w-full space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-2 pb-2 border-b border-[var(--bd)]">
+              <div>
+                <span className="text-xs font-bold uppercase tracking-wider text-[var(--ac)]">
+                  📊 Detalhamento do Bloco
+                </span>
+                <h3 className="!m-0 text-xl font-extrabold mt-0.5">
+                  {activeBlockModal === 'revenue'
+                    ? '💰 Faturamento & Pagamentos'
+                    : activeBlockModal === 'profit'
+                      ? '📈 Lucro Líquido & CMV'
+                      : activeBlockModal === 'tickets'
+                        ? '🧾 Pedidos & Ticket Médio'
+                        : '🏪 Salão vs Delivery'}
+                </h3>
+              </div>
+              <button
+                type="button"
+                className="b g sm"
+                onClick={() => setActiveBlockModal(null)}
+              >
+                ✕ Fechar
+              </button>
+            </div>
+
+            {/* Navegação rápida entre os blocos fechando automaticamente o anterior */}
+            <div className="flex flex-wrap gap-1.5">
+              {(
+                [
+                  ['revenue', '💰 Faturamento'],
+                  ['profit', '📈 Lucro'],
+                  ['tickets', '🧾 Pedidos'],
+                  ['channels', '🏪 Canais'],
+                ] as const
+              ).map(([id, lbl]) => (
+                <button
+                  key={id}
+                  type="button"
+                  className={`chip ${activeBlockModal === id ? 'on' : ''}`}
+                  onClick={() => setActiveBlockModal(id)}
+                >
+                  {lbl}
+                </button>
+              ))}
+            </div>
+
+            {activeBlockModal === 'revenue' && (
+              <div className="space-y-3">
+                <div className="grid grid-cols-2 gap-2.5">
+                  <div className="rounded-xl p-3.5 bg-[var(--s2)] border border-[var(--bd)]">
+                    <div className="text-xs text-[var(--mut)]">Já recebido</div>
+                    <div className="text-xl font-extrabold text-[var(--ok)] mt-1 tabular-nums">
+                      {money(metrics.realizedRevenue)}
+                    </div>
+                  </div>
+                  <div className="rounded-xl p-3.5 bg-[var(--s2)] border border-[var(--bd)]">
+                    <div className="text-xs text-[var(--mut)]">Em aberto nas mesas</div>
+                    <div className="text-xl font-extrabold text-[var(--ac)] mt-1 tabular-nums">
+                      {money(metrics.openRevenue)}
+                    </div>
+                  </div>
+                </div>
+                <div className="space-y-1.5">
+                  <div className="text-sm font-bold">Por forma de pagamento</div>
+                  {(['pix', 'credito', 'debito', 'dinheiro'] as const).map((m) => (
+                    <div
+                      key={m}
+                      className="flex justify-between text-sm rounded-xl px-3 py-2 bg-[var(--s2)] border border-[var(--bd)]"
+                    >
+                      <span>{PAY_LABELS[m]}</span>
+                      <b className="tabular-nums">{money(metrics.paymentTotals[m] || 0)}</b>
+                    </div>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  className="b full"
+                  onClick={() => {
+                    setActiveBlockModal(null);
+                    onGoCashier();
+                  }}
+                >
+                  💵 Ir para o Caixa
+                </button>
+              </div>
+            )}
+
+            {activeBlockModal === 'profit' && (
+              <div className="space-y-3">
+                <div className="grid grid-cols-2 gap-2.5">
+                  <div className="rounded-xl p-3.5 bg-[var(--s2)] border border-[var(--bd)]">
+                    <div className="text-xs text-[var(--mut)]">Lucro estimado</div>
+                    <div className="text-xl font-extrabold text-[var(--ok)] mt-1 tabular-nums">
+                      {money(metrics.estimatedProfit)}
+                    </div>
+                  </div>
+                  <div className="rounded-xl p-3.5 bg-[var(--s2)] border border-[var(--bd)]">
+                    <div className="text-xs text-[var(--mut)]">Custo dos insumos (CMV)</div>
+                    <div className="text-xl font-extrabold mt-1 tabular-nums">
+                      {money(metrics.realizedCmv)}
+                    </div>
+                  </div>
+                </div>
+                <div className="rounded-xl p-3.5 bg-[var(--s2)] border border-[var(--bd)] text-sm">
+                  Margem média atual: <b className="text-[var(--ok)]">{metrics.marginPct}%</b>.
+                  Mantenha os custos no Estoque atualizados para máxima precisão do lucro.
+                </div>
+                <button
+                  type="button"
+                  className="b full"
+                  onClick={() => {
+                    setActiveBlockModal(null);
+                    onGoReports();
+                  }}
+                >
+                  📊 Abrir Relatório Financeiro Completo
+                </button>
+              </div>
+            )}
+
+            {activeBlockModal === 'tickets' && (
+              <div className="space-y-3">
+                <div className="grid grid-cols-2 gap-2.5">
+                  <div className="rounded-xl p-3.5 bg-[var(--s2)] border border-[var(--bd)]">
+                    <div className="text-xs text-[var(--mut)]">Total de pedidos</div>
+                    <div className="text-xl font-extrabold mt-1 tabular-nums">
+                      {metrics.totalTickets}
+                    </div>
+                  </div>
+                  <div className="rounded-xl p-3.5 bg-[var(--s2)] border border-[var(--bd)]">
+                    <div className="text-xs text-[var(--mut)]">Ticket médio</div>
+                    <div className="text-xl font-extrabold text-[var(--ac)] mt-1 tabular-nums">
+                      {money(metrics.avgTicket)}
+                    </div>
+                  </div>
+                </div>
+                <div className="rounded-xl p-3.5 bg-[var(--s2)] border border-[var(--bd)] text-sm space-y-1">
+                  <div>🍸 Fila Barman: <b>{metrics.pendingBar}</b></div>
+                  <div>🍳 Fila Cozinha: <b>{metrics.pendingKitchen}</b></div>
+                  <div>🔔 Prontos p/ entregar: <b>{metrics.readyToServe}</b></div>
+                </div>
+                <button
+                  type="button"
+                  className="b full"
+                  onClick={() => {
+                    setActiveBlockModal(null);
+                    onGoQueue('all');
+                  }}
+                >
+                  🔔 Abrir Fila de Pedidos
+                </button>
+              </div>
+            )}
+
+            {activeBlockModal === 'channels' && (
+              <div className="space-y-3">
+                <div className="grid grid-cols-2 gap-2.5">
+                  <div className="rounded-xl p-3.5 bg-[var(--s2)] border border-[var(--bd)]">
+                    <div className="text-xs text-[var(--mut)]">Salão / Mesas ({salonPct}%)</div>
+                    <div className="text-xl font-extrabold mt-1 tabular-nums">
+                      {money(metrics.salonRevenue)}
+                    </div>
+                  </div>
+                  <div className="rounded-xl p-3.5 bg-[var(--s2)] border border-[var(--bd)]">
+                    <div className="text-xs text-[var(--mut)]">Delivery ({deliveryPct}%)</div>
+                    <div className="text-xl font-extrabold text-[var(--ac)] mt-1 tabular-nums">
+                      {money(metrics.deliveryRevenue)}
+                    </div>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="b full"
+                  onClick={() => {
+                    setActiveBlockModal(null);
+                    onGoDelivery();
+                  }}
+                >
+                  🛵 Gerenciar Delivery
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 };

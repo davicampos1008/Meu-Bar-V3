@@ -679,12 +679,20 @@ export default function App() {
 
       if (barJobIds.length) {
         // Evita join PostgREST inválido entre job_applications e staff_profiles (sem FK direta)
-        const ra = await sb
-          .from('job_applications')
-          .select('*')
-          .in('job_id', barJobIds)
-          .order('created_at', { ascending: false });
-        const rawApps = (ra.data as JobApplication[]) || [];
+        const [ra, bmRes] = await Promise.all([
+          sb
+            .from('job_applications')
+            .select('*')
+            .in('job_id', barJobIds)
+            .order('created_at', { ascending: false }),
+          sb.from('bar_members').select('user_id').eq('bar_id', currentBarId),
+        ]);
+        const currentTeamIds = new Set<string>(
+          ((bmRes.data as { user_id: string }[]) || []).map((m) => m.user_id).filter(Boolean)
+        );
+        const rawApps = ((ra.data as JobApplication[]) || []).filter(
+          (a) => !currentTeamIds.has(a.applicant_id)
+        );
 
         const applicantIds = Array.from(
           new Set(rawApps.map((a) => a.applicant_id).filter(Boolean))
@@ -1508,7 +1516,7 @@ export default function App() {
         <FloatingBackButton
           visible={true}
           darkSurface={true}
-          topOffset={74}
+          topOffset={0}
           label={user ? 'Voltar ao painel' : 'Voltar ao login'}
           onBack={closeSalesSiteCleanly}
         />
@@ -1654,11 +1662,6 @@ export default function App() {
       <>
         <OfflineIndicator />
         {toastMsg && <div className="toast">{toastMsg}</div>}
-        <FloatingBackButton
-          visible={true}
-          label="Voltar ao Modo Normal"
-          onBack={() => setWorkspaceMode('normal')}
-        />
         <div>
           <div className="top">
             <div className="flex items-center gap-2 min-w-0">
@@ -1702,7 +1705,13 @@ export default function App() {
             </div>
           </div>
 
-          <div className="w pt-12">
+          <FloatingBackButton
+            visible={true}
+            label="Voltar ao Modo Normal"
+            onBack={() => setWorkspaceMode('normal')}
+          />
+
+          <div className="w">
             <SuperAdminView
               userId={user.id}
               userEmail={user.email}
@@ -1790,11 +1799,6 @@ export default function App() {
       <>
         <OfflineIndicator />
         {toastMsg && <div className="toast">{toastMsg}</div>}
-        <FloatingBackButton
-          visible={true}
-          label="Voltar ao Modo Normal"
-          onBack={() => setWorkspaceMode('normal')}
-        />
         <div>
           <div className="top">
             <div className="flex items-center gap-2 min-w-0">
@@ -1838,7 +1842,13 @@ export default function App() {
             </div>
           </div>
 
-          <div className="w pt-12">
+          <FloatingBackButton
+            visible={true}
+            label="Voltar ao Modo Normal"
+            onBack={() => setWorkspaceMode('normal')}
+          />
+
+          <div className="w">
             <SupportDeskView
               userId={user.id}
               userEmail={user.email}
@@ -1901,14 +1911,16 @@ export default function App() {
     <>
       <OfflineIndicator />
       {toastMsg && <div className="toast">{toastMsg}</div>}
-      <FloatingBackButton
-        visible={floatingBackInfo.show}
-        label={floatingBackInfo.label}
-        onBack={() => triggerUnifiedBack(false, false)}
-      />
 
       {screenMode === 'onboarding' ? (
-        <OnboardingScreen
+        <>
+          <FloatingBackButton
+            visible={floatingBackInfo.show}
+            topOffset={0}
+            label={floatingBackInfo.label}
+            onBack={() => triggerUnifiedBack(false, false)}
+          />
+          <OnboardingScreen
           userId={user.id}
           profile={profile}
           jobs={jobs}
@@ -1942,7 +1954,8 @@ export default function App() {
               : undefined
           }
           onToast={showToast}
-        />
+          />
+        </>
       ) : screenMode === 'seeker' || !activeBar ? (
         <div>
           <div className="top">
@@ -2014,7 +2027,13 @@ export default function App() {
             </div>
           </div>
 
-          <div className={`w ${floatingBackInfo.show ? 'pt-12' : ''}`}>
+          <FloatingBackButton
+            visible={floatingBackInfo.show}
+            label={floatingBackInfo.label}
+            onBack={() => triggerUnifiedBack(false, false)}
+          />
+
+          <div className="w">
             {seekerTab === 'careers' && (
               <CareersView
                 mode="personal"
@@ -2680,7 +2699,13 @@ export default function App() {
             </div>
           </div>
 
-          <div className={`w ${floatingBackInfo.show ? 'pt-12' : ''}`}>
+          <FloatingBackButton
+            visible={floatingBackInfo.show}
+            label={floatingBackInfo.label}
+            onBack={() => triggerUnifiedBack(false, false)}
+          />
+
+          <div className="w">
             {tab === 'dashboard' && (
               <>
                 <OwnerSummaryView

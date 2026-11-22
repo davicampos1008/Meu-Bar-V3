@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { JOB_ROLES, ROLE_LABELS, SKILL_OPTIONS } from '../lib/catalog';
 import { safeExternalUrl } from '../lib/security';
 import { sb, uploadPdfFile } from '../lib/supabase';
@@ -715,8 +715,9 @@ export const TeamSection: React.FC<{
   bar: Bar;
   members: BarMember[];
   onMembersUpdated: (members: BarMember[]) => void;
+  onRefreshJobs?: () => Promise<void>;
   onToast: (msg: string) => void;
-}> = ({ bar, members, onMembersUpdated, onToast }) => {
+}> = ({ bar, members, onMembersUpdated, onRefreshJobs, onToast }) => {
   const [svcPw, setSvcPw] = useState('');
   const [passwords, setPasswords] = useState<BarServicePassword[]>([]);
   const [pwErr, setPwErr] = useState('');
@@ -844,10 +845,21 @@ export const TeamSection: React.FC<{
       onToast(up.error.message);
       return;
     }
+    // Remove eventuais currículos enviados por este funcionário para vagas da loja
+    const barJobsRes = await sb.from('job_posts').select('id').eq('bar_id', bar.id);
+    const barJobIds = ((barJobsRes.data as { id: string }[]) || []).map((j) => j.id);
+    if (barJobIds.length > 0) {
+      await sb
+        .from('job_applications')
+        .delete()
+        .eq('applicant_id', req.requester_id)
+        .in('job_id', barJobIds);
+    }
     const mem = await sb.from('bar_members').select('*').eq('bar_id', bar.id);
     onMembersUpdated((mem.data as BarMember[]) || []);
     onToast('Aceito na equipe');
     await loadRequests();
+    if (onRefreshJobs) await onRefreshJobs();
   };
 
   return (
@@ -911,67 +923,82 @@ export const TeamSection: React.FC<{
         <h2>Membros</h2>
         <div className="list">
           {members.length > 0 ? (
-            members.map((m) => (
-              <div key={m.id} className="!items-start">
-                <div className="flex-1">
-                  <b>{m.name || 'Membro'}</b>
-                  <br />
-                  <span className="tag">{m.role}</span>
-                </div>
-                {m.role === 'owner' || m.role === 'dono' ? (
-                  <span className="chip st1">Dono</span>
-                ) : (
-                  <div className="row">
-                    <select
-                      value={m.role}
-                      className="!w-auto"
-                      onChange={async (e) => {
-                        const newRole = e.target.value;
-                        const r = await sb
-                          .from('bar_members')
-                          .update({ role: newRole })
-                          .eq('id', m.id);
-                        if (r.error) {
-                          onToast(r.error.message);
-                          return;
-                        }
-                        onMembersUpdated(
-                          members.map((x) => (x.id === m.id ? { ...x, role: newRole } : x))
-                        );
-                        onToast('Função atualizada');
-                      }}
-                    >
-                      {roles.map((r) => (
-                        <option key={r.id} value={r.id}>
-                          {r.label}
-                        </option>
-                      ))}
-                    </select>
-                    {confirmRemoveMemberId === m.id ? (
-                      <button
-                        type="button"
-                        className="b sm"
-                        onClick={async () => {
-                          await sb.from('bar_members').delete().eq('id', m.id);
-                          onMembersUpdated(members.filter((x) => x.id !== m.id));
-                          setConfirmRemoveMemberId(null);
+            members.map((m) => {
+              const memberKey = m.user_id ? `${m.bar_id || bar.id}:${m.user_id}` : m.id || m.name || 'm';
+              const isSameMember = (x: BarMember) =>
+                m.user_id && x.user_id
+                  ? x.user_id === m.user_id && (x.bar_id || bar.id) === (m.bar_id || bar.id)
+                  : Boolean(m.id && x.id === m.id);
+              return (
+                <div key={memberKey} className="!items-start">
+                  <div className="flex-1">
+                    <b>{m.name || 'Membro'}</b>
+                    <br />
+                    <span className="tag">{m.role}</span>
+                  </div>
+                  {m.role === 'owner' || m.role === 'dono' ? (
+                    <span className="chip st1">Dono</span>
+                  ) : (
+                    <div className="row">
+                      <select
+                        value={m.role}
+                        className="!w-auto"
+                        onChange={async (e) => {
+                          const newRole = e.target.value;
+                          const q = sb.from('bar_members').update({ role: newRole });
+                          const r = m.user_id
+                            ? await q.eq('bar_id', m.bar_id || bar.id).eq('user_id', m.user_id)
+                            : await q.eq('id', m.id || '');
+                          if (r.error) {
+                            onToast(r.error.message);
+                            return;
+                          }
+                          onMembersUpdated(
+                            members.map((x) => (isSameMember(x) ? { ...x, role: newRole } : x))
+                          );
+                          onToast('Função atualizada com sucesso!');
                         }}
                       >
-                        Confirmar
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        className="b g sm"
-                        onClick={() => setConfirmRemoveMemberId(m.id)}
-                      >
-                        Remover
-                      </button>
-                    )}
-                  </div>
-                )}
-              </div>
-            ))
+                        {roles.map((r) => (
+                          <option key={r.id} value={r.id}>
+                            {r.label}
+                          </option>
+                        ))}
+                      </select>
+                      {confirmRemoveMemberId === memberKey ? (
+                        <button
+                          type="button"
+                          className="b sm"
+                          onClick={async () => {
+                            const dq = sb.from('bar_members').delete();
+                            const del = m.user_id
+                              ? await dq.eq('bar_id', m.bar_id || bar.id).eq('user_id', m.user_id)
+                              : await dq.eq('id', m.id || '');
+                            if (del.error) {
+                              onToast(del.error.message);
+                              return;
+                            }
+                            onMembersUpdated(members.filter((x) => !isSameMember(x)));
+                            setConfirmRemoveMemberId(null);
+                            onToast('Membro removido da equipe.');
+                          }}
+                        >
+                          Confirmar
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          className="b g sm"
+                          onClick={() => setConfirmRemoveMemberId(memberKey)}
+                        >
+                          Remover
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })
           ) : (
             <p className="mu">Só você na equipe por enquanto.</p>
           )}
@@ -1161,15 +1188,31 @@ export const CreateJobSection: React.FC<{
 
 export const ReceivedAppsSection: React.FC<{
   bar?: Bar | null;
+  members?: BarMember[];
   receivedApps: JobApplication[];
   onRefresh?: () => Promise<void>;
   onMembersUpdated?: (members: BarMember[]) => void;
   onToast?: (msg: string) => void;
-}> = ({ bar, receivedApps, onRefresh, onMembersUpdated, onToast }) => {
+}> = ({ bar, members = [], receivedApps, onRefresh, onMembersUpdated, onToast }) => {
   const [addingId, setAddingId] = useState<string | null>(null);
+  const [hiredUserIds, setHiredUserIds] = useState<string[]>([]);
+
+  const existingTeamIds = useMemo(() => {
+    const ids = new Set<string>(hiredUserIds);
+    if (bar?.owner) ids.add(bar.owner);
+    members.forEach((m) => {
+      if (m.user_id) ids.add(m.user_id);
+    });
+    return ids;
+  }, [bar?.owner, members, hiredUserIds]);
+
+  const visibleApps = useMemo(
+    () => receivedApps.filter((a) => !existingTeamIds.has(a.applicant_id)),
+    [receivedApps, existingTeamIds]
+  );
 
   const byJob: Record<string, { id: string; title: string; role?: string; items: JobApplication[] }> = {};
-  receivedApps.forEach((a) => {
+  visibleApps.forEach((a) => {
     const jid = a.job_id || 'geral';
     const jTitle = a.job_posts?.title || 'Vaga publicada';
     if (!byJob[jid]) {
@@ -1202,20 +1245,31 @@ export const ReceivedAppsSection: React.FC<{
         name: candName,
       });
     }
-    setAddingId(null);
     if (up.error) {
+      setAddingId(null);
       onToast?.('Erro ao adicionar à equipe: ' + up.error.message);
       return;
     }
+
+    // Remove o candidato dos currículos recebidos desta loja (todas as candidaturas dele nas vagas da loja)
+    const candidateAppIds = receivedApps
+      .filter((x) => x.applicant_id === app.applicant_id)
+      .map((x) => x.id);
+    const idsToDelete = candidateAppIds.length > 0 ? candidateAppIds : [app.id];
+    await sb.from('job_applications').delete().in('id', idsToDelete);
+
+    setHiredUserIds((prev) => (prev.includes(app.applicant_id) ? prev : [...prev, app.applicant_id]));
     const mem = await sb.from('bar_members').select('*').eq('bar_id', bar.id);
     if (!mem.error && mem.data) onMembersUpdated?.(mem.data as BarMember[]);
-    onToast?.(`✓ ${candName} adicionado à equipe como ${ROLE_LABELS[roleToAssign] || roleToAssign}!`);
+    setAddingId(null);
+    if (onRefresh) await onRefresh();
+    onToast?.(`✓ ${candName} aceito na equipe como ${ROLE_LABELS[roleToAssign] || roleToAssign} e removido dos currículos!`);
   };
 
   return (
     <div className="panel">
       <div className="row sp flex-wrap gap-2">
-        <h2 className="!m-0">Currículos recebidos ({receivedApps.length})</h2>
+        <h2 className="!m-0">Currículos recebidos ({visibleApps.length})</h2>
         {onRefresh && (
           <button type="button" className="b g sm" onClick={() => void onRefresh()}>
             🔄 Atualizar
@@ -1223,7 +1277,7 @@ export const ReceivedAppsSection: React.FC<{
         )}
       </div>
       <p className="mu text-xs mt-1">
-        Todos os candidatos que enviaram currículo para as vagas da sua loja aparecem automaticamente aqui.
+        Todos os candidatos que enviaram currículo para as vagas da sua loja aparecem aqui. Ao aceitar na equipe, o currículo sai automaticamente desta lista.
       </p>
 
       {groups.length > 0 ? (
@@ -1449,6 +1503,15 @@ export const CareersView: React.FC<{
   const storeMode = mode === 'store' && isManager && !!activeBar;
   const [subTab, setSubTab] = useState(storeMode ? 'createJob' : 'jobs');
 
+  const pendingReceivedApps = useMemo(() => {
+    const teamIds = new Set<string>();
+    if (activeBar?.owner) teamIds.add(activeBar.owner);
+    members.forEach((m) => {
+      if (m.user_id) teamIds.add(m.user_id);
+    });
+    return receivedApps.filter((a) => !teamIds.has(a.applicant_id));
+  }, [receivedApps, members, activeBar?.owner]);
+
   useEffect(() => {
     setSubTab(storeMode ? 'createJob' : 'jobs');
   }, [storeMode]);
@@ -1475,7 +1538,7 @@ export const CareersView: React.FC<{
               className={`chip ${subTab === 'apps' ? 'on' : ''}`}
               onClick={() => setSubTab('apps')}
             >
-              Currículos ({receivedApps.length})
+              Currículos ({pendingReceivedApps.length})
             </span>
             <span
               className={`chip ${subTab === 'team' ? 'on' : ''}`}
@@ -1528,7 +1591,8 @@ export const CareersView: React.FC<{
         ) : subTab === 'apps' ? (
           <ReceivedAppsSection
             bar={activeBar}
-            receivedApps={receivedApps}
+            members={members}
+            receivedApps={pendingReceivedApps}
             onRefresh={onRefreshJobs}
             onMembersUpdated={onMembersUpdated}
             onToast={onToast}
@@ -1538,6 +1602,7 @@ export const CareersView: React.FC<{
             bar={activeBar}
             members={members}
             onMembersUpdated={onMembersUpdated}
+            onRefreshJobs={onRefreshJobs}
             onToast={onToast}
           />
         )

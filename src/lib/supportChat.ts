@@ -290,9 +290,14 @@ export async function updateSupportThreadMeta(
 
 async function broadcastSupportEvent(event: string, payload: unknown): Promise<void> {
   try {
-    const ch = sb.channel('meubar-support-live');
+    const ch = sb.channel(
+      `meubar-support-bcast-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+    );
     await new Promise<void>((resolve) => {
-      const t = setTimeout(resolve, 700);
+      const t = setTimeout(() => {
+        void sb.removeChannel(ch);
+        resolve();
+      }, 700);
       ch.subscribe((status) => {
         if (status === 'SUBSCRIBED') {
           clearTimeout(t);
@@ -310,51 +315,56 @@ async function broadcastSupportEvent(event: string, payload: unknown): Promise<v
   }
 }
 
+let supportSubSeq = 0;
+
 export function subscribeSupportRealtime(handlers: {
   threadId?: string | null;
   onMessage?: (msg: SupportMessage) => void;
   onThreadChange?: () => void;
 }): () => void {
+  supportSubSeq += 1;
+  const suffix = `${Date.now()}-${supportSubSeq}-${Math.random().toString(36).slice(2, 6)}`;
   const channelName = handlers.threadId
-    ? `support-live-${handlers.threadId}`
-    : 'support-live-desk';
+    ? `support-live-${handlers.threadId}-${suffix}`
+    : `support-live-desk-${suffix}`;
 
-  const ch: RealtimeChannel = sb
-    .channel(channelName)
-    .on(
-      'postgres_changes',
-      {
-        event: 'INSERT',
-        schema: 'public',
-        table: 'support_messages',
-        ...(handlers.threadId ? { filter: `thread_id=eq.${handlers.threadId}` } : {}),
-      },
-      (payload) => {
-        const msg = payload.new as SupportMessage | undefined;
-        if (msg && msg.id) handlers.onMessage?.(msg);
-        handlers.onThreadChange?.();
-      }
-    )
-    .on(
-      'postgres_changes',
-      { event: '*', schema: 'public', table: 'support_threads' },
-      () => {
-        handlers.onThreadChange?.();
-      }
-    )
-    .on('broadcast', { event: 'message' }, (ev) => {
-      const msg = ev?.payload as SupportMessage | undefined;
-      if (!msg || !msg.id) return;
-      if (handlers.threadId && msg.thread_id !== handlers.threadId) return;
-      handlers.onMessage?.(msg);
-      handlers.onThreadChange?.();
-    })
-    .on('broadcast', { event: 'thread_update' }, () => {
-      handlers.onThreadChange?.();
-    })
-    .subscribe();
+  let ch: RealtimeChannel | null = null;
+  try {
+    ch = sb
+      .channel(channelName)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'support_messages',
+          ...(handlers.threadId ? { filter: `thread_id=eq.${handlers.threadId}` } : {}),
+        },
+        (payload) => {
+          const msg = payload.new as SupportMessage | undefined;
+          if (msg && msg.id) handlers.onMessage?.(msg);
+          handlers.onThreadChange?.();
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'support_threads' },
+        () => {
+          handlers.onThreadChange?.();
+        }
+      )
+      .subscribe();
+  } catch {
+    ch = null;
+  }
 
   return () => {
-    void sb.removeChannel(ch);
+    if (ch) {
+      try {
+        void sb.removeChannel(ch);
+      } catch {
+        // ignore
+      }
+    }
   };
 }

@@ -367,25 +367,39 @@ export const SupportDeskView: React.FC<{
   const [savingTeam, setSavingTeam] = useState(false);
   const endRef = useRef<HTMLDivElement | null>(null);
 
+  const agentEmails = Array.isArray(config?.support_agent_emails)
+    ? config.support_agent_emails
+    : [];
+
   const loadThreads = async (silent = false) => {
-    if (!silent) setLoadingThreads(true);
-    const res = await fetchAllSupportThreads();
-    if (res.needsSql) setNeedsSql(true);
-    setThreads(res.threads);
-    if (!silent) setLoadingThreads(false);
-    return res.threads;
+    try {
+      if (!silent) setLoadingThreads(true);
+      const res = await fetchAllSupportThreads();
+      if (res.needsSql) setNeedsSql(true);
+      const safeList = Array.isArray(res.threads) ? res.threads.filter(Boolean) : [];
+      setThreads(safeList);
+      if (!silent) setLoadingThreads(false);
+      return safeList;
+    } catch {
+      if (!silent) setLoadingThreads(false);
+      return [] as SupportThread[];
+    }
   };
 
   const loadMessages = async (threadId: string) => {
-    setLoadingMsgs(true);
-    const res = await fetchThreadMessages(threadId);
-    if (res.needsSql) setNeedsSql(true);
-    setMessages(res.messages);
-    setLoadingMsgs(false);
-    await markThreadRead(threadId, 'support');
-    setThreads((prev) =>
-      prev.map((t) => (t.id === threadId ? { ...t, unread_for_support: 0 } : t))
-    );
+    try {
+      setLoadingMsgs(true);
+      const res = await fetchThreadMessages(threadId);
+      if (res.needsSql) setNeedsSql(true);
+      setMessages(Array.isArray(res.messages) ? res.messages.filter(Boolean) : []);
+      setLoadingMsgs(false);
+      await markThreadRead(threadId, 'support');
+      setThreads((prev) =>
+        prev.map((t) => (t.id === threadId ? { ...t, unread_for_support: 0 } : t))
+      );
+    } catch {
+      setLoadingMsgs(false);
+    }
   };
 
   useEffect(() => {
@@ -596,7 +610,7 @@ export const SupportDeskView: React.FC<{
         <div className="panel !m-0 !p-3">
           <div className="text-[11px] text-[var(--mut)]">Equipe suporte</div>
           <div className="text-xl font-bold tabular-nums mt-0.5">
-            {(config.support_agent_emails || []).length + 1}
+            {agentEmails.length + 1}
           </div>
         </div>
       </div>
@@ -651,9 +665,9 @@ export const SupportDeskView: React.FC<{
               + Adicionar atendente
             </button>
           </div>
-          {(config.support_agent_emails || []).length > 0 && (
+          {agentEmails.length > 0 && (
             <div className="flex flex-wrap gap-1.5 pt-1">
-              {(config.support_agent_emails || []).map((em) => (
+              {agentEmails.map((em) => (
                 <span
                   key={em}
                   className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs border border-[var(--bd)] bg-[var(--s2)]"

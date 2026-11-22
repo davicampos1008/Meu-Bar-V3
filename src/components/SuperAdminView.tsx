@@ -101,9 +101,27 @@ export const SuperAdminView: React.FC<{
 
   const tab: AdminTab = controlledTab ?? internalTab;
   const setTab = (next: AdminTab) => {
+    setActiveModal(null);
     setInternalTab(next);
     onTabChange?.(next);
   };
+
+  // Modal exclusivo de detalhes (ao abrir outro fecha o anterior; clicar fora fecha todos)
+  const [activeModal, setActiveModal] = useState<
+    | null
+    | { kind: 'account'; id: string }
+    | { kind: 'store'; id: string }
+    | { kind: 'kpi'; topic: 'accounts' | 'stores' | 'vip' | 'alerts' }
+  >(null);
+
+  useEffect(() => {
+    if (!activeModal) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setActiveModal(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [activeModal]);
 
   // Contas & Lojas
   const [users, setUsers] = useState<AdminUserAccount[]>([]);
@@ -768,28 +786,54 @@ export const SuperAdminView: React.FC<{
 
       {/* ABA 1: CONTAS CRIADAS + BARES DE CADA CONTA */}
       {tab === 'accounts' && (
-        <div className="space-y-3">
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-            <div className="panel !m-0 !p-3">
-              <div className="text-[11px] text-[var(--mut)]">Contas criadas</div>
-              <div className="text-xl font-bold tabular-nums mt-0.5">{accountStats.total}</div>
-            </div>
-            <div className="panel !m-0 !p-3">
-              <div className="text-[11px] text-[var(--mut)]">Novas (7 dias)</div>
-              <div className="text-xl font-bold tabular-nums text-[var(--ok)] mt-0.5">
+        <div className="space-y-4">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <button
+              type="button"
+              onClick={() => setActiveModal({ kind: 'kpi', topic: 'accounts' })}
+              className="panel !m-0 !p-4 text-left cursor-pointer hover:border-[var(--ac)] transition-colors"
+            >
+              <div className="text-xs font-semibold text-[var(--mut)]">👥 Contas criadas</div>
+              <div className="text-2xl font-extrabold tabular-nums mt-1">{accountStats.total}</div>
+              <div className="text-xs text-[var(--ac)] font-semibold mt-1">Ver resumo →</div>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setAccountFilter('recent');
+                setActiveModal(null);
+              }}
+              className="panel !m-0 !p-4 text-left cursor-pointer hover:border-[var(--ok)] transition-colors"
+            >
+              <div className="text-xs font-semibold text-[var(--mut)]">✨ Novas (7 dias)</div>
+              <div className="text-2xl font-extrabold tabular-nums text-[var(--ok)] mt-1">
                 {accountStats.recent}
               </div>
-            </div>
-            <div className="panel !m-0 !p-3">
-              <div className="text-[11px] text-[var(--mut)]">Com bar criado</div>
-              <div className="text-xl font-bold tabular-nums mt-0.5">{accountStats.withBars}</div>
-            </div>
-            <div className="panel !m-0 !p-3">
-              <div className="text-[11px] text-[var(--mut)]">Contas VIP / Pro</div>
-              <div className="text-xl font-bold tabular-nums text-[var(--ac)] mt-0.5">
+              <div className="text-xs text-[var(--mut)] mt-1">Filtrar recentes</div>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setAccountFilter('with_bars');
+                setActiveModal(null);
+              }}
+              className="panel !m-0 !p-4 text-left cursor-pointer hover:border-[var(--ac)] transition-colors"
+            >
+              <div className="text-xs font-semibold text-[var(--mut)]">🏪 Com bar criado</div>
+              <div className="text-2xl font-extrabold tabular-nums mt-1">{accountStats.withBars}</div>
+              <div className="text-xs text-[var(--mut)] mt-1">Filtrar com bar</div>
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveModal({ kind: 'kpi', topic: 'vip' })}
+              className="panel !m-0 !p-4 text-left cursor-pointer hover:border-[var(--ac)] transition-colors"
+            >
+              <div className="text-xs font-semibold text-[var(--mut)]">👑 Contas VIP / Pro</div>
+              <div className="text-2xl font-extrabold tabular-nums text-[var(--ac)] mt-1">
                 {accountStats.vipOrPro}
               </div>
-            </div>
+              <div className="text-xs text-[var(--ac)] font-semibold mt-1">Ver detalhes →</div>
+            </button>
           </div>
 
           {/* Atalho rápido para liberar qualquer e-mail manualmente */}
@@ -873,185 +917,58 @@ export const SuperAdminView: React.FC<{
             </div>
 
             {loadingDirectory ? (
-              <p className="mu mt-3 text-xs">Carregando contas e bares…</p>
+              <p className="mu mt-3 text-sm">Carregando contas e bares…</p>
             ) : filteredAccounts.length === 0 ? (
-              <p className="mu mt-3 text-xs">Nenhuma conta encontrada com esse filtro.</p>
+              <p className="mu mt-3 text-sm">Nenhuma conta encontrada com esse filtro.</p>
             ) : (
-              <div className="space-y-3 mt-3">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-4">
                 {filteredAccounts.map((acc) => {
                   const isNewAccount =
                     Boolean(acc.created_at) &&
                     nowMs - new Date(acc.created_at!).getTime() <= 48 * 3600000;
-                  const canToggleEmail = Boolean(acc.email && acc.email.includes('@') && !acc.isAdmin);
+                  const isSelected = activeModal?.kind === 'account' && activeModal.id === acc.id;
                   return (
-                    <div
+                    <button
                       key={acc.id}
-                      className="rounded-2xl border border-white/12 bg-black/20 p-3.5 space-y-2.5"
+                      type="button"
+                      onClick={() => setActiveModal({ kind: 'account', id: acc.id })}
+                      className={`text-left rounded-2xl border p-4 space-y-2.5 cursor-pointer transition-all ${
+                        isSelected
+                          ? 'border-[var(--ac)] bg-[var(--s2)] ring-1 ring-[var(--ac)]'
+                          : 'border-[var(--bd)] bg-[var(--s2)]/70 hover:border-[var(--ac)]'
+                      }`}
                     >
-                      {/* Cabeçalho da Conta */}
-                      <div className="flex flex-wrap items-start justify-between gap-2">
+                      <div className="flex items-start justify-between gap-2">
                         <div className="min-w-0">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <span className="font-bold text-sm text-[var(--fg)]">
-                              {acc.display_name || (acc.email || '').split('@')[0] || 'Usuário'}
-                            </span>
-                            {isNewAccount && (
-                              <span className="text-[11px] font-semibold text-emerald-300">
-                                · Nova conta
-                              </span>
-                            )}
-                            {acc.isAdmin && (
-                              <span className="text-[11px] font-semibold text-[var(--ac)]">
-                                · Admin
-                              </span>
-                            )}
-                            {!acc.isAdmin && acc.isVipEmail && (
-                              <span className="text-[11px] font-semibold text-[var(--ok)]">
-                                · Pro VIP (Conta liberada)
-                              </span>
-                            )}
+                          <div className="font-extrabold text-base text-[var(--fg)] truncate">
+                            {acc.display_name || (acc.email || '').split('@')[0] || 'Usuário'}
                           </div>
-                          <div className="text-xs text-[var(--fg)]/80 break-all mt-0.5">
+                          <div className="text-sm text-[var(--mut)] truncate mt-0.5">
                             {acc.email}
                           </div>
-                          <div className="text-[11px] text-[var(--mut)] mt-0.5 tabular-nums">
-                            Criada em {fmtDateTime(acc.created_at)}
-                            {acc.last_sign_in_at
-                              ? ` · Último acesso ${fmtDateTime(acc.last_sign_in_at)}`
-                              : ''}
-                            {acc.location ? ` · ${acc.location}` : ''}
-                          </div>
                         </div>
-
-                        {canToggleEmail && (
-                          <button
-                            type="button"
-                            className={`b sm shrink-0 ${acc.isVipEmail ? 'g' : 'ok'}`}
-                            disabled={savingCfg}
-                            onClick={() => void handleToggleEmailVip(acc.email, !acc.isVipEmail)}
-                          >
-                            {acc.isVipEmail ? 'Remover VIP da conta' : 'Liberar Pro VIP (Grátis)'}
-                          </button>
-                        )}
+                        <span
+                          className={`chip shrink-0 !text-xs ${
+                            acc.isAdmin || acc.isVipEmail ? 'on' : ''
+                          }`}
+                        >
+                          {acc.isAdmin
+                            ? '👑 Admin'
+                            : acc.isVipEmail
+                              ? '✨ Pro VIP'
+                              : isNewAccount
+                                ? '🆕 Nova'
+                                : 'Conta'}
+                        </span>
                       </div>
 
-                      {/* Bares pertencentes a esta conta */}
-                      <div className="pt-2 border-t border-white/10">
-                        {acc.ownedBars.length === 0 ? (
-                          <div className="text-xs text-[var(--mut)]">
-                            Nenhum bar criado por esta conta ainda
-                            {acc.member_bars_count && acc.member_bars_count > 0
-                              ? ` (atua como equipe em ${acc.member_bars_count} bar(es))`
-                              : '.'}
-                          </div>
-                        ) : (
-                          <div className="space-y-2">
-                            <div className="text-[11px] font-semibold text-[var(--mut)]">
-                              Bares criados por esta conta ({acc.ownedBars.length})
-                            </div>
-                            {acc.ownedBars.map((b) => {
-                              const barOwnStatus = getBarPlanStatus(b, acc.email, draft, {
-                                ignoreAdminAutoVip: true,
-                                ignoreEmailVip: true,
-                              });
-                              const isBusy = busyBarId === b.id;
-                              const isVip = barOwnStatus.effectiveTier === 'vip';
-                              const isPro30 =
-                                barOwnStatus.effectiveTier === 'pro' &&
-                                (barOwnStatus.daysLeft ?? 0) <= 60;
-                              const isProYear =
-                                barOwnStatus.effectiveTier === 'pro' &&
-                                (barOwnStatus.daysLeft ?? 0) > 60;
-                              const isFree = barOwnStatus.effectiveTier === 'free';
-                              return (
-                                <div
-                                  key={b.id}
-                                  className="rounded-xl border border-white/10 bg-black/25 p-2.5 space-y-2"
-                                >
-                                  <div className="flex flex-wrap items-center justify-between gap-2">
-                                    <div className="min-w-0">
-                                      <div className="text-xs font-bold text-[var(--fg)]">
-                                        {b.name}
-                                        {b.handle ? (
-                                          <span className="font-normal text-[var(--mut)]">
-                                            {' '}
-                                            @{b.handle}
-                                          </span>
-                                        ) : null}
-                                      </div>
-                                      <div className="text-[11px] text-[var(--mut)] tabular-nums">
-                                        {b.city || 'Sem cidade'}
-                                        {typeof b.orders_count === 'number'
-                                          ? ` · ${b.orders_count} pedido(s)`
-                                          : ''}
-                                        {typeof b.items_count === 'number'
-                                          ? ` · ${b.items_count} item(ns) no estoque`
-                                          : ''}
-                                      </div>
-                                    </div>
-                                    <div className="text-xs font-semibold tabular-nums text-[var(--ac)] text-right">
-                                      <div>
-                                        {barOwnStatus.label}
-                                        {barOwnStatus.expiresAt && barOwnStatus.effectiveTier === 'pro'
-                                          ? ` · até ${new Date(barOwnStatus.expiresAt).toLocaleDateString('pt-BR')}`
-                                          : ''}
-                                      </div>
-                                      {(acc.isAdmin || acc.isVipEmail) && !isVip && (
-                                        <div className="text-[10px] text-[var(--mut)]">
-                                          (Conta {acc.isAdmin ? 'Admin' : 'VIP'})
-                                        </div>
-                                      )}
-                                    </div>
-                                  </div>
-
-                                  <div className="flex flex-wrap gap-1.5">
-                                    <button
-                                      type="button"
-                                      className={`b sm !text-[11px] !py-1 ${isVip ? '' : 'g'}`}
-                                      disabled={isBusy}
-                                      onClick={() => void handleSetPlan(b.id, 'vip', null)}
-                                    >
-                                      {isVip ? '✓ Bar VIP' : 'Bar VIP'}
-                                    </button>
-                                    <button
-                                      type="button"
-                                      className={`b sm !text-[11px] !py-1 ${isPro30 ? 'ok' : 'g'}`}
-                                      disabled={isBusy}
-                                      onClick={() => void handleSetPlan(b.id, 'pro', 30)}
-                                    >
-                                      {isPro30 ? '✓ Pro +30d' : 'Pro +30d'}
-                                    </button>
-                                    <button
-                                      type="button"
-                                      className={`b sm !text-[11px] !py-1 ${isProYear ? 'ok' : 'g'}`}
-                                      disabled={isBusy}
-                                      onClick={() => void handleSetPlan(b.id, 'pro', 365)}
-                                    >
-                                      {isProYear ? '✓ Pro +1 ano' : 'Pro +1 ano'}
-                                    </button>
-                                    <button
-                                      type="button"
-                                      className={`b sm !text-[11px] !py-1 ${isFree ? '' : 'g'}`}
-                                      disabled={isBusy}
-                                      onClick={() => void handleSetPlan(b.id, 'free', null)}
-                                    >
-                                      {isFree ? '✓ Grátis' : 'Grátis'}
-                                    </button>
-                                    <button
-                                      type="button"
-                                      className="b g sm !text-[11px] !py-1"
-                                      onClick={() => openChatWithBar(b.id, b.name, acc.email)}
-                                    >
-                                      💬 Chat
-                                    </button>
-                                  </div>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        )}
+                      <div className="flex items-center justify-between gap-2 pt-2 border-t border-[var(--bd)] text-xs">
+                        <span className="font-semibold text-[var(--fg)]">
+                          🏪 {acc.ownedBars.length} bar(es) criado(s)
+                        </span>
+                        <span className="font-bold text-[var(--ac)]">Abrir detalhes →</span>
                       </div>
-                    </div>
+                    </button>
                   );
                 })}
               </div>
@@ -1060,43 +977,53 @@ export const SuperAdminView: React.FC<{
         </div>
       )}
 
-      {/* ABA 2: TODOS OS BARES (VISÃO POR LOJA) */}
+      {/* ABA 2: TODOS OS BARES (VISÃO POR LOJA EM BLOCOS) */}
       {tab === 'stores' && (
-        <div className="space-y-3">
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-            <div className="panel !m-0 !p-3">
-              <div className="text-[11px] text-[var(--mut)]">Total de lojas</div>
-              <div className="text-xl font-bold tabular-nums mt-0.5">{storeStats.total}</div>
-            </div>
-            <div className="panel !m-0 !p-3">
-              <div className="text-[11px] text-[var(--mut)]">Pro pagos</div>
-              <div className="text-xl font-bold tabular-nums text-[var(--ok)] mt-0.5">
+        <div className="space-y-4">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <button
+              type="button"
+              onClick={() => setActiveModal({ kind: 'kpi', topic: 'stores' })}
+              className="panel !m-0 !p-4 text-left cursor-pointer hover:border-[var(--ac)] transition-colors"
+            >
+              <div className="text-xs font-semibold text-[var(--mut)]">🏪 Total de lojas</div>
+              <div className="text-2xl font-extrabold tabular-nums mt-1">{storeStats.total}</div>
+              <div className="text-xs text-[var(--ac)] font-semibold mt-1">Ver resumo →</div>
+            </button>
+            <div className="panel !m-0 !p-4">
+              <div className="text-xs font-semibold text-[var(--mut)]">✅ Pro pagos</div>
+              <div className="text-2xl font-extrabold tabular-nums text-[var(--ok)] mt-1">
                 {storeStats.pro}
               </div>
             </div>
-            <div className="panel !m-0 !p-3">
-              <div className="text-[11px] text-[var(--mut)]">VIP cortesia</div>
-              <div className="text-xl font-bold tabular-nums text-[var(--ac)] mt-0.5">
+            <div className="panel !m-0 !p-4">
+              <div className="text-xs font-semibold text-[var(--mut)]">👑 VIP cortesia</div>
+              <div className="text-2xl font-extrabold tabular-nums text-[var(--ac)] mt-1">
                 {storeStats.vip}
               </div>
             </div>
-            <div className="panel !m-0 !p-3">
-              <div className="text-[11px] text-[var(--mut)]">Trial / Grátis</div>
-              <div className="text-xl font-bold tabular-nums mt-0.5">
+            <div className="panel !m-0 !p-4">
+              <div className="text-xs font-semibold text-[var(--mut)]">🆓 Trial / Grátis</div>
+              <div className="text-2xl font-extrabold tabular-nums mt-1">
                 {storeStats.trial} / {storeStats.free}
               </div>
             </div>
           </div>
 
-          <div className="panel">
+          <div className="panel !p-4">
             <div className="row sp flex-wrap gap-2">
-              <h2 className="!m-0">Bares cadastrados</h2>
+              <div>
+                <h2 className="!m-0 text-lg font-extrabold">Bares cadastrados</h2>
+                <p className="mu text-xs !mt-0.5 !mb-0">
+                  Toque em qualquer bloco de loja para abrir o painel completo de planos e suporte.
+                </p>
+              </div>
               <button
                 type="button"
                 className="b g sm"
                 onClick={() => void refreshDirectory()}
               >
-                Atualizar lista
+                🔄 Atualizar lista
               </button>
             </div>
 
@@ -1105,105 +1032,64 @@ export const SuperAdminView: React.FC<{
               value={storeQuery}
               onChange={(e) => setStoreQuery(e.target.value)}
               placeholder="Buscar por nome da loja, @handle, cidade ou e-mail..."
-              className="mt-2.5"
+              className="mt-3"
             />
 
             {loadingDirectory ? (
-              <p className="mu mt-3 text-xs">Carregando lojas…</p>
+              <p className="mu mt-3 text-sm">Carregando lojas…</p>
             ) : filteredStores.length === 0 ? (
-              <p className="mu mt-3 text-xs">Nenhuma loja encontrada.</p>
+              <p className="mu mt-3 text-sm">Nenhuma loja encontrada.</p>
             ) : (
-              <div className="space-y-2.5 mt-3">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-4">
                 {filteredStores.map((st) => {
                   const status = getBarPlanStatus(st, st.owner_email, draft, {
                     ignoreAdminAutoVip: true,
                     ignoreEmailVip: true,
                   });
-                  const isBusy = busyBarId === st.id;
-                  const isVip = status.effectiveTier === 'vip';
-                  const isPro30 = status.effectiveTier === 'pro' && (status.daysLeft ?? 0) <= 60;
-                  const isProYear = status.effectiveTier === 'pro' && (status.daysLeft ?? 0) > 60;
-                  const isFree = status.effectiveTier === 'free';
+                  const isSelected = activeModal?.kind === 'store' && activeModal.id === st.id;
                   return (
-                    <div
+                    <button
                       key={st.id}
-                      className="rounded-xl border border-white/10 bg-black/20 p-3 space-y-2"
+                      type="button"
+                      onClick={() => setActiveModal({ kind: 'store', id: st.id })}
+                      className={`text-left rounded-2xl border p-4 space-y-2.5 cursor-pointer transition-all ${
+                        isSelected
+                          ? 'border-[var(--ac)] bg-[var(--s2)] ring-1 ring-[var(--ac)]'
+                          : 'border-[var(--bd)] bg-[var(--s2)]/70 hover:border-[var(--ac)]'
+                      }`}
                     >
-                      <div className="flex flex-wrap items-start justify-between gap-2">
+                      <div className="flex items-start justify-between gap-2">
                         <div className="min-w-0">
-                          <div className="font-bold text-sm text-[var(--fg)]">
-                            {st.name}
-                            {st.handle ? (
-                              <span className="text-[var(--mut)] font-normal"> @{st.handle}</span>
-                            ) : null}
+                          <div className="font-extrabold text-base text-[var(--fg)] truncate">
+                            🏪 {st.name}
                           </div>
-                          <div className="text-xs text-[var(--mut)] mt-0.5">
-                            {st.owner_email || 'Dono (ID ' + st.owner.slice(0, 8) + ')'}
-                            {st.city ? ` · ${st.city}` : ''}
-                            {typeof st.orders_count === 'number'
-                              ? ` · ${st.orders_count} pedido(s)`
-                              : ''}
+                          <div className="text-sm text-[var(--mut)] truncate mt-0.5">
+                            {st.handle ? `@${st.handle}` : st.owner_email || 'Sem @handle'}
                           </div>
                         </div>
-                        <div className="text-xs font-semibold tabular-nums text-[var(--ac)]">
+                        <span
+                          className={`chip shrink-0 !text-xs ${
+                            status.effectiveTier === 'vip' || status.effectiveTier === 'pro'
+                              ? 'on'
+                              : ''
+                          }`}
+                        >
                           {status.label}
-                          {status.expiresAt && status.effectiveTier === 'pro'
-                            ? ` · até ${new Date(status.expiresAt).toLocaleDateString('pt-BR')}`
+                        </span>
+                      </div>
+
+                      <div className="flex items-center justify-between gap-2 pt-2 border-t border-[var(--bd)] text-xs">
+                        <span className="text-[var(--mut)] truncate">
+                          {st.city || 'Sem cidade'}
+                          {typeof st.orders_count === 'number'
+                            ? ` · ${st.orders_count} pedido(s)`
                             : ''}
-                        </div>
+                        </span>
+                        <span className="font-bold text-[var(--ac)] shrink-0">
+                          Gerenciar →
+                        </span>
                       </div>
-
-                      <input
-                        value={noteByBar[st.id] ?? st.plan_note ?? ''}
-                        onChange={(e) =>
-                          setNoteByBar((prev) => ({ ...prev, [st.id]: e.target.value }))
-                        }
-                        placeholder="Observação interna (ex: Pago Pix, Amigo VIP, Parceiro)..."
-                        className="!text-xs !py-1.5"
-                      />
-
-                      <div className="flex flex-wrap gap-1.5">
-                        <button
-                          type="button"
-                          className={`b sm ${isVip ? '' : 'g'}`}
-                          disabled={isBusy}
-                          onClick={() => void handleSetPlan(st.id, 'vip', null)}
-                        >
-                          {isVip ? '✓ VIP Ativo' : 'Liberar VIP (Grátis)'}
-                        </button>
-                        <button
-                          type="button"
-                          className={`b sm ${isPro30 ? 'ok' : 'g'}`}
-                          disabled={isBusy}
-                          onClick={() => void handleSetPlan(st.id, 'pro', 30)}
-                        >
-                          {isPro30 ? '✓ Pro +30d' : 'Pro +30d'}
-                        </button>
-                        <button
-                          type="button"
-                          className={`b sm ${isProYear ? 'ok' : 'g'}`}
-                          disabled={isBusy}
-                          onClick={() => void handleSetPlan(st.id, 'pro', 365)}
-                        >
-                          {isProYear ? '✓ Pro +1 ano' : 'Pro +1 ano'}
-                        </button>
-                        <button
-                          type="button"
-                          className={`b sm ${isFree ? '' : 'g'}`}
-                          disabled={isBusy}
-                          onClick={() => void handleSetPlan(st.id, 'free', null)}
-                        >
-                          {isFree ? '✓ Grátis' : 'Voltar p/ Grátis'}
-                        </button>
-                        <button
-                          type="button"
-                          className="b g sm"
-                          onClick={() => openChatWithBar(st.id, st.name, st.owner_email)}
-                        >
-                          💬 Chat Suporte
-                        </button>
-                      </div>
-                    </div>
+                    </button>
                   );
                 })}
               </div>
@@ -1627,6 +1513,382 @@ export const SuperAdminView: React.FC<{
           >
             {savingCfg ? 'Salvando...' : 'Salvar configurações comerciais'}
           </button>
+        </div>
+      )}
+
+      {/* MODAL EXCLUSIVO DE DETALHES (ao abrir outro fecha o anterior; clicar fora fecha todos) */}
+      {activeModal && (
+        <div className="ov" onClick={() => setActiveModal(null)}>
+          <div
+            className="modal !max-w-2xl !w-full max-h-[85vh] overflow-y-auto space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {activeModal.kind === 'account' &&
+              (() => {
+                const acc = filteredAccounts.find((a) => a.id === activeModal.id);
+                if (!acc) return null;
+                const canToggleEmail = Boolean(
+                  acc.email && acc.email.includes('@') && !acc.isAdmin
+                );
+                return (
+                  <>
+                    <div className="flex items-start justify-between gap-2 pb-3 border-b border-[var(--bd)]">
+                      <div className="min-w-0">
+                        <span className="text-xs font-bold uppercase tracking-wider text-[var(--ac)]">
+                          👤 Detalhes da Conta
+                        </span>
+                        <h3 className="!m-0 text-xl font-extrabold mt-0.5">
+                          {acc.display_name || (acc.email || '').split('@')[0] || 'Usuário'}
+                        </h3>
+                        <div className="text-sm text-[var(--mut)] break-all mt-0.5">
+                          {acc.email}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        className="b g sm shrink-0"
+                        onClick={() => setActiveModal(null)}
+                      >
+                        ✕ Fechar
+                      </button>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                      <div className="rounded-xl p-3 bg-[var(--s2)] border border-[var(--bd)]">
+                        <div className="text-xs text-[var(--mut)]">Criada em</div>
+                        <div className="text-sm font-bold mt-0.5 tabular-nums">
+                          {fmtDateTime(acc.created_at)}
+                        </div>
+                      </div>
+                      <div className="rounded-xl p-3 bg-[var(--s2)] border border-[var(--bd)]">
+                        <div className="text-xs text-[var(--mut)]">Último acesso</div>
+                        <div className="text-sm font-bold mt-0.5 tabular-nums">
+                          {acc.last_sign_in_at ? fmtDateTime(acc.last_sign_in_at) : '—'}
+                        </div>
+                      </div>
+                      <div className="rounded-xl p-3 bg-[var(--s2)] border border-[var(--bd)]">
+                        <div className="text-xs text-[var(--mut)]">Status da conta</div>
+                        <div className="text-sm font-bold mt-0.5 text-[var(--ac)]">
+                          {acc.isAdmin ? '👑 Super Admin' : acc.isVipEmail ? '✨ Pro VIP' : 'Padrão'}
+                        </div>
+                      </div>
+                    </div>
+
+                    {canToggleEmail && (
+                      <button
+                        type="button"
+                        className={`b full ${acc.isVipEmail ? 'g' : 'ok'}`}
+                        disabled={savingCfg}
+                        onClick={() => void handleToggleEmailVip(acc.email, !acc.isVipEmail)}
+                      >
+                        {acc.isVipEmail
+                          ? 'Remover Pro VIP desta conta'
+                          : '👑 Liberar Pro VIP Grátis para esta conta'}
+                      </button>
+                    )}
+
+                    <div className="space-y-2.5 pt-2 border-t border-[var(--bd)]">
+                      <h4 className="!m-0 text-base font-bold">
+                        🏪 Bares desta conta ({acc.ownedBars.length})
+                      </h4>
+                      {acc.ownedBars.length === 0 ? (
+                        <p className="mu text-sm !m-0">
+                          Nenhum bar criado por esta conta ainda
+                          {acc.member_bars_count && acc.member_bars_count > 0
+                            ? ` (atua como equipe em ${acc.member_bars_count} bar(es))`
+                            : '.'}
+                        </p>
+                      ) : (
+                        acc.ownedBars.map((b) => {
+                          const barOwnStatus = getBarPlanStatus(b, acc.email, draft, {
+                            ignoreAdminAutoVip: true,
+                            ignoreEmailVip: true,
+                          });
+                          const isBusy = busyBarId === b.id;
+                          const isVip = barOwnStatus.effectiveTier === 'vip';
+                          const isPro30 =
+                            barOwnStatus.effectiveTier === 'pro' &&
+                            (barOwnStatus.daysLeft ?? 0) <= 60;
+                          const isProYear =
+                            barOwnStatus.effectiveTier === 'pro' &&
+                            (barOwnStatus.daysLeft ?? 0) > 60;
+                          const isFree = barOwnStatus.effectiveTier === 'free';
+                          return (
+                            <div
+                              key={b.id}
+                              className="rounded-2xl p-4 border border-[var(--bd)] bg-[var(--s2)] space-y-3"
+                            >
+                              <div className="flex flex-wrap items-start justify-between gap-2">
+                                <div>
+                                  <div className="font-extrabold text-base">
+                                    {b.name}{' '}
+                                    {b.handle && (
+                                      <span className="text-sm font-normal text-[var(--mut)]">
+                                        @{b.handle}
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className="text-xs text-[var(--mut)] mt-0.5">
+                                    {b.city || 'Sem cidade'}
+                                    {typeof b.orders_count === 'number'
+                                      ? ` · ${b.orders_count} pedido(s)`
+                                      : ''}
+                                    {typeof b.items_count === 'number'
+                                      ? ` · ${b.items_count} item(ns) no estoque`
+                                      : ''}
+                                  </div>
+                                </div>
+                                <span className="chip on !text-xs">
+                                  {barOwnStatus.label}
+                                  {barOwnStatus.expiresAt && barOwnStatus.effectiveTier === 'pro'
+                                    ? ` · até ${new Date(barOwnStatus.expiresAt).toLocaleDateString('pt-BR')}`
+                                    : ''}
+                                </span>
+                              </div>
+                              <div className="flex flex-wrap gap-2">
+                                <button
+                                  type="button"
+                                  className={`b sm ${isVip ? '' : 'g'}`}
+                                  disabled={isBusy}
+                                  onClick={() => void handleSetPlan(b.id, 'vip', null)}
+                                >
+                                  {isVip ? '✓ Bar VIP' : 'Bar VIP'}
+                                </button>
+                                <button
+                                  type="button"
+                                  className={`b sm ${isPro30 ? 'ok' : 'g'}`}
+                                  disabled={isBusy}
+                                  onClick={() => void handleSetPlan(b.id, 'pro', 30)}
+                                >
+                                  {isPro30 ? '✓ Pro +30d' : 'Pro +30d'}
+                                </button>
+                                <button
+                                  type="button"
+                                  className={`b sm ${isProYear ? 'ok' : 'g'}`}
+                                  disabled={isBusy}
+                                  onClick={() => void handleSetPlan(b.id, 'pro', 365)}
+                                >
+                                  {isProYear ? '✓ Pro +1 ano' : 'Pro +1 ano'}
+                                </button>
+                                <button
+                                  type="button"
+                                  className={`b sm ${isFree ? '' : 'g'}`}
+                                  disabled={isBusy}
+                                  onClick={() => void handleSetPlan(b.id, 'free', null)}
+                                >
+                                  {isFree ? '✓ Grátis' : 'Grátis'}
+                                </button>
+                                <button
+                                  type="button"
+                                  className="b g sm"
+                                  onClick={() => {
+                                    setActiveModal(null);
+                                    openChatWithBar(b.id, b.name, acc.email);
+                                  }}
+                                >
+                                  💬 Abrir Chat
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  </>
+                );
+              })()}
+
+            {activeModal.kind === 'store' &&
+              (() => {
+                const st = stores.find((s) => s.id === activeModal.id);
+                if (!st) return null;
+                const status = getBarPlanStatus(st, st.owner_email, draft, {
+                  ignoreAdminAutoVip: true,
+                  ignoreEmailVip: true,
+                });
+                const isBusy = busyBarId === st.id;
+                const isVip = status.effectiveTier === 'vip';
+                const isPro30 = status.effectiveTier === 'pro' && (status.daysLeft ?? 0) <= 60;
+                const isProYear = status.effectiveTier === 'pro' && (status.daysLeft ?? 0) > 60;
+                const isFree = status.effectiveTier === 'free';
+                return (
+                  <>
+                    <div className="flex items-start justify-between gap-2 pb-3 border-b border-[var(--bd)]">
+                      <div className="min-w-0">
+                        <span className="text-xs font-bold uppercase tracking-wider text-[var(--ac)]">
+                          🏪 Gestão da Loja
+                        </span>
+                        <h3 className="!m-0 text-xl font-extrabold mt-0.5">
+                          {st.name}
+                          {st.handle ? (
+                            <span className="text-sm font-normal text-[var(--mut)]">
+                              {' '}
+                              @{st.handle}
+                            </span>
+                          ) : null}
+                        </h3>
+                        <div className="text-sm text-[var(--mut)] mt-0.5">
+                          {st.owner_email || `Dono (ID ${st.owner.slice(0, 8)})`}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        className="b g sm shrink-0"
+                        onClick={() => setActiveModal(null)}
+                      >
+                        ✕ Fechar
+                      </button>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                      <div className="rounded-xl p-3 bg-[var(--s2)] border border-[var(--bd)]">
+                        <div className="text-xs text-[var(--mut)]">Plano atual</div>
+                        <div className="text-base font-extrabold text-[var(--ac)] mt-0.5">
+                          {status.label}
+                        </div>
+                        {status.expiresAt && status.effectiveTier === 'pro' && (
+                          <div className="text-xs text-[var(--mut)] mt-0.5">
+                            Até {new Date(status.expiresAt).toLocaleDateString('pt-BR')}
+                          </div>
+                        )}
+                      </div>
+                      <div className="rounded-xl p-3 bg-[var(--s2)] border border-[var(--bd)]">
+                        <div className="text-xs text-[var(--mut)]">Cidade</div>
+                        <div className="text-base font-bold mt-0.5">
+                          {st.city || 'Não informada'}
+                        </div>
+                      </div>
+                      <div className="rounded-xl p-3 bg-[var(--s2)] border border-[var(--bd)]">
+                        <div className="text-xs text-[var(--mut)]">Pedidos registrados</div>
+                        <div className="text-base font-extrabold mt-0.5 tabular-nums">
+                          {typeof st.orders_count === 'number' ? st.orders_count : 0}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="!mt-0 text-sm">Observação interna da assinatura</label>
+                      <input
+                        value={noteByBar[st.id] ?? st.plan_note ?? ''}
+                        onChange={(e) =>
+                          setNoteByBar((prev) => ({ ...prev, [st.id]: e.target.value }))
+                        }
+                        placeholder="Ex: Pago Pix, Amigo VIP, Parceiro..."
+                      />
+                    </div>
+
+                    <div className="space-y-2">
+                      <div className="text-sm font-bold">Alterar plano desta loja</div>
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                        <button
+                          type="button"
+                          className={`b sm ${isVip ? '' : 'g'}`}
+                          disabled={isBusy}
+                          onClick={() => void handleSetPlan(st.id, 'vip', null)}
+                        >
+                          {isVip ? '✓ VIP Ativo' : 'Liberar VIP'}
+                        </button>
+                        <button
+                          type="button"
+                          className={`b sm ${isPro30 ? 'ok' : 'g'}`}
+                          disabled={isBusy}
+                          onClick={() => void handleSetPlan(st.id, 'pro', 30)}
+                        >
+                          {isPro30 ? '✓ Pro +30d' : 'Pro +30d'}
+                        </button>
+                        <button
+                          type="button"
+                          className={`b sm ${isProYear ? 'ok' : 'g'}`}
+                          disabled={isBusy}
+                          onClick={() => void handleSetPlan(st.id, 'pro', 365)}
+                        >
+                          {isProYear ? '✓ Pro +1 ano' : 'Pro +1 ano'}
+                        </button>
+                        <button
+                          type="button"
+                          className={`b sm ${isFree ? '' : 'g'}`}
+                          disabled={isBusy}
+                          onClick={() => void handleSetPlan(st.id, 'free', null)}
+                        >
+                          {isFree ? '✓ Grátis' : 'Voltar Grátis'}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="pt-2 border-t border-[var(--bd)] flex justify-between gap-2 flex-wrap">
+                      <button
+                        type="button"
+                        className="b g"
+                        onClick={() => {
+                          setActiveModal(null);
+                          openChatWithBar(st.id, st.name, st.owner_email);
+                        }}
+                      >
+                        💬 Abrir Chat de Suporte com esta Loja
+                      </button>
+                      <button
+                        type="button"
+                        className="b"
+                        onClick={() => setActiveModal(null)}
+                      >
+                        Concluir
+                      </button>
+                    </div>
+                  </>
+                );
+              })()}
+
+            {activeModal.kind === 'kpi' && (
+              <>
+                <div className="flex items-start justify-between gap-2 pb-3 border-b border-[var(--bd)]">
+                  <div>
+                    <span className="text-xs font-bold uppercase tracking-wider text-[var(--ac)]">
+                      📊 Visão Geral da Plataforma
+                    </span>
+                    <h3 className="!m-0 text-xl font-extrabold mt-0.5">
+                      {activeModal.topic === 'stores'
+                        ? 'Distribuição de Lojas'
+                        : activeModal.topic === 'vip'
+                          ? 'Contas VIP & Pro'
+                          : 'Resumo das Contas Cadastradas'}
+                    </h3>
+                  </div>
+                  <button
+                    type="button"
+                    className="b g sm"
+                    onClick={() => setActiveModal(null)}
+                  >
+                    ✕ Fechar
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="rounded-xl p-4 bg-[var(--s2)] border border-[var(--bd)]">
+                    <div className="text-xs text-[var(--mut)]">Total de contas</div>
+                    <div className="text-2xl font-extrabold mt-1">{accountStats.total}</div>
+                  </div>
+                  <div className="rounded-xl p-4 bg-[var(--s2)] border border-[var(--bd)]">
+                    <div className="text-xs text-[var(--mut)]">Novas nos últimos 7 dias</div>
+                    <div className="text-2xl font-extrabold text-[var(--ok)] mt-1">
+                      {accountStats.recent}
+                    </div>
+                  </div>
+                  <div className="rounded-xl p-4 bg-[var(--s2)] border border-[var(--bd)]">
+                    <div className="text-xs text-[var(--mut)]">Lojas Pro / VIP</div>
+                    <div className="text-2xl font-extrabold text-[var(--ac)] mt-1">
+                      {storeStats.pro} Pro · {storeStats.vip} VIP
+                    </div>
+                  </div>
+                  <div className="rounded-xl p-4 bg-[var(--s2)] border border-[var(--bd)]">
+                    <div className="text-xs text-[var(--mut)]">Lojas Trial / Grátis</div>
+                    <div className="text-2xl font-extrabold mt-1">
+                      {storeStats.trial} Trial · {storeStats.free} Grátis
+                    </div>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
         </div>
       )}
     </div>

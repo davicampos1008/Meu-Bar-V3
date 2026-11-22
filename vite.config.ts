@@ -47,6 +47,7 @@ export default defineConfig(() => {
           ],
         },
         workbox: {
+          cleanupOutdatedCaches: true,
           maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
           runtimeCaching: [
@@ -72,6 +73,60 @@ export default defineConfig(() => {
                 expiration: {
                   maxEntries: 10,
                   maxAgeSeconds: 60 * 60 * 24 * 365,
+                },
+                cacheableResponse: {
+                  statuses: [0, 200],
+                },
+              },
+            },
+            // Nunca cachear autenticação ou handshakes realtime do Supabase
+            {
+              urlPattern: /^https:\/\/[a-z0-9-]+\.supabase\.co\/(auth|realtime)\/v1\/.*/i,
+              handler: 'NetworkOnly',
+            },
+            // Imagens e arquivos públicos do Supabase Storage (logos, fotos de drinks, banners)
+            {
+              urlPattern: /^https:\/\/[a-z0-9-]+\.supabase\.co\/storage\/v1\/object\/public\/.*/i,
+              handler: 'CacheFirst',
+              options: {
+                cacheName: 'supabase-storage-images',
+                expiration: {
+                  maxEntries: 160,
+                  maxAgeSeconds: 60 * 60 * 24 * 30, // 30 dias
+                },
+                cacheableResponse: {
+                  statuses: [0, 200],
+                },
+              },
+            },
+            // Leituras de catálogo/cardápio/receitas/preços (resposta instantânea + atualização em segundo plano)
+            {
+              urlPattern:
+                /^https:\/\/[a-z0-9-]+\.supabase\.co\/rest\/v1\/(recipes|bar_prices|bars|bar_items|platform_settings|partner_ads)(\?.*)?$/i,
+              method: 'GET',
+              handler: 'StaleWhileRevalidate',
+              options: {
+                cacheName: 'supabase-catalog-cache',
+                expiration: {
+                  maxEntries: 80,
+                  maxAgeSeconds: 60 * 60 * 24, // 24 horas
+                },
+                cacheableResponse: {
+                  statuses: [0, 200],
+                },
+              },
+            },
+            // Demais consultas GET do Supabase REST (pedidos, comandas, vagas, suporte): tenta rede rápido e cai no cache se offline
+            {
+              urlPattern: /^https:\/\/[a-z0-9-]+\.supabase\.co\/rest\/v1\/.*/i,
+              method: 'GET',
+              handler: 'NetworkFirst',
+              options: {
+                cacheName: 'supabase-api-cache',
+                networkTimeoutSeconds: 4,
+                expiration: {
+                  maxEntries: 120,
+                  maxAgeSeconds: 60 * 60 * 12, // 12 horas
                 },
                 cacheableResponse: {
                   statuses: [0, 200],

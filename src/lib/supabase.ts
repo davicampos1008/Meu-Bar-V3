@@ -6,6 +6,15 @@ import {
   validatePdfUpload,
 } from './security';
 
+import {
+  isSimDbActive,
+  notifySimDbChange,
+  registerSimBlobUrl,
+  simChannel,
+  simFrom,
+  simRpc,
+} from './simDb';
+
 const FALLBACK_URL = 'https://ikyxhwyqbknwjugwdlfp.supabase.co';
 const FALLBACK_KEY = 'sb_publishable_bs4eqPwTL4LEMi2ZiB-ROA_eTVoX1ll';
 
@@ -13,7 +22,20 @@ export const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || FALLBACK_URL;
 export const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || FALLBACK_KEY;
 export const MEDIA_BUCKET = 'bar-media';
 
-export const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+export const realSb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+export const sb = new Proxy(realSb, {
+  get(target, prop, receiver) {
+    if (isSimDbActive()) {
+      if (prop === 'from') return simFrom;
+      if (prop === 'rpc') return simRpc;
+      if (prop === 'channel') return simChannel;
+      if (prop === 'removeChannel') return () => Promise.resolve('ok');
+    }
+    const val = Reflect.get(target, prop, receiver);
+    return typeof val === 'function' ? val.bind(target) : val;
+  },
+});
 
 export async function writeBarSafe(
   mode: 'insert' | 'update',
@@ -120,6 +142,10 @@ export async function writeBarSafe(
 }
 
 export async function broadcastMenuUpdate(barId: string, updatedBar?: Partial<Bar> | null): Promise<void> {
+  if (isSimDbActive()) {
+    notifySimDbChange();
+    return;
+  }
   try {
     const ch = sb.channel('menu-live-' + barId);
     await new Promise<void>((resolve) => {
@@ -201,6 +227,9 @@ export async function uploadMediaFile(
   if (!check.ok) {
     return { error: check.error };
   }
+  if (isSimDbActive()) {
+    return { url: registerSimBlobUrl(file) };
+  }
   const prepared = await compressImageFile(file);
   const ext =
     prepared.type === 'image/jpeg'
@@ -232,6 +261,9 @@ export async function uploadPdfFile(
   const check = await validatePdfUpload(file);
   if (!check.ok) {
     return { error: check.error };
+  }
+  if (isSimDbActive()) {
+    return { url: registerSimBlobUrl(file) };
   }
   const safeUser = sanitizeStorageSegment(userId || 'anon', 'anon');
   const safeFolder = sanitizeStorageSegment(folder, 'docs');

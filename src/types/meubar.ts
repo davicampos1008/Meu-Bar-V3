@@ -689,7 +689,7 @@ export interface TableTab {
 }
 
 export interface BarMember {
-  id: string;
+  id?: string;
   bar_id: string;
   user_id: string;
   role: string;
