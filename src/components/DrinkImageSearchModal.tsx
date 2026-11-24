@@ -49,6 +49,144 @@ function formatDrinkSearchQuery(rawName: string): string {
   return /^drink\b/i.test(clean) ? clean : `drink ${clean}`;
 }
 
+async function parseJsonSafe<T>(res: Response): Promise<{ okJson: boolean; data: T | null; rawText: string }> {
+  const rawText = await res.text();
+  if (!rawText || !rawText.trim()) {
+    return { okJson: false, data: null, rawText: '' };
+  }
+  try {
+    return { okJson: true, data: JSON.parse(rawText) as T, rawText };
+  } catch {
+    return { okJson: false, data: null, rawText };
+  }
+}
+
+async function searchClientFallbackImages(
+  searchText: string,
+  quality: QualityFilter,
+  orientation: OrientationFilter,
+  proOnly: boolean
+): Promise<SearchCandidate[]> {
+  const stripped = searchText.replace(/^drink\s+/i, '').trim() || searchText;
+  const shortName = stripped.split(/\s+/).slice(0, 3).join(' ');
+  const blockedRe =
+    /(garrafa|garrafas|bottle|bottles|packshot|lata|propaganda|anuncio|anúncio|banner|watermark|shutterstock|istock|alamy|123rf|depositphotos|dreamstime|gettyimages|vecteezy|cleanpng|pngtree|pngwing|mercadolivre|amazon|shopee|supermercado|\.svg)/i;
+
+  const fetchCocktailDbClient = async (): Promise<SearchCandidate[]> => {
+    if (quality === 'ultra' || (orientation !== 'any' && orientation !== 'square')) return [];
+    try {
+      const res = await fetch(
+        `https://www.thecocktaildb.com/api/json/v1/1/search.php?s=${encodeURIComponent(shortName)}`
+      );
+      if (!res.ok) return [];
+      const json = (await res.json()) as {
+        drinks?: Array<{ idDrink?: string; strDrink?: string; strDrinkThumb?: string }> | null;
+      };
+      const list = Array.isArray(json.drinks) ? json.drinks : [];
+      return list
+        .filter((d) => d.strDrinkThumb)
+        .slice(0, 10)
+        .map((d) => ({
+          id: `cdb-${d.idDrink || Math.random()}`,
+          title: d.strDrink || shortName,
+          source: 'TheCocktailDB',
+          domain: 'thecocktaildb.com',
+          imageUrl: String(d.strDrinkThumb),
+          thumbUrl: `${d.strDrinkThumb}/preview`,
+          width: 700,
+          height: 700,
+          score: 82,
+          badge: '700×700 · Estúdio',
+        }));
+    } catch {
+      return [];
+    }
+  };
+
+  const fetchWikimediaClient = async (queryStr: string): Promise<SearchCandidate[]> => {
+    try {
+      const url =
+        `https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrnamespace=6` +
+        `&gsrsearch=${encodeURIComponent(queryStr)}&gsrlimit=14` +
+        `&prop=imageinfo&iiprop=url|size|mime&iiurlwidth=900&format=json&origin=*`;
+      const res = await fetch(url);
+      if (!res.ok) return [];
+      const json = (await res.json()) as {
+        query?: {
+          pages?: Record<
+            string,
+            {
+              title?: string;
+              imageinfo?: Array<{
+                url?: string;
+                thumburl?: string;
+                width?: number;
+                height?: number;
+                mime?: string;
+              }>;
+            }
+          >;
+        };
+      };
+      const pages = Object.values(json.query?.pages || {});
+      const out: SearchCandidate[] = [];
+      for (const pg of pages) {
+        const info = pg.imageinfo?.[0];
+        if (!info?.url) continue;
+        if (!info.mime || !/^image\/(jpeg|jpg|png|webp)$/i.test(info.mime)) continue;
+        const w = Number(info.width || 0);
+        const h = Number(info.height || 0);
+        if (quality === 'ultra' && (w < 1100 || h < 800)) continue;
+        if ((quality === 'hd' || quality === 'studio') && (w < 750 || h < 550)) continue;
+        if (orientation === 'square' && w > 0 && h > 0 && Math.abs(w / h - 1) > 0.25) continue;
+        if (orientation === 'landscape' && w <= h) continue;
+        if (orientation === 'portrait' && h <= w) continue;
+
+        const cleanTitle = String(pg.title || 'Wikimedia Photo')
+          .replace(/^File:/i, '')
+          .replace(/\.[a-z0-9]+$/i, '')
+          .replace(/[_-]+/g, ' ');
+        if (proOnly && blockedRe.test(`${info.url} ${cleanTitle}`)) continue;
+
+        out.push({
+          id: `wiki-${out.length}-${cleanTitle.slice(0, 12)}`,
+          title: cleanTitle,
+          source: 'Wikimedia Commons',
+          domain: 'wikimedia.org',
+          imageUrl: info.url,
+          thumbUrl: info.thumburl || info.url,
+          width: w,
+          height: h,
+          score: w >= 1200 ? 75 : 60,
+          badge: w > 0 ? `${w}×${h} · HD` : 'Alta Definição',
+        });
+      }
+      return out;
+    } catch {
+      return [];
+    }
+  };
+
+  const [cdb, wikiMain] = await Promise.all([
+    fetchCocktailDbClient(),
+    fetchWikimediaClient(`drink ${shortName} cocktail`),
+  ]);
+  let wikiExtra: SearchCandidate[] = [];
+  if (cdb.length + wikiMain.length < 4) {
+    wikiExtra = await fetchWikimediaClient(`${shortName} drink`);
+  }
+
+  const seen = new Set<string>();
+  const combined: SearchCandidate[] = [];
+  for (const item of [...cdb, ...wikiMain, ...wikiExtra]) {
+    const key = item.imageUrl.split('?')[0].toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    combined.push(item);
+  }
+  return combined.sort((a, b) => b.score - a.score);
+}
+
 export const DrinkImageSearchModal: React.FC<{
   mode?: 'single' | 'catalog';
   initialQuery?: string;
@@ -161,18 +299,39 @@ export const DrinkImageSearchModal: React.FC<{
         proOnly: String(proOnly),
         enhance: String(enhanceQuery),
       });
-      const res = await fetch(`/api/image-search?${params.toString()}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      const json = (await res.json()) as { results?: SearchCandidate[]; error?: string };
-      if (!res.ok) {
-        setErr(json.error || 'Não foi possível pesquisar imagens agora.');
-        setResults([]);
-        return;
+
+      let serverUnavailable = false;
+      try {
+        const res = await fetch(`/api/image-search?${params.toString()}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const parsed = await parseJsonSafe<{ results?: SearchCandidate[]; error?: string }>(res);
+        if (!parsed.okJson || res.status === 404) {
+          serverUnavailable = true;
+        } else if (!res.ok) {
+          setErr(parsed.data?.error || 'Não foi possível pesquisar imagens agora.');
+          setResults([]);
+          return;
+        } else {
+          const list = Array.isArray(parsed.data?.results) ? parsed.data.results : [];
+          setResults(list);
+          if (!list.length) {
+            setErr('Nenhuma foto com esse filtro. Tente mudar para "Todas as resoluções" ou ajustar o nome.');
+          }
+          return;
+        }
+      } catch {
+        serverUnavailable = true;
       }
-      setResults(Array.isArray(json.results) ? json.results : []);
-      if (!json.results?.length) {
-        setErr('Nenhuma foto com esse filtro. Tente mudar para "Alta Definição Pro" ou ajustar o nome.');
+
+      if (serverUnavailable) {
+        const fallbackList = await searchClientFallbackImages(clean, quality, orientation, proOnly);
+        setResults(fallbackList);
+        if (!fallbackList.length) {
+          setErr(
+            'Nenhuma foto encontrada com esse filtro nesta hospedagem. Tente mudar o filtro para "Todas as resoluções", buscar um termo mais amplo ou usar "Enviar do aparelho".'
+          );
+        }
       }
     } catch (e) {
       setErr(e instanceof Error ? e.message : 'Erro de conexão com o servidor de busca.');
@@ -215,28 +374,67 @@ export const DrinkImageSearchModal: React.FC<{
     if (!token) {
       throw new Error('Pesquisa e download de imagens permitidos apenas no perfil ADM.');
     }
-    const res = await fetch('/api/image-fetch', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({ url: cand.imageUrl, recipeName: query }),
-    });
-    const json = (await res.json()) as {
-      ok?: boolean;
-      dataUrl?: string;
-      contentType?: string;
-      ext?: string;
-      error?: string;
-    };
-    if (!res.ok || !json.dataUrl) {
-      throw new Error(json.error || 'Falha ao baixar a foto selecionada.');
-    }
     const slugBase = activeRecipe?.name || query.replace(/^drink\s+/i, '');
     const slug = slugHandle(slugBase) || 'drink';
-    const file = dataUrlToFile(json.dataUrl, `${slug}.${json.ext || 'jpg'}`, json.contentType || 'image/jpeg');
-    return { file, dataUrl: json.dataUrl };
+
+    let proxyMissing = false;
+    try {
+      const res = await fetch('/api/image-fetch', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ url: cand.imageUrl, recipeName: query }),
+      });
+      const parsed = await parseJsonSafe<{
+        ok?: boolean;
+        dataUrl?: string;
+        contentType?: string;
+        ext?: string;
+        error?: string;
+      }>(res);
+
+      if (!parsed.okJson || res.status === 404) {
+        proxyMissing = true;
+      } else if (!res.ok || !parsed.data?.dataUrl) {
+        throw new Error(parsed.data?.error || 'Falha ao baixar a foto selecionada.');
+      } else {
+        const file = dataUrlToFile(
+          parsed.data.dataUrl,
+          `${slug}.${parsed.data.ext || 'jpg'}`,
+          parsed.data.contentType || 'image/jpeg'
+        );
+        return { file, dataUrl: parsed.data.dataUrl };
+      }
+    } catch (err) {
+      if (err instanceof Error && !/failed to fetch|network/i.test(err.message)) {
+        throw err;
+      }
+      proxyMissing = true;
+    }
+
+    if (proxyMissing) {
+      for (const candidateUrl of [cand.imageUrl, cand.thumbUrl].filter(Boolean)) {
+        try {
+          const directRes = await fetch(candidateUrl, { mode: 'cors' });
+          if (!directRes.ok) continue;
+          const blob = await directRes.blob();
+          const mime = (blob.type || 'image/jpeg').toLowerCase();
+          if (!mime.startsWith('image/') || mime.includes('svg')) continue;
+          const ext = mime.includes('png') ? 'png' : mime.includes('webp') ? 'webp' : 'jpg';
+          const file = new File([blob], `${slug}.${ext}`, { type: mime });
+          return { file, dataUrl: '' };
+        } catch {
+          // tenta próximo link
+        }
+      }
+      throw new Error(
+        'Este site bloqueou o download direto nesta hospedagem. Escolha uma foto do Wikimedia/TheCocktailDB ou clique em "Enviar do aparelho".'
+      );
+    }
+
+    throw new Error('Falha ao baixar a foto selecionada.');
   };
 
   const handleApplyImage = async (cand: SearchCandidate, autoAdvance = false) => {
