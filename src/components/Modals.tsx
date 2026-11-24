@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   allIngredientNames,
   CAT,
@@ -6,7 +6,14 @@ import {
   QR_DESIGN_TEMPLATES,
   ROLE_LABELS,
 } from '../lib/catalog';
-import { broadcastMenuUpdate, sb, writeBarSafe } from '../lib/supabase';
+import {
+  broadcastMenuUpdate,
+  saveRecipeImageGlobally,
+  sb,
+  uploadAndSaveRecipePhoto,
+  writeBarSafe,
+} from '../lib/supabase';
+import { submitRecipeForAudit } from '../lib/saas';
 import {
   applyBarTheme,
   buildUnifiedStudioPresets,
@@ -22,10 +29,14 @@ import {
   getMenuPresets,
   getMissingIngredientsForRecipe,
   getQrDesigns,
+  getRecipeAuditStatus,
+  getRecipeCreatorBrand,
   makeDrink,
   menuUrl,
   money,
   norm,
+  normalizeRecipeCategory,
+  normalizeRecipeIngredients,
   parseShakers,
 } from '../lib/utils';
 import type {
@@ -35,9 +46,11 @@ import type {
   Order,
   QrDesignConfig,
   Recipe,
+  StaffProfile,
   TableTab,
   UserCoords,
 } from '../types/meubar';
+import { DrinkImageSearchModal } from './DrinkImageSearchModal';
 import { QrPosterPreview } from './QrDesigner';
 import { ImageUploader, LocationPicker, RecipeTile } from './SharedUI';
 
@@ -254,6 +267,8 @@ export const EditBarModal: React.FC<{
           label="Logo"
           value={logoUrl}
           folder="logos"
+          entityId={`${bar.id}-logo`}
+          imagePreset="logo"
           onChange={setLogoUrl}
           onToast={onToast}
         />
@@ -261,6 +276,8 @@ export const EditBarModal: React.FC<{
           label="Banner"
           value={bannerUrl}
           folder="banners"
+          entityId={`${bar.id}-banner`}
+          imagePreset="banner"
           onChange={setBannerUrl}
           onToast={onToast}
         />
@@ -290,8 +307,12 @@ export const MakeDrinkModal: React.FC<{
   prices: Record<string, number>;
   orders?: Order[];
   tableTabs?: TableTab[];
+  userId?: string;
+  isPlatformAdmin?: boolean;
+  canSearchImages?: boolean;
   onClose: () => void;
   onOrderCreated: () => Promise<void>;
+  onRecipeUpdated?: (updated: Recipe) => void;
   onToast: (msg: string) => void;
 }> = ({
   recipe,
@@ -300,10 +321,15 @@ export const MakeDrinkModal: React.FC<{
   prices,
   orders = [],
   tableTabs = [],
+  userId,
+  isPlatformAdmin = false,
+  canSearchImages,
   onClose,
   onOrderCreated,
+  onRecipeUpdated,
   onToast,
 }) => {
+  const canWebSearch = Boolean(canSearchImages ?? isPlatformAdmin);
   const [who, setWho] = useState('');
   const [confirmedExistingKey, setConfirmedExistingKey] = useState('');
   const [selectedTableTabId, setSelectedTableTabId] = useState('');
@@ -311,6 +337,31 @@ export const MakeDrinkModal: React.FC<{
   const [qty, setQty] = useState(1);
   const [err, setErr] = useState('');
   const [sending, setSending] = useState(false);
+  const [showImageSearch, setShowImageSearch] = useState(false);
+  const [localImageUrl, setLocalImageUrl] = useState(recipe.image_url || '');
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
+  const photoUploadRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    setLocalImageUrl(recipe.image_url || '');
+  }, [recipe.id, recipe.image_url]);
+
+  const handleUploadLocalDrinkPhoto = async (file?: File | null) => {
+    if (!file) return;
+    setUploadingPhoto(true);
+    try {
+      const res = await uploadAndSaveRecipePhoto(recipe, file, userId);
+      if (!res.ok) {
+        onToast(res.error);
+        return;
+      }
+      setLocalImageUrl(res.url);
+      onRecipeUpdated?.(res.recipe);
+      onToast(`✓ Foto de "${recipe.name}" salva para todas as lojas!`);
+    } finally {
+      setUploadingPhoto(false);
+    }
+  };
 
   const missingSet = new Set(getMissingIngredientsForRecipe(recipe, items).map((x) => norm(x)));
   const canMake = missingSet.size === 0;
@@ -396,49 +447,111 @@ export const MakeDrinkModal: React.FC<{
     onClose();
   };
 
+  const displayCategory = normalizeRecipeCategory(recipe.category);
+  const normalizedIngredients = normalizeRecipeIngredients(recipe.ingredients).filter(
+    (i) => !i.n.startsWith('__')
+  );
+  const creatorBrand = getRecipeCreatorBrand(recipe);
+  const auditStatus = getRecipeAuditStatus(recipe);
+
   return (
     <div className="ov">
       <div
-        className={`hero c${Math.max(0, CATS.indexOf(recipe.category))}`}
-        style={recipe.image_url ? { backgroundImage: `url('${recipe.image_url}')` } : undefined}
+        className={`hero c${Math.max(0, CATS.indexOf(displayCategory))}`}
+        style={localImageUrl ? { backgroundImage: `url('${localImageUrl}')` } : undefined}
       >
-        {recipe.image_url ? null : '🍸'}
+        {localImageUrl ? null : '🍸'}
       </div>
       <div className="w">
-        <button type="button" className="b g sm" onClick={onClose}>
-          ← Voltar
-        </button>
-        <h1 className="mt-3.5">{recipe.name}</h1>
-        <p className="mu">
-          {recipe.category || 'Drink'} ·{' '}
+        <div className="row sp flex-wrap gap-2">
+          <button type="button" className="b g sm" onClick={onClose}>
+            ← Voltar
+          </button>
+          {(canWebSearch || isPlatformAdmin) && (
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                className="b g sm"
+                disabled={uploadingPhoto}
+                onClick={() => photoUploadRef.current?.click()}
+              >
+                {uploadingPhoto ? 'Otimizando…' : '📷 Enviar foto'}
+              </button>
+              <input
+                ref={photoUploadRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(e) => {
+                  void handleUploadLocalDrinkPhoto(e.target.files?.[0]);
+                  e.target.value = '';
+                }}
+              />
+              {canWebSearch && (
+                <button
+                  type="button"
+                  className="b g sm"
+                  onClick={() => setShowImageSearch(true)}
+                >
+                  🌐 {localImageUrl ? 'Trocar foto (Internet)' : 'Buscar foto na Internet'}
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+        <h1 className="mt-3.5 [text-wrap:balance]">{recipe.name}</h1>
+        <p className="mu mt-1">
+          {displayCategory || 'Drink'} ·{' '}
           {canMake ? (
-            <span className="text-[var(--ok)]">Você consegue fazer agora</span>
+            <span className="font-semibold text-[var(--ok)]">✓ Pronto com seu estoque</span>
           ) : (
-            <span className="warn-txt">Falta algo no estoque</span>
+            <span className="font-semibold text-[var(--dn)]">Falta algo no estoque</span>
           )}
         </p>
 
+        {(creatorBrand || auditStatus === 'pending' || auditStatus === 'rejected' || auditStatus === 'private') && (
+          <div className="flex flex-wrap gap-2 mt-2">
+            {creatorBrand && (
+              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-[var(--ac)]/15 text-[var(--ac)] border border-[var(--ac)]/35">
+                ✦ Criação de {creatorBrand}
+              </span>
+            )}
+            {auditStatus === 'pending' && (
+              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-500/15 text-amber-400 border border-amber-500/35">
+                ⏳ Aguardando auditoria da equipe
+              </span>
+            )}
+            {auditStatus === 'private' && (
+              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-[var(--s2)] text-[var(--mu)] border border-[var(--bd)]">
+                🔒 Uso exclusivo do seu bar
+              </span>
+            )}
+            {auditStatus === 'rejected' && (
+              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-[var(--dn)]/15 text-[var(--dn)] border border-[var(--dn)]/35">
+                ✕ Não publicado no catálogo geral{recipe.audit_note ? ` (${recipe.audit_note})` : ''}
+              </span>
+            )}
+          </div>
+        )}
+
         {(recipe.glass || recipe.technique || recipe.garnish) && (
-          <div className="meta flex gap-3 flex-wrap my-3">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 my-3.5">
             {recipe.glass && (
-              <div>
-                <span className="mu">Copo</span>
-                <br />
-                <b>{recipe.glass}</b>
+              <div className="bg-[var(--s2)] border border-[var(--bd)] rounded-xl px-3 py-2.5">
+                <div className="text-[11px] text-[var(--mu)]">Copo</div>
+                <div className="text-sm font-semibold mt-0.5">{recipe.glass}</div>
               </div>
             )}
             {recipe.technique && (
-              <div>
-                <span className="mu">Técnica</span>
-                <br />
-                <b>{recipe.technique}</b>
+              <div className="bg-[var(--s2)] border border-[var(--bd)] rounded-xl px-3 py-2.5">
+                <div className="text-[11px] text-[var(--mu)]">Técnica</div>
+                <div className="text-sm font-semibold mt-0.5">{recipe.technique}</div>
               </div>
             )}
             {recipe.garnish && (
-              <div>
-                <span className="mu">Decoração</span>
-                <br />
-                <b>{recipe.garnish}</b>
+              <div className="bg-[var(--s2)] border border-[var(--bd)] rounded-xl px-3 py-2.5">
+                <div className="text-[11px] text-[var(--mu)]">Guarnição</div>
+                <div className="text-sm font-semibold mt-0.5">{recipe.garnish}</div>
               </div>
             )}
           </div>
@@ -447,26 +560,28 @@ export const MakeDrinkModal: React.FC<{
         {recipe.description && <p className="desc">{recipe.description}</p>}
 
         <h2>Ingredientes</h2>
-        {(recipe.ingredients || []).map((i, idx) => {
-          const ok = !missingSet.has(norm(i.n));
-          return (
-            <div
-              key={`${i.n}-${idx}`}
-              className="row sp py-2 border-b border-white/10"
-            >
-              <span>{i.n}</span>
-              <span className="mu">
-                {i.q || ''}
-                {!ok && (
-                  <>
-                    {' · '}
-                    <span className="warn-txt">falta</span>
-                  </>
-                )}
-              </span>
-            </div>
-          );
-        })}
+        <div className="divide-y divide-[var(--bd)] border-y border-[var(--bd)] mt-2">
+          {normalizedIngredients.map((i, idx) => {
+            const ok = !missingSet.has(norm(i.n));
+            return (
+              <div
+                key={`${i.n}-${idx}`}
+                className="flex items-center justify-between gap-3 py-2.5 text-sm"
+              >
+                <span className="font-medium text-[var(--tx)]">{i.n}</span>
+                <span className="mu tabular-nums text-right">
+                  {i.q || 'a gosto'}
+                  {!ok && (
+                    <>
+                      {' · '}
+                      <span className="font-semibold text-[var(--dn)]">falta</span>
+                    </>
+                  )}
+                </span>
+              </div>
+            );
+          })}
+        </div>
 
         <h2 className="mt-4.5">Modo de preparo</h2>
         {stepsList.length > 0 ? (
@@ -617,6 +732,23 @@ export const MakeDrinkModal: React.FC<{
           {err && <p className="err">{err}</p>}
         </div>
       </div>
+
+      {canWebSearch && showImageSearch && (
+        <DrinkImageSearchModal
+          mode="single"
+          recipes={[recipe]}
+          initialRecipe={recipe}
+          initialQuery={recipe.name}
+          userId={userId}
+          onClose={() => setShowImageSearch(false)}
+          onSelectUrl={(newUrl) => setLocalImageUrl(newUrl)}
+          onRecipeUpdated={(updated) => {
+            if (updated.image_url) setLocalImageUrl(updated.image_url);
+            onRecipeUpdated?.(updated);
+          }}
+          onToast={onToast}
+        />
+      )}
     </div>
   );
 };
@@ -644,26 +776,35 @@ select json_build_object(
     select json_agg(json_build_object(
       'id', r.id, 'name', r.name, 'category', r.category, 'item_type', coalesce(r.item_type, 'drink'),
       'image_url', r.image_url, 'price', p.price, 'ingredients', r.ingredients,
-      'description', r.description, 'story', r.story, 'tags', r.tags
+      'description', r.description, 'story', r.story, 'tags', r.tags,
+      'author_nick', r.author_nick, 'creator_name', r.creator_name, 'audit_status', r.audit_status
     ) order by r.name)
     from recipes r
     left join bar_prices p on p.bar_id = b.id and p.recipe_id = r.id
-    where (r.is_public is not false or r.owner = b.owner or p.price is not null)
+    where (r.is_public = true or r.owner = b.owner)
       and (not exists (select 1 from unnest(coalesce(r.tags, '{}')) tg where tg like '__bar:%') or ('__bar:' || b.id::text) = any(coalesce(r.tags, '{}')))
       and (lower(coalesce(b.kind, '')) in ('home', 'casa') or p.price is not null)
       and not exists (
         select 1 from jsonb_array_elements(coalesce(r.ingredients, '[]'::jsonb)) i
-        where trim(coalesce(i->>'n', '')) <> ''
-          and lower(unaccent(trim(i->>'n'))) not in ('gelo', 'agua', 'agua gelada', 'agua filtrada', 'agua mineral')
-          and lower(unaccent(trim(i->>'n'))) not like 'gelo %'
+        where trim(coalesce(nullif(i->>'n', ''), nullif(i->>'name', ''), nullif(i->>'nome', ''), nullif(i->>'item', ''), '')) <> ''
+          and lower(unaccent(trim(coalesce(nullif(i->>'n', ''), nullif(i->>'name', ''), nullif(i->>'nome', ''), nullif(i->>'item', ''), '')))) not in ('gelo', 'agua', 'agua gelada', 'agua filtrada', 'agua mineral')
+          and lower(unaccent(trim(coalesce(nullif(i->>'n', ''), nullif(i->>'name', ''), nullif(i->>'nome', ''), nullif(i->>'item', ''), '')))) not like 'gelo %'
           and not exists (
             select 1 from bar_items bi where bi.bar_id = b.id and bi.in_stock
               and (
-                lower(unaccent(trim(bi.name))) = lower(unaccent(trim(i->>'n')))
-                or lower(unaccent(trim(bi.name))) like lower(unaccent(trim(i->>'n'))) || ' %'
-                or lower(unaccent(trim(bi.name))) like lower(unaccent(trim(i->>'n'))) || '-%'
-                or lower(unaccent(trim(bi.name))) like lower(unaccent(trim(i->>'n'))) || '/%'
-                or lower(unaccent(trim(bi.name))) like lower(unaccent(trim(i->>'n'))) || '(%'
+                lower(unaccent(trim(bi.name))) = lower(unaccent(trim(coalesce(nullif(i->>'n', ''), nullif(i->>'name', ''), nullif(i->>'nome', ''), nullif(i->>'item', ''), ''))))
+                or lower(unaccent(trim(bi.name))) like lower(unaccent(trim(coalesce(nullif(i->>'n', ''), nullif(i->>'name', ''), nullif(i->>'nome', ''), nullif(i->>'item', ''), '')))) || ' %'
+                or lower(unaccent(trim(bi.name))) like lower(unaccent(trim(coalesce(nullif(i->>'n', ''), nullif(i->>'name', ''), nullif(i->>'nome', ''), nullif(i->>'item', ''), '')))) || '-%'
+                or lower(unaccent(trim(bi.name))) like lower(unaccent(trim(coalesce(nullif(i->>'n', ''), nullif(i->>'name', ''), nullif(i->>'nome', ''), nullif(i->>'item', ''), '')))) || '/%'
+                or lower(unaccent(trim(bi.name))) like lower(unaccent(trim(coalesce(nullif(i->>'n', ''), nullif(i->>'name', ''), nullif(i->>'nome', ''), nullif(i->>'item', ''), '')))) || '(%'
+                or (
+                  lower(unaccent(trim(coalesce(nullif(i->>'n', ''), nullif(i->>'name', ''), nullif(i->>'nome', ''), nullif(i->>'item', ''), '')))) = 'xarope de acucar'
+                  and lower(unaccent(trim(bi.name))) like 'acucar%'
+                )
+                or (
+                  lower(unaccent(trim(coalesce(nullif(i->>'n', ''), nullif(i->>'name', ''), nullif(i->>'nome', ''), nullif(i->>'item', ''), '')))) = 'acucar'
+                  and lower(unaccent(trim(bi.name))) in ('xarope de acucar', 'xarope simples')
+                )
               )
           )
       )
@@ -1406,26 +1547,63 @@ export const CreateDrinkModal: React.FC<{
   editExisting: boolean;
   recipes: Recipe[];
   userId?: string;
+  isPlatformAdmin?: boolean;
+  canSearchImages?: boolean;
+  barId?: string | null;
+  barName?: string | null;
+  creatorDefaultName?: string;
+  userEmail?: string | null;
   onRecipeSaved: (recipe: Recipe) => void;
+  onAuditSubmitted?: (info: { recipeId: string; recipeName: string; creatorName: string }) => void;
   onClose: () => void;
   onToast: (msg: string) => void;
-}> = ({ editExisting, recipes, userId, onRecipeSaved, onClose, onToast }) => {
+}> = ({
+  editExisting,
+  recipes,
+  userId,
+  isPlatformAdmin = false,
+  canSearchImages,
+  barId,
+  barName,
+  creatorDefaultName = '',
+  userEmail,
+  onRecipeSaved,
+  onAuditSubmitted,
+  onClose,
+  onToast,
+}) => {
+  const canEditCatalog = Boolean(isPlatformAdmin && editExisting);
+  const canWebSearch = Boolean(canSearchImages ?? isPlatformAdmin);
   const ingOptions = allIngredientNames();
   const [selectedId, setSelectedId] = useState('');
   const [name, setName] = useState('');
-  const [category, setCategory] = useState(CATS[0]);
+  const [category, setCategory] = useState('Autorais');
+  const [creatorBrand, setCreatorBrand] = useState(
+    creatorDefaultName && norm(creatorDefaultName) !== 'meu bar' ? creatorDefaultName : ''
+  );
+  const [glass, setGlass] = useState('');
+  const [technique, setTechnique] = useState('');
+  const [garnish, setGarnish] = useState('');
+  const [description, setDescription] = useState('');
   const [imageUrl, setImageUrl] = useState('');
   const [ingredients, setIngredients] = useState<{ n: string; q: string }[]>([{ n: '', q: '' }]);
   const [prep, setPrep] = useState('');
   const [story, setStory] = useState('');
+  const [visibilityMode, setVisibilityMode] = useState<'private' | 'pending'>('private');
   const [err, setErr] = useState('');
   const [saving, setSaving] = useState(false);
 
   const handlePickExisting = (id: string) => {
+    if (!canEditCatalog) return;
     setSelectedId(id);
     if (!id) {
       setName('');
       setCategory(CATS[0]);
+      setCreatorBrand('');
+      setGlass('');
+      setTechnique('');
+      setGarnish('');
+      setDescription('');
       setImageUrl('');
       setIngredients([{ n: '', q: '' }]);
       setPrep('');
@@ -1435,11 +1613,17 @@ export const CreateDrinkModal: React.FC<{
     const rec = recipes.find((x) => x.id === id);
     if (!rec) return;
     setName(rec.name || '');
-    setCategory(rec.category || CATS[0]);
+    setCategory(normalizeRecipeCategory(rec.category) || CATS[0]);
+    setCreatorBrand(getRecipeCreatorBrand(rec) || '');
+    setGlass(rec.glass || '');
+    setTechnique(rec.technique || '');
+    setGarnish(rec.garnish || '');
+    setDescription(rec.description || '');
     setImageUrl(rec.image_url || '');
+    const normIngs = normalizeRecipeIngredients(rec.ingredients);
     setIngredients(
-      rec.ingredients?.length
-        ? rec.ingredients.map((i) => ({ n: i.n || '', q: i.q || '' }))
+      normIngs.length
+        ? normIngs.map((i) => ({ n: i.n || '', q: i.q || '' }))
         : [{ n: '', q: '' }]
     );
     setPrep(rec.instructions || rec.steps || '');
@@ -1453,6 +1637,11 @@ export const CreateDrinkModal: React.FC<{
       setErr('Digite o nome do drink.');
       return;
     }
+    const cleanCreator = creatorBrand.trim();
+    if (!isPlatformAdmin && cleanCreator.length < 2) {
+      setErr('Informe o nome do criador / marca do drink.');
+      return;
+    }
     const ingLines = ingredients
       .map((i) => ({ n: i.n.trim(), q: i.q.trim() }))
       .filter((i) => i.n);
@@ -1462,37 +1651,116 @@ export const CreateDrinkModal: React.FC<{
     }
 
     setSaving(true);
+
+    const existingRec = selectedId ? recipes.find((r) => r.id === selectedId) : undefined;
+    const baseTags = (Array.isArray(existingRec?.tags) ? existingRec.tags : []).filter(
+      (t) =>
+        typeof t === 'string' &&
+        !t.startsWith('__bar:') &&
+        !t.startsWith('__audit:') &&
+        !t.startsWith('__creator:')
+    );
+
+    const isSubmittingPublic = !isPlatformAdmin && visibilityMode === 'pending';
+    const nextTags = [...baseTags];
+    if (!isPlatformAdmin && barId) {
+      nextTags.push(`__bar:${barId}`);
+    }
+    if (!isPlatformAdmin) {
+      nextTags.push(`__audit:${visibilityMode}`);
+    } else if (existingRec) {
+      nextTags.push(`__audit:${getRecipeAuditStatus(existingRec)}`);
+    } else {
+      nextTags.push('__audit:approved');
+    }
+    if (cleanCreator) {
+      nextTags.push(`__creator:${cleanCreator}`);
+    }
+
     const payload: Record<string, unknown> = {
       name: nm,
       category,
-      image_url: imageUrl.trim() || null,
+      item_type: 'drink',
+      image_url: isPlatformAdmin ? imageUrl.trim() || null : null,
       ingredients: ingLines,
       steps: prep.trim() || '',
       instructions: prep.trim() || null,
+      description: description.trim() || null,
       story: story.trim() || null,
-      is_public: true,
+      glass: glass.trim() || null,
+      technique: technique.trim() || null,
+      garnish: garnish.trim() || null,
+      author_nick: cleanCreator || (isPlatformAdmin ? null : creatorDefaultName || barName || null),
+      creator_name: cleanCreator || null,
+      tags: nextTags,
+      is_public: isPlatformAdmin ? true : false,
+      verified: isPlatformAdmin ? true : false,
+      audit_status: isPlatformAdmin ? 'approved' : visibilityMode,
       ...(selectedId ? {} : { owner: userId || null }),
     };
 
-    let r = selectedId
-      ? await sb.from('recipes').update(payload).eq('id', selectedId).select().single()
-      : await sb.from('recipes').insert(payload).select().single();
+    const optionalCols = [
+      'instructions',
+      'description',
+      'glass',
+      'technique',
+      'garnish',
+      'author_nick',
+      'creator_name',
+      'audit_status',
+      'verified',
+      'item_type',
+    ];
 
-    if (r.error && String(r.error.message || '').includes('instructions')) {
-      delete payload.instructions;
-      r = selectedId
+    let r =
+      canEditCatalog && selectedId
         ? await sb.from('recipes').update(payload).eq('id', selectedId).select().single()
         : await sb.from('recipes').insert(payload).select().single();
+
+    for (let attempt = 0; attempt < optionalCols.length && r.error; attempt++) {
+      const msg = String(r.error.message || '');
+      const col = optionalCols.find((c) => c in payload && msg.includes(c));
+      if (!col) break;
+      delete payload[col];
+      r =
+        canEditCatalog && selectedId
+          ? await sb.from('recipes').update(payload).eq('id', selectedId).select().single()
+          : await sb.from('recipes').insert(payload).select().single();
     }
 
-    setSaving(false);
     if (r.error) {
+      setSaving(false);
       setErr(r.error.message);
       return;
     }
-    if (r.data) {
-      onRecipeSaved(r.data as Recipe);
-      onToast('Receita salva!');
+
+    const saved = r.data as Recipe;
+    if (saved && isSubmittingPublic) {
+      await submitRecipeForAudit({
+        recipeId: saved.id,
+        recipeName: saved.name,
+        creatorName: cleanCreator || creatorDefaultName || barName || 'Bartender',
+        barName,
+        userId,
+        userEmail,
+      });
+      onAuditSubmitted?.({
+        recipeId: saved.id,
+        recipeName: saved.name,
+        creatorName: cleanCreator || creatorDefaultName || 'Bartender',
+      });
+    }
+
+    setSaving(false);
+    if (saved) {
+      onRecipeSaved(saved);
+      if (isPlatformAdmin) {
+        onToast('Receita salva no catálogo!');
+      } else if (isSubmittingPublic) {
+        onToast('Receita enviada! Aguardando auditoria da equipe para publicação.');
+      } else {
+        onToast('Drink autoral salvo apenas para o seu bar!');
+      }
       onClose();
     }
   };
@@ -1503,9 +1771,16 @@ export const CreateDrinkModal: React.FC<{
         <button type="button" className="b g sm" onClick={onClose}>
           ← Voltar
         </button>
-        <h1 className="mt-3.5">{editExisting ? 'Editar / Criar receita' : 'Criar drink'}</h1>
+        <h1 className="mt-3.5">
+          {canEditCatalog ? 'Editar / Criar receita (ADM)' : 'Novo drink autoral'}
+        </h1>
+        {!isPlatformAdmin && (
+          <p className="mu text-xs mt-1">
+            Crie sua receita autoral com sua assinatura. As fotos oficiais e alterações do catálogo global são gerenciadas pela equipe ADM.
+          </p>
+        )}
 
-        {editExisting && (
+        {canEditCatalog && (
           <>
             <label>Escolha uma receita para editar ou deixe em branco para nova</label>
             <select value={selectedId} onChange={(e) => handlePickExisting(e.target.value)}>
@@ -1519,11 +1794,21 @@ export const CreateDrinkModal: React.FC<{
           </>
         )}
 
-        <label>Nome do drink</label>
+        <label>Nome do drink *</label>
         <input
           value={name}
           onChange={(e) => setName(e.target.value)}
           placeholder="Ex: Gin Tônica de Hibisco"
+        />
+
+        <label>
+          {isPlatformAdmin ? 'Marca / Nome do criador (opcional)' : 'Seu nome / Marca do criador *'}
+        </label>
+        <input
+          value={creatorBrand}
+          onChange={(e) => setCreatorBrand(e.target.value)}
+          placeholder="Ex: Lucas Mixology · Bar do Centro"
+          maxLength={60}
         />
 
         <label>Categoria</label>
@@ -1535,16 +1820,102 @@ export const CreateDrinkModal: React.FC<{
           ))}
         </select>
 
-        <ImageUploader
-          label="Foto do drink (câmera ou galeria)"
-          value={imageUrl}
-          folder="recipes"
-          userId={userId}
-          onChange={setImageUrl}
-          onToast={onToast}
-        />
+        {isPlatformAdmin && (
+          <ImageUploader
+            label={
+              canWebSearch
+                ? 'Foto do drink (câmera, galeria ou Internet)'
+                : 'Foto do drink (câmera ou galeria)'
+            }
+            value={imageUrl}
+            folder="recipes"
+            entityId={selectedId ? `drink-${selectedId}` : undefined}
+            imagePreset="recipe"
+            userId={userId}
+            defaultSearchQuery={name}
+            allowWebSearch={canWebSearch}
+            onChange={(nextUrl) => {
+              setImageUrl(nextUrl);
+              if (canEditCatalog && selectedId && nextUrl.trim()) {
+                const targetRec = recipes.find((r) => r.id === selectedId);
+                if (targetRec) {
+                  void saveRecipeImageGlobally(targetRec, nextUrl.trim()).then((res) => {
+                    if (res.ok) {
+                      onRecipeSaved(res.recipe);
+                      onToast(`✓ Foto de "${res.recipe.name}" salva para todas as lojas!`);
+                    }
+                  });
+                }
+              }
+            }}
+            onToast={onToast}
+          />
+        )}
 
-        <label>Ingredientes</label>
+        {!isPlatformAdmin && (
+          <div className="panel mt-3 space-y-2 !border-[var(--ac)]/35">
+            <label className="!mt-0 font-semibold">Onde este drink deve aparecer?</label>
+            <label className="!mt-1 flex items-start gap-2.5 p-2.5 rounded-xl border border-[var(--bd)] bg-[var(--s1)] cursor-pointer">
+              <input
+                type="radio"
+                name="recipeVisibilityMode"
+                checked={visibilityMode === 'private'}
+                onChange={() => setVisibilityMode('private')}
+                className="!w-auto !mt-0.5"
+              />
+              <span className="text-xs leading-snug">
+                <b className="block text-sm">🔒 Usar somente no meu bar</b>
+                <span className="mu">
+                  Fica ativo imediatamente só para este bar, sem enviar para o catálogo geral.
+                </span>
+              </span>
+            </label>
+            <label className="!mt-1 flex items-start gap-2.5 p-2.5 rounded-xl border border-[var(--bd)] bg-[var(--s1)] cursor-pointer">
+              <input
+                type="radio"
+                name="recipeVisibilityMode"
+                checked={visibilityMode === 'pending'}
+                onChange={() => setVisibilityMode('pending')}
+                className="!w-auto !mt-0.5"
+              />
+              <span className="text-xs leading-snug">
+                <b className="block text-sm">🌐 Publicar no catálogo geral (todos os bares)</b>
+                <span className="mu">
+                  Vai para auditoria da equipe. Após aprovação, será publicado com seu nome/marca dentro do drink e você será notificado.
+                </span>
+              </span>
+            </label>
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+          <div>
+            <label>Copo / Taça</label>
+            <input
+              value={glass}
+              onChange={(e) => setGlass(e.target.value)}
+              placeholder="Ex: Copo alto"
+            />
+          </div>
+          <div>
+            <label>Técnica</label>
+            <input
+              value={technique}
+              onChange={(e) => setTechnique(e.target.value)}
+              placeholder="Ex: Batido / Montado"
+            />
+          </div>
+          <div>
+            <label>Guarnição</label>
+            <input
+              value={garnish}
+              onChange={(e) => setGarnish(e.target.value)}
+              placeholder="Ex: Ramo de hortelã"
+            />
+          </div>
+        </div>
+
+        <label>Ingredientes *</label>
         <div>
           {ingredients.map((ing, idx) => (
             <div key={idx} className="row mt-2">
@@ -1594,6 +1965,13 @@ export const CreateDrinkModal: React.FC<{
         </button>
         <p className="mu">Nome pela lista (obrigatório). Quantidade livre (ex: 50 ml).</p>
 
+        <label>Resumo / Descrição curta</label>
+        <input
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          placeholder="Ex: Cítrico e aromático com toque floral"
+        />
+
         <label>Modo de preparo</label>
         <textarea
           value={prep}
@@ -1614,10 +1992,220 @@ export const CreateDrinkModal: React.FC<{
           disabled={saving}
           onClick={() => void handleSave()}
         >
-          {saving ? 'Salvando...' : 'Salvar receita'}
+          {saving
+            ? 'Salvando...'
+            : !isPlatformAdmin && visibilityMode === 'pending'
+              ? '📤 Enviar para auditoria e publicar'
+              : 'Salvar receita'}
         </button>
         {err && <p className="err">{err}</p>}
       </div>
     </div>
   );
 };
+
+export const EditProfileModal: React.FC<{
+  profile: StaffProfile;
+  userId: string;
+  userEmail?: string | null;
+  userCoords: UserCoords | null;
+  onDetectCoords?: () => Promise<UserCoords | null>;
+  onSaved: (profile: StaffProfile) => void;
+  onOpenFullResume?: () => void;
+  onClose: () => void;
+  onToast: (msg: string) => void;
+}> = ({
+  profile,
+  userId,
+  userEmail,
+  userCoords,
+  onDetectCoords,
+  onSaved,
+  onOpenFullResume,
+  onClose,
+  onToast,
+}) => {
+  const [displayName, setDisplayName] = useState(profile.display_name || '');
+  const [avatarUrl, setAvatarUrl] = useState(profile.avatar_url || '');
+  const [location, setLocation] = useState(profile.location || '');
+  const [bio, setBio] = useState(profile.bio || '');
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+
+  useEffect(() => {
+    setDisplayName(profile.display_name || '');
+    setAvatarUrl(profile.avatar_url || '');
+    setLocation(profile.location || '');
+    setBio(profile.bio || '');
+  }, [profile.user_id, profile.display_name, profile.avatar_url, profile.location, profile.bio]);
+
+  const initialChar = (displayName.trim() || userEmail || 'U').charAt(0).toUpperCase();
+
+  const handleSave = async () => {
+    const cleanName = displayName.trim();
+    if (cleanName.length < 2) {
+      setErr('Digite seu nome completo ou apelido (mínimo 2 letras).');
+      return;
+    }
+    setErr('');
+    setSaving(true);
+    const cleanAvatar = avatarUrl.trim() || null;
+    const cleanLocation = location.trim() || null;
+    const cleanBio = bio.trim() || null;
+
+    try {
+      const payload = {
+        user_id: userId,
+        display_name: cleanName,
+        avatar_url: cleanAvatar,
+        resume_pdf_url: profile.resume_pdf_url || null,
+        location: cleanLocation,
+        work_mode: profile.work_mode || 'ambos',
+        experience_years: profile.experience_years ?? 0,
+        availability: profile.availability || null,
+        skills: profile.skills || [],
+        bio: cleanBio,
+        updated_at: new Date().toISOString(),
+      };
+
+      const res = await sb
+        .from('staff_profiles')
+        .upsert(payload, { onConflict: 'user_id' })
+        .select()
+        .single();
+
+      if (res.error) {
+        setErr(res.error.message);
+        setSaving(false);
+        return;
+      }
+
+      // Espelha também nos metadados do Auth para novos logins já carregarem seu nome
+      void sb.auth.updateUser({
+        data: {
+          display_name: cleanName,
+          full_name: cleanName,
+          avatar_url: cleanAvatar,
+        },
+      });
+
+      const saved = (res.data as StaffProfile) || {
+        ...profile,
+        display_name: cleanName,
+        avatar_url: cleanAvatar,
+        location: cleanLocation,
+        bio: cleanBio,
+      };
+      onSaved(saved);
+      onToast('Perfil atualizado com sucesso!');
+      onClose();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Erro ao salvar perfil.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="ov" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="row sp items-center mb-3">
+          <h3 className="!m-0">👤 Meu Perfil</h3>
+          <button type="button" className="b g sm" onClick={onClose}>
+            ✕
+          </button>
+        </div>
+
+        <div className="flex items-center gap-3 p-3 rounded-xl border border-[var(--bd)] bg-[var(--bg2)] mb-3">
+          {avatarUrl.trim() ? (
+            <img
+              src={avatarUrl.trim()}
+              alt={displayName || 'Perfil'}
+              className="w-14 h-14 rounded-full object-cover border border-[var(--ac)]/50 shrink-0"
+            />
+          ) : (
+            <div className="w-14 h-14 rounded-full bg-[var(--ac)]/20 border border-[var(--ac)]/50 text-[var(--ac)] font-extrabold text-xl flex items-center justify-center shrink-0">
+              {initialChar}
+            </div>
+          )}
+          <div className="min-w-0 flex-1">
+            <div className="font-bold text-[15px] truncate">
+              {displayName.trim() || 'Sem nome definido'}
+            </div>
+            {userEmail && (
+              <div className="text-xs text-[var(--mut)] truncate">{userEmail}</div>
+            )}
+            <div className="text-[11px] text-[var(--mut)] mt-0.5">
+              Esse nome aparece no painel, pedidos, caixa e suporte.
+            </div>
+          </div>
+        </div>
+
+        <label>Nome de exibição *</label>
+        <input
+          value={displayName}
+          onChange={(e) => setDisplayName(e.target.value)}
+          placeholder="Ex: Lucas Campos"
+          maxLength={60}
+          autoFocus
+        />
+
+        <ImageUploader
+          label="Foto de perfil (opcional)"
+          value={avatarUrl}
+          folder="avatars"
+          entityId="profile"
+          imagePreset="avatar"
+          userId={userId}
+          onChange={setAvatarUrl}
+          onToast={onToast}
+        />
+
+        <LocationPicker
+          label="Cidade / Bairro (opcional)"
+          placeholder="Ex: Asa Norte, Brasília, DF"
+          value={location}
+          userCoords={userCoords}
+          showGeoButton={Boolean(onDetectCoords)}
+          onDetectCoords={onDetectCoords}
+          onToast={onToast}
+          onChange={(val) => setLocation(val)}
+        />
+
+        <label>Função ou apresentação curta (opcional)</label>
+        <input
+          value={bio}
+          onChange={(e) => setBio(e.target.value)}
+          placeholder="Ex: Sócio-proprietário / Bartender"
+          maxLength={140}
+        />
+
+        {err && <p className="err">{err}</p>}
+
+        <div className="flex flex-wrap gap-2 mt-4">
+          <button
+            type="button"
+            className="b ok flex-1 min-w-[140px]"
+            disabled={saving}
+            onClick={() => void handleSave()}
+          >
+            {saving ? 'Salvando...' : '💾 Salvar perfil'}
+          </button>
+          {onOpenFullResume && (
+            <button
+              type="button"
+              className="b g sm"
+              onClick={() => {
+                onClose();
+                onOpenFullResume();
+              }}
+            >
+              📄 Currículo completo
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+

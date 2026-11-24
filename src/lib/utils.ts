@@ -392,34 +392,415 @@ export function getRecipeBarScope(r: Partial<Recipe>): string | null {
   return found ? found.slice(6) : null;
 }
 
+export type RecipeAuditStatus = 'private' | 'pending' | 'approved' | 'rejected';
+
+export function getRecipeAuditStatus(r: Partial<Recipe>): RecipeAuditStatus {
+  const direct = String(r.audit_status || '').trim().toLowerCase();
+  if (direct === 'private' || direct === 'pending' || direct === 'approved' || direct === 'rejected') {
+    return direct;
+  }
+  const tags = Array.isArray(r.tags) ? r.tags : [];
+  const tagAudit = tags.find((t) => typeof t === 'string' && t.startsWith('__audit:'));
+  if (tagAudit) {
+    const val = tagAudit.slice(8).trim().toLowerCase();
+    if (val === 'private' || val === 'pending' || val === 'approved' || val === 'rejected') {
+      return val;
+    }
+  }
+  if (r.is_public === false) return 'private';
+  return 'approved';
+}
+
+export function getRecipeCreatorBrand(r: Partial<Recipe>): string | null {
+  const explicit = String(r.creator_name || '').trim();
+  if (explicit && norm(explicit) !== 'meu bar') return explicit;
+  const tags = Array.isArray(r.tags) ? r.tags : [];
+  const tagCreator = tags.find((t) => typeof t === 'string' && t.startsWith('__creator:'));
+  if (tagCreator) {
+    const val = tagCreator.slice(10).trim();
+    if (val && norm(val) !== 'meu bar') return val;
+  }
+  const nick = String(r.author_nick || '').trim();
+  if (nick && norm(nick) !== 'meu bar') return nick;
+  return null;
+}
+
 export function isRecipeManuallyUnavailable(r: Partial<Recipe>): boolean {
   const tags = Array.isArray(r.tags) ? r.tags : [];
   if (tags.includes('__avail:0')) return true;
-  if ((r.ingredients || []).some((i) => i?.n === '__INDISPONIVEL__')) return true;
+  if (Array.isArray(r.ingredients) && r.ingredients.some((i) => i && i.n === '__INDISPONIVEL__')) return true;
   return false;
+}
+
+export function normalizeRecipeCategory(cat?: string | null): string {
+  const raw = String(cat || '').trim();
+  if (!raw) return 'Refrescantes';
+  const k = norm(raw);
+  if (k === 'tiki' || k === 'tropicais' || k === 'tiki & tropicais') return 'Tiki & Tropicais';
+  if (k === 'caipirinhas' || k === 'brasileirissimos') return 'Brasileiríssimos';
+  if (k === 'classicos') return 'Clássicos';
+  if (k === 'autorais') return 'Autorais';
+  if (k === 'refrescantes') return 'Refrescantes';
+  if (k === 'citricos') return 'Cítricos';
+  if (k === 'aperitivos') return 'Aperitivos';
+  if (k === 'fortes') return 'Fortes';
+  if (k === 'doces & frutados' || k === 'doces e frutados') return 'Doces & Frutados';
+  if (k === 'frozen') return 'Frozen';
+  if (k === 'energeticos') return 'Energéticos';
+  if (k === 'shots' || k === 'shot') return 'Shots';
+  if (k === 'jarras' || k === 'jarra') return 'Jarras';
+  if (k === 'sem alcool' || k === 'zero alcool' || k === 'mocktails') return 'Sem álcool';
+  if (k === 'gin' || k === 'rum' || k === 'vodka' || k === 'whisky') return 'Clássicos';
+  return raw;
+}
+
+export function canonicalIngredientName(raw: string | null | undefined): string {
+  const original = String(raw || '').trim();
+  if (!original) return '';
+  if (original.startsWith('__')) return original;
+  const k = norm(original);
+  if (!k) return '';
+
+  // Xaropes / sucos / refrigerantes / destilados com variantes embutidas no nome
+  if (/xarope de menta|essencia de menta/.test(k) || /^menta\b/.test(k)) return 'Xarope de hortelã';
+  if (/xarope simples|simple syrup/.test(k)) return 'Xarope de açúcar';
+  if (/^groselha\b/.test(k)) return 'Xarope de groselha';
+  if (/^angostura(\b| )/.test(k)) return 'Angostura';
+  if (/^(licor de amendoa|amaretto)\b/.test(k)) return 'Licor de amêndoa (Amaretto)';
+  if (/^(licor de ervas|jagermeister)\b/.test(k)) return 'Licor de ervas (Jägermeister)';
+  if (/^(licor de creme|baileys)\b/.test(k)) return 'Licor de creme (Baileys)';
+  if (/^gin\b/.test(k)) return 'Gin';
+  if (/^vodka\b/.test(k)) return 'Vodka';
+  if (/^rum\b/.test(k)) return 'Rum';
+  if (/^cachaca\b/.test(k)) return 'Cachaça';
+  if (/^(whisky|whiskey|bourbon|scotch)\b/.test(k)) return 'Whisky';
+  if (/^tequila\b/.test(k)) return 'Tequila';
+  if (/^mezcal\b/.test(k)) return 'Mezcal';
+  if (/^conhaque\b/.test(k)) return 'Conhaque';
+  if (/^vermute\b/.test(k)) return 'Vermute';
+  if (/^espumante\b/.test(k)) return 'Espumante';
+  if (/^prosecco\b/.test(k)) return 'Prosecco';
+  if (/^cerveja\b/.test(k)) return 'Cerveja';
+  if (/^limao\b/.test(k)) return 'Limão';
+  if (/^laranja\b/.test(k)) return 'Laranja';
+  if (/^acucar\b/.test(k)) return 'Açúcar';
+  if (/^canela\b/.test(k)) return 'Canela';
+  if (/^pimenta\b/.test(k)) return 'Pimenta';
+  if (/^agua tonica\b|^tonica\b/.test(k)) return 'Água tônica';
+  if (/^(club soda|agua gaseificada|agua com gas)\b/.test(k)) return 'Água com gás';
+  if (/^(soda limonada|sprite|h2oh|refrigerante de limao)\b/.test(k)) return 'Refrigerante de limão';
+  if (/^energetico\b/.test(k)) return 'Energético';
+  if (/^curacau blue\b/.test(k)) return 'Curaçau Blue';
+  if (/^creme de cassis$/.test(k)) return 'Licor de cassis';
+  if (/^maracuja\b/.test(k)) return 'Maracujá';
+  if (/^hortela\b/.test(k)) return 'Hortelã';
+  if (/^gelo\b/.test(k)) return 'Gelo';
+
+  // Marcas ou ordem invertida (ex: "Baly Gin", "51 Cachaça", "Tônica Schweppes", "Red Bull")
+  // Só aplica se não for derivado (xarope, licor, suco, calda, essência, bitter, chá, etc.)
+  const isDerivative = /^(xarope|licor|suco|calda|essencia|bitter|agua|cha|cerveja|creme|leite|refrigerante|soda|geleia|pure|extrato|flor|oleo)\b/.test(k);
+  if (!isDerivative) {
+    if (/\bcachaca\b|\baguardente\b|\b(ypioca|sagatiba|velho barreiro|pitu|salinas|seleta)\b/.test(k)) return 'Cachaça';
+    if (/\bgin\b/.test(k) && !/\bginger\b/.test(k)) return 'Gin';
+    if (/\bvodka\b|\b(kriskof|absolut|smirnoff|orloff|skyy|ketel|ciroc|belvedere|grey goose)\b/.test(k)) return 'Vodka';
+    if (/\brum\b|\b(montilla|bacardi|havana club|captain morgan|appleton)\b/.test(k)) return 'Rum';
+    if (/\b(whisky|whiskey|bourbon|scotch)\b/.test(k)) return 'Whisky';
+    if (/\btequila\b/.test(k)) return 'Tequila';
+    if (/\bconhaque\b|\b(dreher|domecq)\b/.test(k)) return 'Conhaque';
+    if (/\bvermute\b|\bvermouth\b/.test(k)) return 'Vermute';
+    if (/\benergetico\b|\b(red bull|monster|tnt|fusion)\b/.test(k)) return 'Energético';
+    if (/\btonica\b/.test(k)) return 'Água tônica';
+  }
+  return original;
+}
+
+export function canonicalIngredientKey(raw: string | null | undefined): string {
+  return norm(canonicalIngredientName(raw));
+}
+
+export function normalizeIngredientObject(raw: unknown): { n: string; q: string } | null {
+  if (raw == null) return null;
+  if (typeof raw === 'string') {
+    const clean = canonicalIngredientName(raw);
+    return clean ? { n: clean, q: '' } : null;
+  }
+  if (typeof raw !== 'object') return null;
+  const obj = raw as Record<string, unknown>;
+  const rawName = String(
+    obj.n ?? obj.name ?? obj.nome ?? obj.item ?? obj.ingredient ?? obj.ingrediente ?? ''
+  ).trim();
+  if (!rawName) return null;
+  if (rawName.startsWith('__')) {
+    return { n: rawName, q: String(obj.q ?? '').trim() };
+  }
+
+  const canonical = canonicalIngredientName(rawName);
+  let qStr = String(obj.q ?? '').trim();
+  if (!qStr) {
+    const qtyVal = obj.qty ?? obj.quantity ?? obj.quantidade ?? obj.amount ?? obj.ml ?? '';
+    const unitVal = String(obj.unit ?? obj.unidade ?? (obj.ml != null ? 'ml' : '')).trim();
+    const variantVal = String(obj.variant ?? obj.variante ?? '').trim();
+    const parts: string[] = [];
+    if (qtyVal !== '' && qtyVal != null) parts.push(String(qtyVal).trim());
+    if (unitVal) parts.push(unitVal);
+    qStr = parts.join(' ');
+    if (variantVal) qStr = qStr ? `${qStr} (${variantVal})` : variantVal;
+  }
+  // Preserva informação de variante do nome original (ex: "Cachaça Ouro" -> q ganha "(Ouro)" se não houver)
+  if (
+    canonical &&
+    norm(canonical) !== norm(rawName) &&
+    !qStr.includes('(') &&
+    rawName.length > canonical.length
+  ) {
+    const suffix = rawName
+      .slice(canonical.length)
+      .replace(/^[\s\-–/()]+/, '')
+      .replace(/[)]+$/, '')
+      .trim();
+    if (suffix && suffix.length <= 24) {
+      qStr = qStr ? `${qStr} (${suffix})` : suffix;
+    }
+  }
+  return { n: canonical || rawName, q: qStr };
+}
+
+export function normalizeRecipeIngredients(rawList: unknown): { n: string; q: string }[] {
+  let list: unknown[] = [];
+  if (Array.isArray(rawList)) {
+    list = rawList;
+  } else if (typeof rawList === 'string' && rawList.trim().startsWith('[')) {
+    try {
+      const parsed = JSON.parse(rawList);
+      if (Array.isArray(parsed)) list = parsed;
+    } catch {
+      list = [];
+    }
+  }
+  const out: { n: string; q: string }[] = [];
+  for (const item of list) {
+    const normItem = normalizeIngredientObject(item);
+    if (normItem) out.push(normItem);
+  }
+  return out;
+}
+
+export function normalizeRecipe<T extends Partial<Recipe>>(r: T): T {
+  const normIngs = normalizeRecipeIngredients(r.ingredients);
+  const normCat = r.category ? normalizeRecipeCategory(r.category) : r.category;
+  return {
+    ...r,
+    category: normCat,
+    ingredients: normIngs,
+  };
 }
 
 export function filterRecipesForBar(recipes: Recipe[], barId?: string | null): Recipe[] {
   return recipes.filter((r) => {
     const scope = getRecipeBarScope(r);
     if (scope && barId && scope !== barId) return false;
+    const status = getRecipeAuditStatus(r);
+    // Receitas não públicas/pendentes/recusadas só aparecem para o bar de origem (escopo __bar) ou quando is_public !== false
+    if ((r.is_public === false || status === 'pending' || status === 'rejected' || status === 'private') && scope && barId) {
+      return scope === barId;
+    }
     return true;
   });
 }
 
 export function recipeTags(r: Partial<Recipe>): string[] {
-  if (Array.isArray(r.tags) && r.tags.length) {
-    const visible = r.tags.filter((x) => typeof x === 'string' && !x.startsWith('__'));
-    if (visible.length) return visible;
+  const set = new Set<string>();
+  const add = (t: string) => {
+    if (t) set.add(t);
+  };
+
+  const cat = normalizeRecipeCategory(r.category);
+  if (cat === 'Clássicos') add('Clássico');
+  if (cat === 'Autorais') add('Autoral');
+  if (cat === 'Brasileiríssimos') add('Brasileiro');
+  if (cat === 'Refrescantes') add('Refrescante');
+  if (cat === 'Cítricos') add('Cítrico / Ácido');
+  if (cat === 'Tiki & Tropicais') add('Tropical');
+  if (cat === 'Fortes') {
+    add('Forte');
+    add('Curto');
   }
-  const t: string[] = [];
-  if (r.category === 'Refrescantes') t.push('Refrescante', 'Longo');
-  if (r.category === 'Fortes') t.push('Forte', 'Curto');
-  if (r.category === 'Cítricos') t.push('Ácido');
-  if (r.category === 'Tropicais') t.push('Tropical');
-  if (r.category === 'Doces & Frutados') t.push('Doce', 'Frutado');
-  if (r.category === 'Aperitivos') t.push('Aperitivo');
-  return t;
+  if (cat === 'Doces & Frutados') {
+    add('Doce');
+    add('Frutado');
+  }
+  if (cat === 'Frozen') {
+    add('Frozen');
+    add('Refrescante');
+  }
+  if (cat === 'Energéticos') {
+    add('Energético');
+    add('Longo');
+  }
+  if (cat === 'Shots') {
+    add('Shot');
+    add('Curto');
+  }
+  if (cat === 'Jarras') {
+    add('Para dividir (Jarra)');
+    add('Longo');
+  }
+  if (cat === 'Sem álcool') {
+    add('Sem álcool');
+    add('Refrescante');
+  }
+
+  // Mapeia tags explícitas herdadas do banco
+  const rawTags = Array.isArray(r.tags) ? r.tags : [];
+  for (const tg of rawTags) {
+    if (typeof tg !== 'string' || !tg.trim() || tg.startsWith('__')) continue;
+    const k = norm(tg);
+    if (k === 'refrescante') add('Refrescante');
+    else if (k === 'acido' || k === 'citrico' || k === 'citrico / acido') add('Cítrico / Ácido');
+    else if (k === 'doce') add('Doce');
+    else if (k === 'frutado') add('Frutado');
+    else if (k === 'forte') add('Forte');
+    else if (k === 'amargo') add('Amargo');
+    else if (k.includes('gengibre') || k.includes('picante') || k === 'mule') add('Picante / Gengibre');
+    else if (k.includes('hortela') || k === 'herbal' || k === 'herbal / hortela' || k === 'mojito')
+      add('Herbal / Hortelã');
+    else if (k === 'tropical' || k === 'tiki') add('Tropical');
+    else if (k === 'cremoso') add('Cremoso');
+    else if (k.includes('soda') || k.includes('tonica') || k === 'highball') add('Com soda / Tônica');
+    else if (k === 'classico' || k === 'classico-brasileiro') add('Clássico');
+    else if (k === 'autoral') add('Autoral');
+    else if (k === 'brasileiro' || k === 'botequim' || k === 'folclore') add('Brasileiro');
+    else if (k === 'longo') add('Longo');
+    else if (k === 'curto' || k === 'old-fashioned') add('Curto');
+    else if (k === 'frozen') add('Frozen');
+    else if (k === 'energetico') add('Energético');
+    else if (k === 'shot') add('Shot');
+    else if (k === 'jarra' || k.includes('dividir')) add('Para dividir (Jarra)');
+    else if (k === 'zero' || k.includes('sem alcool')) add('Sem álcool');
+  }
+
+  // Infere automaticamente pelos ingredientes normalizados
+  const ings = normalizeRecipeIngredients(r.ingredients);
+  let hasAlcohol = false;
+  for (const ing of ings) {
+    const k = canonicalIngredientKey(ing.n);
+    if (!k) continue;
+    if (k === 'cachaca') {
+      hasAlcohol = true;
+      add('Cachaça');
+      add('Brasileiro');
+    } else if (k === 'gin') {
+      hasAlcohol = true;
+      add('Gin');
+    } else if (k === 'vodka') {
+      hasAlcohol = true;
+      add('Vodka');
+    } else if (k === 'rum') {
+      hasAlcohol = true;
+      add('Rum');
+    } else if (k === 'whisky') {
+      hasAlcohol = true;
+      add('Whisky');
+    } else if (k === 'tequila' || k === 'mezcal') {
+      hasAlcohol = true;
+      add('Tequila');
+    } else if (k === 'conhaque' || k === 'brandy') {
+      hasAlcohol = true;
+      add('Conhaque');
+    } else if (
+      k === 'vermute' ||
+      k === 'campari' ||
+      k === 'aperol' ||
+      k === 'cynar' ||
+      k === 'fernet' ||
+      k === 'lillet'
+    ) {
+      hasAlcohol = true;
+      add('Vermute & Aperitivos');
+      if (k === 'campari' || k === 'cynar' || k === 'aperol' || k === 'fernet') add('Amargo');
+    } else if (
+      k === 'pisco' ||
+      k === 'absinto' ||
+      k === 'saque' ||
+      k === 'soju' ||
+      k === 'prosecco' ||
+      k === 'espumante' ||
+      k === 'champagne' ||
+      k === 'vinho tinto' ||
+      k === 'vinho branco' ||
+      k === 'cerveja' ||
+      k.startsWith('licor') ||
+      k === 'cointreau' ||
+      k === 'triple sec' ||
+      k === 'curacau blue'
+    ) {
+      hasAlcohol = true;
+    }
+
+    if (k === 'gengibre' || k === 'xarope de gengibre' || k === 'ginger beer' || k === 'ginger ale' || k === 'pimenta') {
+      add('Picante / Gengibre');
+    }
+    if (k === 'hortela' || k === 'alecrim' || k === 'manjericao' || k === 'xarope de hortela') {
+      add('Herbal / Hortelã');
+    }
+    if (
+      k === 'agua tonica' ||
+      k === 'agua com gas' ||
+      k === 'soda' ||
+      k === 'guarana' ||
+      k === 'coca-cola' ||
+      k === 'refrigerante de limao' ||
+      k === 'ginger beer' ||
+      k === 'ginger ale'
+    ) {
+      add('Com soda / Tônica');
+      if (cat !== 'Jarras') add('Longo');
+    }
+    if (
+      k === 'leite condensado' ||
+      k === 'creme de leite' ||
+      k === 'leite de coco' ||
+      k === 'creme de coco' ||
+      k === 'sorvete de baunilha' ||
+      k === 'clara de ovo' ||
+      k === 'chantilly'
+    ) {
+      add('Cremoso');
+    }
+    if (k === 'energetico') {
+      add('Energético');
+    }
+    if (k === 'limao') {
+      add('Cítrico / Ácido');
+    }
+    if (k === 'maracuja' || k === 'suco de maracuja' || k === 'abacaxi' || k === 'suco de abacaxi' || k === 'manga') {
+      add('Tropical');
+      add('Frutado');
+    }
+    if (
+      k === 'morango' ||
+      k === 'xarope de morango' ||
+      k === 'xarope de groselha' ||
+      k === 'framboesa' ||
+      k === 'xarope de framboesa' ||
+      k === 'xarope de pessego' ||
+      k === 'suco de uva' ||
+      k === 'xarope de maca verde' ||
+      k === 'melancia' ||
+      k === 'kiwi' ||
+      k === 'uva' ||
+      k === 'grenadine' ||
+      k === 'caju'
+    ) {
+      add('Frutado');
+    }
+  }
+
+  if (ings.length > 0 && !hasAlcohol) {
+    add('Sem álcool');
+  }
+
+  return Array.from(set);
 }
 
 export function matchRecipeTags(r: Recipe, selectedTags: Set<string>): boolean {
@@ -448,16 +829,35 @@ export function isFreeIngredient(raw: string | null | undefined): boolean {
 
 export function stockMatch(stockName: string, ingredientName: string): boolean {
   const h = norm(stockName);
-  const req = norm(ingredientName);
+  const req = canonicalIngredientKey(ingredientName);
+  const hCanon = canonicalIngredientKey(stockName);
   if (!h || !req) return false;
-  return (
+  if (
     h === req ||
+    hCanon === req ||
     h.startsWith(req + ' ') ||
     h.startsWith(req + '-') ||
     h.startsWith(req + '/') ||
     h.startsWith(req + '(') ||
     h.startsWith(req + ' (')
-  );
+  ) {
+    return true;
+  }
+  // Açúcar em estoque permite preparar xarope simples (açúcar + água) na hora, e vice-versa
+  if (
+    (req === 'xarope de acucar' && hCanon === 'acucar') ||
+    (req === 'acucar' && hCanon === 'xarope de acucar')
+  ) {
+    return true;
+  }
+  // Refrigerante de limão <-> Soda limonada
+  if (
+    (req === 'soda' && hCanon === 'refrigerante de limao') ||
+    (req === 'refrigerante de limao' && hCanon === 'soda')
+  ) {
+    return true;
+  }
+  return false;
 }
 
 export function isStockItemAvailable(item: BarItem): boolean {
@@ -469,8 +869,7 @@ export function isStockItemAvailable(item: BarItem): boolean {
 export function getMissingIngredientsForRecipe(recipe: Recipe, items: BarItem[]): string[] {
   if (isRecipeManuallyUnavailable(recipe)) return ['Indisponível'];
   const activeItems = items.filter((i) => isStockItemAvailable(i));
-  const haveList = activeItems.map((i) => norm(i.name)).filter(Boolean);
-  const ings = Array.isArray(recipe.ingredients) ? recipe.ingredients : [];
+  const ings = normalizeRecipeIngredients(recipe.ingredients);
 
   // Se for um item cadastrado sem lista de ingredientes (ex.: Chopp / Cerveja avulsa),
   // verifica se existe item correspondente no estoque marcado como esgotado/zerado.
@@ -489,16 +888,8 @@ export function getMissingIngredientsForRecipe(recipe: Recipe, items: BarItem[])
     const raw = (ing?.n || '').trim();
     const req = norm(raw);
     if (!req || isFreeIngredient(req)) continue;
-    const matched = haveList.some(
-      (h) =>
-        h === req ||
-        h.startsWith(req + ' ') ||
-        h.startsWith(req + '-') ||
-        h.startsWith(req + '/') ||
-        h.startsWith(req + '(') ||
-        h.startsWith(req + ' (')
-    );
-    if (!matched && !missing.includes(raw)) {
+    const matched = activeItems.some((it) => stockMatch(it.name, raw));
+    if (!matched && !missing.some((m) => canonicalIngredientKey(m) === canonicalIngredientKey(raw))) {
       missing.push(raw);
     }
   }
@@ -516,11 +907,13 @@ export function estimateRecipeCost(recipe: Recipe, items: BarItem[], bar?: Bar |
   const costBasisMap = bar?.ops_data?.stock_cost_basis || {};
   items.forEach((it) => {
     itemMap[norm(it.name)] = it;
+    const ck = canonicalIngredientKey(it.name);
+    if (ck && !itemMap[ck]) itemMap[ck] = it;
   });
   let sum = 0;
-  (recipe.ingredients || []).forEach((ing) => {
-    const k = norm(ing.n);
-    const it = itemMap[k];
+  normalizeRecipeIngredients(recipe.ingredients).forEach((ing) => {
+    const k = canonicalIngredientKey(ing.n);
+    const it = itemMap[norm(ing.n)] || itemMap[k];
     if (!it || !(Number(it.unit_cost) > 0)) return;
     const rawCost = Number(it.unit_cost);
     const basis = it.cost_basis || costBasisMap[it.id] || it.unit || '';

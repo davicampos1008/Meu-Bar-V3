@@ -13,6 +13,7 @@ export const CAT: Record<string, string[]> = {
     'Absinto',
     'Saquê',
     'Soju',
+    'Calvados',
   ],
   Licores: [
     'Cointreau',
@@ -42,6 +43,13 @@ export const CAT: Record<string, string[]> = {
     'Drambuie',
     'Maraschino',
     'Fernet',
+    'Licor 43',
+    'Amaro|Nonino,Montenegro,Averna',
+    'Cherry Brandy',
+    'Apricot Brandy',
+    'Licor de amora',
+    'Crème de Violette',
+    'Falernum',
   ],
   'Vinhos e aperitivos': [
     'Vermute|Tinto (Rosso),Seco (Dry),Branco (Bianco),Rosé',
@@ -79,6 +87,10 @@ export const CAT: Record<string, string[]> = {
     'Suco de maracujá',
     'Suco de tomate',
     'Suco de uva',
+    'Suco de grapefruit',
+    'Suco de caju',
+    'Suco de pêssego',
+    'Soda de grapefruit',
     'Água de coco',
     'Leite de coco',
     'Creme de coco',
@@ -176,6 +188,14 @@ export const CAT: Record<string, string[]> = {
     'Coco ralado',
     'Chocolate ralado',
     'Flores comestíveis',
+    'Caju',
+    'Tangerina',
+    'Pêssego',
+    'Amora',
+    'Mirtilo',
+    'Lichia',
+    'Tomilho',
+    'Grapefruit',
   ],
   Outros: [
     'Gelo|Cubo,Esfera,Escamas,Triturado',
@@ -184,9 +204,11 @@ export const CAT: Record<string, string[]> = {
     'Chantilly',
     'Sorvete de baunilha',
     'Água de rosas',
+    'Água de flor de laranjeira',
     'Essência de baunilha',
     'Café em grãos',
     'Chocolate',
+    'Molho inglês',
   ],
 };
 
@@ -207,26 +229,97 @@ export const BRANDS: Record<string, string> = {
   Energético: 'Red Bull,Monster,Fusion,TNT',
 };
 
-export const CATS = ['Refrescantes', 'Fortes', 'Cítricos', 'Tropicais', 'Doces & Frutados', 'Aperitivos'];
-export const EMO = ['🍋', '🥃', '🍊', '🍹', '🍓', '🥂'];
-
-export const ALL_TAGS = [
-  'Refrescante',
-  'Forte',
-  'Doce',
-  'Ácido',
-  'Charmoso',
-  'Fácil',
-  'Clássico',
-  'Tropical',
-  'Aperitivo',
-  'Longo',
-  'Curto',
-  'Com hortelã',
-  'Com soda',
-  'Frutado',
-  'Amargo',
+export const CATS = [
+  'Clássicos',
+  'Autorais',
+  'Brasileiríssimos',
+  'Refrescantes',
+  'Cítricos',
+  'Tiki & Tropicais',
+  'Aperitivos',
+  'Fortes',
+  'Doces & Frutados',
+  'Frozen',
+  'Energéticos',
+  'Shots',
+  'Jarras',
+  'Sem álcool',
 ];
+
+export const EMO = [
+  '🍸',
+  '✨',
+  '🇧🇷',
+  '🍋',
+  '🍊',
+  '🌴',
+  '🥂',
+  '🥃',
+  '🍓',
+  '🧊',
+  '⚡',
+  '🔥',
+  '🫗',
+  '🫧',
+];
+
+export interface TagGroup {
+  id: string;
+  label: string;
+  tags: string[];
+}
+
+export const TAG_GROUPS: TagGroup[] = [
+  {
+    id: 'vibe',
+    label: 'Sabor & Sensação',
+    tags: [
+      'Refrescante',
+      'Cítrico / Ácido',
+      'Doce',
+      'Frutado',
+      'Forte',
+      'Amargo',
+      'Picante / Gengibre',
+      'Herbal / Hortelã',
+      'Tropical',
+      'Cremoso',
+      'Com soda / Tônica',
+    ],
+  },
+  {
+    id: 'base',
+    label: 'Destilado / Base',
+    tags: [
+      'Cachaça',
+      'Gin',
+      'Vodka',
+      'Rum',
+      'Whisky',
+      'Tequila',
+      'Conhaque',
+      'Vermute & Aperitivos',
+    ],
+  },
+  {
+    id: 'occasion',
+    label: 'Estilo & Ocasião',
+    tags: [
+      'Clássico',
+      'Autoral',
+      'Brasileiro',
+      'Longo',
+      'Curto',
+      'Frozen',
+      'Energético',
+      'Shot',
+      'Para dividir (Jarra)',
+      'Sem álcool',
+    ],
+  },
+];
+
+export const ALL_TAGS = TAG_GROUPS.flatMap((g) => g.tags);
 
 export const ROLE_LABELS: Record<string, string> = {
   owner: 'Dono',
@@ -1220,7 +1313,7 @@ export function getDefaultUnitForIngredient(
     .toLowerCase();
 
   // Ervas em maço
-  if (n.includes('hortela') || n.includes('alecrim') || n.includes('manjericao')) {
+  if (n.includes('hortela') || n.includes('alecrim') || n.includes('manjericao') || n.includes('tomilho')) {
     return { unit: 'maco' };
   }
   // Itens vendidos por unidade
@@ -1244,6 +1337,13 @@ export function getDefaultUnitForIngredient(
     n.includes('kiwi') ||
     n.includes('manga') ||
     n.includes('uva') ||
+    n.includes('caju') ||
+    n.includes('tangerina') ||
+    n.includes('pessego') ||
+    n.includes('amora') ||
+    n.includes('mirtilo') ||
+    n.includes('lichia') ||
+    n.includes('grapefruit') ||
     n.includes('pepino') ||
     n.includes('gengibre') ||
     n.includes('pimenta') ||

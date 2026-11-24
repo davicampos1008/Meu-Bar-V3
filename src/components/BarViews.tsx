@@ -8,6 +8,7 @@ import {
   ALL_TAGS,
   CAT,
   CATS,
+  EMO,
   getCostBasisMeta,
   getCostBasisOptionsForUnit,
   getDefaultCostBasisForUnit,
@@ -15,6 +16,7 @@ import {
   getUnitMeta,
   STARTER_KITS,
   STOCK_UNITS,
+  TAG_GROUPS,
   type StockCostBasisId,
   type StockUnitId,
 } from '../lib/catalog';
@@ -37,21 +39,36 @@ import {
 } from '../lib/quickAuth';
 import { broadcastMenuUpdate, sb } from '../lib/supabase';
 import {
+  canonicalIngredientKey,
   estimateRecipeCost,
   externalMapUrl,
   filterRecipesForBar,
   getMissingIngredientsForRecipe,
+  getRecipeAuditStatus,
+  getRecipeCreatorBrand,
   getRecipeItemType,
   getUnpricedAvailableDrinks,
   makeDrink,
   matchRecipeTags,
   money,
   norm,
+  normalizeRecipeCategory,
+  normalizeRecipeIngredients,
   recipeTags,
   suggestedPrice,
   type UiThemeMode,
 } from '../lib/utils';
-import type { Bar, BarItem, BarMember, Order, Recipe, TableCallAlert, TableTab } from '../types/meubar';
+import type {
+  Bar,
+  BarItem,
+  BarMember,
+  Order,
+  Recipe,
+  TableCallAlert,
+  TableTab,
+  UserNotificationItem,
+} from '../types/meubar';
+import { DrinkImageSearchModal } from './DrinkImageSearchModal';
 import { PWAInstallButton } from './PWAControls';
 import { RecipeTile } from './SharedUI';
 import { BarmanStationView, KitchenStationView, WaiterStationView } from './StationViews';
@@ -65,11 +82,19 @@ export const RecipesView: React.FC<{
   hasPricing: boolean;
   unpricedCount?: number;
   canEditMenu?: boolean;
+  isPlatformAdmin?: boolean;
+  canEditGlobalRecipes?: boolean;
+  canSearchImages?: boolean;
+  userId?: string;
+  userNotifications?: UserNotificationItem[];
+  onDismissUserNotifications?: (ids?: string[]) => void;
   onGoPrices?: () => void;
   onOpenCreateDrink?: (editExisting: boolean) => void;
   onOpenCatalog?: () => void;
   onOpenShakers?: () => void;
   onSelectRecipe: (recipe: Recipe) => void;
+  onRecipeUpdated?: (updated: Recipe) => void;
+  onToast?: (msg: string) => void;
 }> = ({
   bar,
   items,
@@ -78,167 +103,478 @@ export const RecipesView: React.FC<{
   hasPricing,
   unpricedCount = 0,
   canEditMenu = false,
+  isPlatformAdmin = false,
+  canEditGlobalRecipes,
+  canSearchImages,
+  userId,
+  userNotifications = [],
+  onDismissUserNotifications,
   onGoPrices,
   onOpenCreateDrink,
   onOpenCatalog,
   onOpenShakers,
   onSelectRecipe,
+  onRecipeUpdated,
+  onToast,
 }) => {
+  const canEditCatalogRecipes = Boolean(canEditGlobalRecipes ?? isPlatformAdmin);
+  const canSearchCatalogImages = Boolean(canSearchImages ?? isPlatformAdmin);
   const [rFilter, setRFilter] = useState<'can' | 'missing' | 'all'>('can');
   const [rCat, setRCat] = useState('Todas');
   const [rQuery, setRQuery] = useState('');
   const [rTags, setRTags] = useState<Set<string>>(new Set());
+  const [sortBy, setSortBy] = useState<'name' | 'ready' | 'fewest_missing'>('name');
   const [showTags, setShowTags] = useState(false);
+  const [showUnlockHelper, setShowUnlockHelper] = useState(false);
+  const [showToolsDrawer, setShowToolsDrawer] = useState(false);
+  const [missingFocusIng, setMissingFocusIng] = useState('');
+  const [showPhotoBatchModal, setShowPhotoBatchModal] = useState(false);
 
   const drinkRecipes = filterRecipesForBar(recipes, bar.id).filter(
     (r) => getRecipeItemType(r) === 'drink'
   );
   const canList = drinkRecipes.filter((r) => makeDrink(r, items));
   const missingList = drinkRecipes.filter((r) => !makeDrink(r, items));
+
+  // Calcula ingredientes que mais destravam receitas em Receitas (1 clique para ver quais)
+  const unlockSingleMap = new Map<string, { label: string; count: number }>();
+  const missingOverallMap = new Map<string, { label: string; count: number }>();
+  missingList.forEach((r) => {
+    const miss = getMissingIngredientsForRecipe(r, items);
+    if (miss.length === 1) {
+      const lbl = miss[0];
+      const key = canonicalIngredientKey(lbl);
+      const cur = unlockSingleMap.get(key);
+      if (cur) cur.count += 1;
+      else unlockSingleMap.set(key, { label: lbl, count: 1 });
+    }
+    miss.forEach((lbl) => {
+      if (lbl === 'Indisponível') return;
+      const key = canonicalIngredientKey(lbl);
+      const cur = missingOverallMap.get(key);
+      if (cur) cur.count += 1;
+      else missingOverallMap.set(key, { label: lbl, count: 1 });
+    });
+  });
+  const topBuyHelpers = (
+    unlockSingleMap.size > 0
+      ? Array.from(unlockSingleMap.values())
+      : Array.from(missingOverallMap.values())
+  )
+    .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label))
+    .slice(0, 10);
+
   const basePool = rFilter === 'can' ? canList : rFilter === 'missing' ? missingList : drinkRecipes;
   const q = rQuery.trim().toLowerCase();
 
-  const filtered = basePool.filter((r) => {
-    if (rCat !== 'Todas' && r.category !== rCat) return false;
-    if (!matchRecipeTags(r, rTags)) return false;
-    if (q) {
-      const inName = (r.name || '').toLowerCase().includes(q);
-      const inIng = (r.ingredients || []).some((i) => (i.n || '').toLowerCase().includes(q));
-      if (!inName && !inIng) return false;
-    }
-    return true;
-  });
+  const filtered = basePool
+    .filter((r) => {
+      if (rCat !== 'Todas' && normalizeRecipeCategory(r.category) !== rCat) return false;
+      if (!matchRecipeTags(r, rTags)) return false;
+      if (missingFocusIng) {
+        const missKeys = getMissingIngredientsForRecipe(r, items).map((m) =>
+          canonicalIngredientKey(m)
+        );
+        if (!missKeys.includes(canonicalIngredientKey(missingFocusIng))) return false;
+      }
+      if (q) {
+        const inName = (r.name || '').toLowerCase().includes(q);
+        const inDesc = (r.description || r.story || '').toLowerCase().includes(q);
+        const inGlass = (r.glass || '').toLowerCase().includes(q);
+        const inTech = (r.technique || '').toLowerCase().includes(q);
+        const inIng = normalizeRecipeIngredients(r.ingredients).some((i) =>
+          (i.n || '').toLowerCase().includes(q)
+        );
+        if (!inName && !inIng && !inDesc && !inGlass && !inTech) return false;
+      }
+      return true;
+    })
+    .sort((a, b) => {
+      if (sortBy === 'ready') {
+        const aOk = makeDrink(a, items) ? 0 : 1;
+        const bOk = makeDrink(b, items) ? 0 : 1;
+        if (aOk !== bOk) return aOk - bOk;
+      } else if (sortBy === 'fewest_missing') {
+        const aMiss = getMissingIngredientsForRecipe(a, items).length;
+        const bMiss = getMissingIngredientsForRecipe(b, items).length;
+        if (aMiss !== bMiss) return aMiss - bMiss;
+      }
+      return (a.name || '').localeCompare(b.name || '', 'pt-BR');
+    });
+
+  const missingPhotoCount = drinkRecipes.filter((r) => !r.image_url).length;
+  const unreadCreatorNotifs = userNotifications.filter((n) => !n.read);
+  const pendingAuditDrinks = drinkRecipes.filter((r) => getRecipeAuditStatus(r) === 'pending');
+  const hasToolsOptions =
+    canEditCatalogRecipes ||
+    canSearchCatalogImages ||
+    Boolean(onOpenCatalog) ||
+    Boolean(onOpenShakers) ||
+    Boolean(canEditMenu && onGoPrices && hasPricing);
+  const hasActiveFilters =
+    rCat !== 'Todas' || rTags.size > 0 || !!rQuery.trim() || !!missingFocusIng;
+
+  const clearAllFilters = () => {
+    setRCat('Todas');
+    setRTags(new Set());
+    setRQuery('');
+    setMissingFocusIng('');
+  };
 
   return (
-    <div>
-      <div className="row sp items-start">
+    <div className="space-y-4">
+      {/* Notificações para o criador sobre receitas auditadas pela equipe */}
+      {unreadCreatorNotifs.length > 0 && (
+        <div className="panel !mt-0 !border-emerald-400/50 bg-emerald-500/10 space-y-2">
+          <div className="flex items-start justify-between gap-2 flex-wrap">
+            <div className="text-sm font-bold text-emerald-200">
+              🔔 Atualização sobre seus drinks autorais ({unreadCreatorNotifs.length})
+            </div>
+            {onDismissUserNotifications && (
+              <button
+                type="button"
+                className="b g sm"
+                onClick={() => onDismissUserNotifications(unreadCreatorNotifs.map((n) => n.id))}
+              >
+                Ok, entendi
+              </button>
+            )}
+          </div>
+          <div className="space-y-1.5">
+            {unreadCreatorNotifs.slice(0, 4).map((notif) => (
+              <div
+                key={notif.id}
+                className="rounded-xl px-3 py-2 bg-black/25 border border-white/10 text-xs flex flex-wrap items-center justify-between gap-2"
+              >
+                <div>
+                  <div className="font-bold text-[var(--fg)]">
+                    {notif.kind === 'recipe_approved' ? '✅ ' : notif.kind === 'recipe_rejected' ? '⚠️ ' : '🔔 '}
+                    {notif.title}
+                  </div>
+                  <div className="text-[var(--mut)] mt-0.5">{notif.message}</div>
+                </div>
+                {onDismissUserNotifications && (
+                  <button
+                    type="button"
+                    className="b g sm"
+                    onClick={() => onDismissUserNotifications([notif.id])}
+                  >
+                    Fechar
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Cabeçalho limpo e bem hierarquizado */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <div>
-          <h1>Cardápio & Receitas</h1>
-          <p className="mu">
-            {bar.name} · você faz {canList.length} drinks agora
+          <h1 className="[text-wrap:balance]">Cardápio & Receitas</h1>
+          <p className="mu tabular-nums mt-0.5">
+            {bar.name} · {canList.length} prontos de {drinkRecipes.length} drinks
+            {canSearchCatalogImages && missingPhotoCount > 0 ? ` · ${missingPhotoCount} sem foto` : ''}
           </p>
         </div>
-        <div className="row">
-          <button type="button" className="b sm g" onClick={() => setShowTags((s) => !s)}>
-            ✨ O que tomar?
-          </button>
-          <select
-            value={rCat}
-            onChange={(e) => setRCat(e.target.value)}
-            className="!w-auto py-2 px-3 text-[0.85rem]"
-          >
-            {['Todas', ...CATS].map((c) => (
-              <option key={c} value={c}>
-                {c === 'Todas' ? 'Categorias' : c}
-              </option>
-            ))}
-          </select>
-        </div>
-      </div>
 
-      {/* Ações rápidas unificadas do Cardápio (sem poluir a aba Mais) */}
-      {(onOpenCreateDrink || onOpenCatalog || onOpenShakers) && (
-        <div className="flex flex-wrap gap-1.5 mt-3">
+        <div className="flex items-center gap-2 flex-wrap">
           {onOpenCreateDrink && (
             <button
               type="button"
-              className="b sm"
+              className="b sm whitespace-nowrap"
               onClick={() => onOpenCreateDrink(false)}
             >
               + Novo drink
             </button>
           )}
-          {onOpenCreateDrink && (
+          {hasToolsOptions && (
             <button
               type="button"
-              className="b g sm"
+              className={`b sm whitespace-nowrap ${showToolsDrawer ? '' : 'g'}`}
+              onClick={() => setShowToolsDrawer((s) => !s)}
+            >
+              Ferramentas {showToolsDrawer ? '▴' : '▾'}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Aviso claro de drinks enviados aguardando auditoria da equipe */}
+      {!canEditCatalogRecipes && pendingAuditDrinks.length > 0 && (
+        <div className="panel !mt-0 !border-amber-400/40 bg-amber-500/10 text-xs flex items-center justify-between gap-2 flex-wrap">
+          <div>
+            <b className="text-amber-300">
+              ⏳ {pendingAuditDrinks.length} drink(s) aguardando auditoria da equipe
+            </b>
+            <p className="mu mt-0.5 !mb-0">
+              {pendingAuditDrinks.map((d) => d.name).slice(0, 3).join(', ')}
+              {pendingAuditDrinks.length > 3 ? ` e +${pendingAuditDrinks.length - 3}` : ''} — assim que autorizado pelo ADM, será publicado no catálogo geral com sua marca.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Gaveta organizada de ferramentas do catálogo */}
+      {showToolsDrawer && hasToolsOptions && (
+        <div className="panel !mt-0 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2">
+          {canEditCatalogRecipes && onOpenCreateDrink && (
+            <button
+              type="button"
+              className="b g sm w-full justify-start"
               onClick={() => onOpenCreateDrink(true)}
             >
               ✏️ Editar receita
             </button>
           )}
+          {canSearchCatalogImages && (
+            <button
+              type="button"
+              className="b g sm w-full justify-start"
+              onClick={() => setShowPhotoBatchModal(true)}
+              title="Pesquisar fotos profissionais na Internet sem IA e aplicar no catálogo"
+            >
+              🌐 Fotos ({missingPhotoCount})
+            </button>
+          )}
           {onOpenCatalog && (
-            <button type="button" className="b g sm" onClick={onOpenCatalog}>
+            <button
+              type="button"
+              className="b g sm w-full justify-start"
+              onClick={onOpenCatalog}
+            >
               🍟 Petiscos & Avulsos
             </button>
           )}
           {onOpenShakers && (
-            <button type="button" className="b g sm" onClick={onOpenShakers}>
+            <button
+              type="button"
+              className="b g sm w-full justify-start"
+              onClick={onOpenShakers}
+            >
               🍸 Coqueteleiras
             </button>
           )}
           {canEditMenu && onGoPrices && hasPricing && (
-            <button type="button" className="b g sm" onClick={onGoPrices}>
+            <button
+              type="button"
+              className="b g sm w-full justify-start"
+              onClick={onGoPrices}
+            >
               💰 Preços{unpricedCount > 0 ? ` (${unpricedCount})` : ''}
             </button>
           )}
         </div>
       )}
 
-      <input
-        value={rQuery}
-        onChange={(e) => setRQuery(e.target.value)}
-        placeholder="Buscar drink ou ingrediente..."
-        className="mt-3"
-      />
-
-      <div className="chips mt-2.5">
+      {/* Controle segmentado de disponibilidade */}
+      <div className="seg tabular-nums" role="tablist" aria-label="Filtro de disponibilidade">
         <button
           type="button"
-          className={`chip ${rFilter === 'can' ? 'on' : ''}`}
-          onClick={() => setRFilter('can')}
+          role="tab"
+          aria-selected={rFilter === 'can'}
+          className={rFilter === 'can' ? 'on' : ''}
+          onClick={() => {
+            setRFilter('can');
+            setMissingFocusIng('');
+          }}
         >
-          Faço agora
+          ✓ Posso fazer ({canList.length})
         </button>
         <button
           type="button"
-          className={`chip ${rFilter === 'missing' ? 'on' : ''}`}
-          onClick={() => setRFilter('missing')}
+          role="tab"
+          aria-selected={rFilter === 'missing'}
+          className={rFilter === 'missing' ? 'on' : ''}
+          onClick={() => {
+            setRFilter('missing');
+            if (sortBy === 'name') setSortBy('fewest_missing');
+          }}
         >
-          Falta {missingList.length}
+          Falta algo ({missingList.length})
         </button>
         <button
           type="button"
-          className={`chip ${rFilter === 'all' ? 'on' : ''}`}
+          role="tab"
+          aria-selected={rFilter === 'all'}
+          className={rFilter === 'all' ? 'on' : ''}
           onClick={() => setRFilter('all')}
         >
-          Todas
+          Todas ({drinkRecipes.length})
         </button>
       </div>
 
-      {showTags && (
-        <div className="chips !flex-wrap !overflow-visible mt-1.5">
-          {ALL_TAGS.map((t) => (
-            <span
-              key={t}
-              className={`chip ${rTags.has(t) ? 'on' : ''}`}
-              onClick={() => {
-                const next = new Set(rTags);
-                if (next.has(t)) next.delete(t);
-                else next.add(t);
-                setRTags(next);
-              }}
+      {/* Busca + botões de descoberta */}
+      <div className="flex flex-col sm:flex-row gap-2 items-stretch sm:items-center">
+        <div className="relative flex-1 min-w-0">
+          <input
+            value={rQuery}
+            onChange={(e) => setRQuery(e.target.value)}
+            placeholder="Buscar drink, ingrediente, copo ou técnica..."
+            className="pr-9"
+          />
+          {rQuery && (
+            <button
+              type="button"
+              aria-label="Limpar busca"
+              onClick={() => setRQuery('')}
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--mu)] hover:text-[var(--tx)] px-1.5 py-1 text-sm cursor-pointer bg-transparent border-0"
             >
-              {t}
-            </span>
-          ))}
-          {rTags.size > 0 && (
-            <span
-              className="chip border-dashed"
-              onClick={() => setRTags(new Set())}
-            >
-              Limpar
-            </span>
+              ✕
+            </button>
+          )}
+        </div>
+
+        <div className="grid grid-cols-2 sm:flex gap-2 shrink-0">
+          <button
+            type="button"
+            className={`b sm whitespace-nowrap ${showTags ? '' : 'g'}`}
+            onClick={() => {
+              setShowTags((s) => !s);
+              if (!showTags) setShowUnlockHelper(false);
+            }}
+          >
+            O que tomar{rTags.size > 0 ? ` (${rTags.size})` : ''}
+          </button>
+          <button
+            type="button"
+            className={`b sm whitespace-nowrap ${showUnlockHelper ? '' : 'g'}`}
+            onClick={() => {
+              const next = !showUnlockHelper;
+              setShowUnlockHelper(next);
+              if (next) {
+                setShowTags(false);
+                if (rFilter === 'can' && missingList.length > 0) {
+                  setRFilter('missing');
+                  setSortBy('fewest_missing');
+                }
+              } else {
+                setMissingFocusIng('');
+              }
+            }}
+          >
+            O que comprar
+          </button>
+        </div>
+      </div>
+
+      {/* Categorias limpas em faixa horizontal */}
+      <div className="recipe-cat-strip">
+        <button
+          type="button"
+          className={`recipe-cat-btn ${rCat === 'Todas' ? 'on' : ''}`}
+          onClick={() => setRCat('Todas')}
+        >
+          Todas
+        </button>
+        {CATS.map((c, idx) => (
+          <button
+            key={c}
+            type="button"
+            className={`recipe-cat-btn ${rCat === c ? 'on' : ''}`}
+            onClick={() => setRCat(rCat === c ? 'Todas' : c)}
+          >
+            {EMO[idx] || '🍹'} {c}
+          </button>
+        ))}
+      </div>
+
+      {showUnlockHelper && (
+        <div className="panel !mt-0 !border-[var(--bd-strong)] space-y-2.5">
+          <div className="flex items-start justify-between gap-2 flex-wrap">
+            <div>
+              <b className="text-sm">
+                {unlockSingleMap.size > 0
+                  ? 'Comprar 1 item já libera estes drinks:'
+                  : 'Ingredientes que destravam mais receitas:'}
+              </b>
+              <p className="mu text-xs mt-0.5">
+                Toque em um item para filtrar os drinks que dependem dele.
+              </p>
+            </div>
+            {missingFocusIng && (
+              <button
+                type="button"
+                className="b g sm"
+                onClick={() => setMissingFocusIng('')}
+              >
+                Limpar ingrediente
+              </button>
+            )}
+          </div>
+          {topBuyHelpers.length > 0 ? (
+            <div className="flex flex-wrap gap-1.5">
+              {topBuyHelpers.map((h) => {
+                const active =
+                  canonicalIngredientKey(missingFocusIng) === canonicalIngredientKey(h.label);
+                return (
+                  <button
+                    key={h.label}
+                    type="button"
+                    className={`recipe-cat-btn ${active ? 'on' : ''}`}
+                    onClick={() => {
+                      setRFilter('missing');
+                      setMissingFocusIng(active ? '' : h.label);
+                    }}
+                  >
+                    + {h.label} ({h.count})
+                  </button>
+                );
+              })}
+            </div>
+          ) : (
+            <p className="mu text-xs">Você já consegue preparar todas as receitas do catálogo.</p>
           )}
         </div>
       )}
 
+      {showTags && (
+        <div className="panel !mt-0 space-y-3">
+          <div className="flex items-center justify-between gap-2">
+            <b className="text-sm">Filtros — O que tomar?</b>
+            {rTags.size > 0 && (
+              <button
+                type="button"
+                className="b g sm"
+                onClick={() => setRTags(new Set())}
+              >
+                Limpar ({rTags.size})
+              </button>
+            )}
+          </div>
+          {TAG_GROUPS.map((grp) => (
+            <div key={grp.id}>
+              <div className="text-xs font-semibold text-[var(--mu)] mb-1.5">
+                {grp.label}
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {grp.tags.map((t) => (
+                  <button
+                    key={t}
+                    type="button"
+                    className={`recipe-cat-btn ${rTags.has(t) ? 'on' : ''}`}
+                    onClick={() => {
+                      const next = new Set(rTags);
+                      if (next.has(t)) next.delete(t);
+                      else next.add(t);
+                      setRTags(next);
+                    }}
+                  >
+                    {t}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       {hasPricing && unpricedCount > 0 && (
-        <div className="alert-box row sp mt-3">
+        <div className="alert-box row sp !mt-0">
           <div className="flex-1 min-w-[200px]">
-            <b>⚠️ {unpricedCount} drink(s) disponível(is) sem preço</b>
-            <p className="mu mt-0.5">
-              Adicione preço para eles aparecerem automaticamente no cardápio dos clientes.
+            <b>{unpricedCount} drink(s) pronto(s) sem preço</b>
+            <p className="mu mt-0.5 text-xs">
+              Defina o preço para aparecerem automaticamente no cardápio dos clientes.
             </p>
           </div>
           {onGoPrices && (
@@ -249,46 +585,177 @@ export const RecipesView: React.FC<{
         </div>
       )}
 
-      <div className="menu-items mt-3.5">
-        {filtered.length > 0 ? (
-          filtered.map((r) => {
-            const tg = recipeTags(r).slice(0, 2);
+      {/* Barra de contagem e ordenação */}
+      <div className="flex items-center justify-between gap-2 flex-wrap pt-1 border-t border-[var(--bd)]">
+        <div className="text-xs text-[var(--mu)] tabular-nums">
+          Mostrando <b className="text-[var(--tx)]">{filtered.length}</b> de{' '}
+          {basePool.length} receitas
+          {missingFocusIng ? ` · faltando ${missingFocusIng}` : ''}
+        </div>
+        <div className="flex items-center gap-2">
+          {hasActiveFilters && (
+            <button
+              type="button"
+              onClick={clearAllFilters}
+              className="lnk text-xs !py-1 !px-2 underline"
+            >
+              Limpar filtros
+            </button>
+          )}
+          <select
+            aria-label="Ordenar receitas"
+            value={sortBy}
+            onChange={(e) => setSortBy(e.target.value as 'name' | 'ready' | 'fewest_missing')}
+            className="!w-auto !py-1.5 !px-2.5 !text-xs !rounded-lg"
+          >
+            <option value="name">Ordem A–Z</option>
+            <option value="ready">Prontos primeiro</option>
+            <option value="fewest_missing">Faltam menos itens</option>
+          </select>
+        </div>
+      </div>
+
+      {/* Grade limpa e informativa */}
+      {filtered.length > 0 ? (
+        <div className="recipes-catalog-grid">
+          {filtered.map((r) => {
+            const catLabel = normalizeRecipeCategory(r.category);
+            const catIdx = Math.max(0, CATS.indexOf(catLabel));
+            const ings = normalizeRecipeIngredients(r.ingredients);
             const missingIngs = getMissingIngredientsForRecipe(r, items);
             const canMakeNow = missingIngs.length === 0;
             const pr = hasPricing && prices[r.id] != null ? money(prices[r.id]) : null;
+            const styleTags = recipeTags(r).slice(0, 3);
+            const creatorBrand = getRecipeCreatorBrand(r);
+            const auditStatus = getRecipeAuditStatus(r);
+            const metaParts = [
+              catLabel,
+              r.glass || 'Copo padrão',
+              r.technique?.split('(')[0].trim() || (r.shaken ? 'Batido' : 'Montado'),
+            ].filter(Boolean);
+
             return (
               <button
                 key={r.id}
                 type="button"
-                className="card"
+                className="recipe-pro-card"
                 onClick={() => onSelectRecipe(r)}
               >
-                <RecipeTile recipe={r} />
-                <div className="t">
-                  <div>
-                    <div>{r.name}</div>
-                    {!canMakeNow ? (
-                      <span className="pill-tag !text-red-300 !border-red-400/30">
-                        ❌ Falta: {missingIngs.slice(0, 2).join(', ')}
-                        {missingIngs.length > 2 ? ` +${missingIngs.length - 2}` : ''}
-                      </span>
-                    ) : (
-                      tg.length > 0 && <span className="pill-tag">{tg.join(' · ')}</span>
-                    )}
+                <div
+                  className={`recipe-pro-media c${catIdx}`}
+                  style={r.image_url ? { backgroundImage: `url('${r.image_url}')` } : undefined}
+                >
+                  {r.image_url ? null : EMO[catIdx] || '🍸'}
+                </div>
+
+                <div className="p-4 flex-1 flex flex-col gap-2 w-full">
+                  <div className="text-[11.5px] text-[var(--mu)] truncate">
+                    {metaParts.join(' · ')}
                   </div>
-                  {pr && canMakeNow ? (
-                    <span className="tag pr">{pr}</span>
-                  ) : hasPricing && canMakeNow ? (
-                    <span className="badge-warn !ml-0">Sem preço</span>
-                  ) : null}
+
+                  <div className="flex items-start justify-between gap-2">
+                    <h3 className="text-[1.05rem] font-semibold leading-snug text-[var(--tx)] line-clamp-2">
+                      {r.name}
+                    </h3>
+                    {pr && canMakeNow ? (
+                      <span className="pr text-sm shrink-0">{pr}</span>
+                    ) : hasPricing && canMakeNow ? (
+                      <span className="text-xs font-medium text-[var(--ac)] whitespace-nowrap shrink-0">
+                        Sem preço
+                      </span>
+                    ) : null}
+                  </div>
+
+                  {(creatorBrand || auditStatus !== 'approved') && (
+                    <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                      {creatorBrand && (
+                        <span className="font-semibold text-[var(--ac)] truncate">
+                          ✦ Criação de {creatorBrand}
+                        </span>
+                      )}
+                      {auditStatus === 'pending' && (
+                        <span className="px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400 border border-amber-500/35 font-semibold">
+                          ⏳ Aguardando auditoria da equipe
+                        </span>
+                      )}
+                      {auditStatus === 'private' && (
+                        <span className="px-1.5 py-0.5 rounded bg-[var(--s2)] text-[var(--mu)] border border-[var(--bd)] font-medium">
+                          🔒 Só no meu bar
+                        </span>
+                      )}
+                      {auditStatus === 'rejected' && (
+                        <span className="px-1.5 py-0.5 rounded bg-[var(--dn)]/15 text-[var(--dn)] border border-[var(--dn)]/35 font-semibold">
+                          ✕ Não publicado
+                        </span>
+                      )}
+                    </div>
+                  )}
+
+                  {r.description && (
+                    <p className="text-[0.83rem] leading-snug text-[var(--mu)] line-clamp-2">
+                      {r.description}
+                    </p>
+                  )}
+
+                  <div className="mt-auto pt-2.5 border-t border-[var(--bd)] space-y-1.5">
+                    {ings.length > 0 && (
+                      <div className="text-[0.78rem] text-[var(--tx)] opacity-90 leading-snug line-clamp-2">
+                        <span className="text-[var(--mu)]">Base: </span>
+                        {ings
+                          .slice(0, 5)
+                          .map((i) => i.n)
+                          .join(' · ')}
+                        {ings.length > 5 ? ` · +${ings.length - 5}` : ''}
+                      </div>
+                    )}
+
+                    <div className="flex items-center justify-between gap-2 text-xs pt-0.5">
+                      {canMakeNow ? (
+                        <span className="font-semibold text-[var(--ok)] truncate">
+                          ✓ Pronto para fazer ({ings.length} itens)
+                        </span>
+                      ) : (
+                        <span className="font-semibold text-[var(--dn)] truncate">
+                          Falta: {missingIngs.slice(0, 2).join(', ')}
+                          {missingIngs.length > 2 ? ` +${missingIngs.length - 2}` : ''}
+                        </span>
+                      )}
+                      {styleTags.length > 0 && (
+                        <span className="text-[11px] text-[var(--mu)] truncate shrink-0 max-w-[44%]">
+                          {styleTags.slice(0, 2).join(' · ')}
+                        </span>
+                      )}
+                    </div>
+                  </div>
                 </div>
               </button>
             );
-          })
-        ) : (
-          <p className="mu">Nenhuma receita encontrada com esse filtro.</p>
-        )}
-      </div>
+          })}
+        </div>
+      ) : (
+        <div className="panel text-center py-8 space-y-2">
+          <p className="font-semibold text-[var(--tx)]">Nenhuma receita encontrada</p>
+          <p className="mu text-xs">
+            Tente limpar a busca ou trocar entre &ldquo;Posso fazer&rdquo;, &ldquo;Falta algo&rdquo; e &ldquo;Todas&rdquo;.
+          </p>
+          {hasActiveFilters && (
+            <button type="button" className="b g sm mt-2" onClick={clearAllFilters}>
+              Limpar filtros
+            </button>
+          )}
+        </div>
+      )}
+
+      {canSearchCatalogImages && showPhotoBatchModal && (
+        <DrinkImageSearchModal
+          mode="catalog"
+          recipes={drinkRecipes}
+          userId={userId}
+          onRecipeUpdated={(updated) => onRecipeUpdated?.(updated)}
+          onClose={() => setShowPhotoBatchModal(false)}
+          onToast={(m) => onToast?.(m)}
+        />
+      )}
     </div>
   );
 };
@@ -360,14 +827,17 @@ export const StockView: React.FC<{
     (r) => getRecipeItemType(r) === 'drink'
   );
 
-  // Calcula quais ingredientes faltantes liberam mais receitas imediatamente (falta só 1 item)
+  // Calcula quais ingredientes faltantes liberam mais receitas imediatamente (1 item, duplas e base geral)
   const unlockMap = new Map<string, { label: string; recipes: string[] }>();
+  const pairUnlockMap = new Map<string, { a: string; b: string; recipes: string[] }>();
+  const overallMissingMap = new Map<string, { label: string; recipes: string[] }>();
   const nearTwoList: { recipe: string; missing: string[] }[] = [];
+
   drinkRecipes.forEach((r) => {
-    const miss = getMissingIngredientsForRecipe(r, items);
+    const miss = getMissingIngredientsForRecipe(r, items).filter((m) => m !== 'Indisponível');
     if (miss.length === 1) {
       const rawIng = miss[0];
-      const key = norm(rawIng);
+      const key = canonicalIngredientKey(rawIng);
       const cur = unlockMap.get(key);
       if (cur) {
         if (!cur.recipes.includes(r.name)) cur.recipes.push(r.name);
@@ -376,11 +846,35 @@ export const StockView: React.FC<{
       }
     } else if (miss.length === 2) {
       nearTwoList.push({ recipe: r.name, missing: miss });
+      const sorted = [...miss].sort((x, y) => x.localeCompare(y));
+      const pKey = `${canonicalIngredientKey(sorted[0])}||${canonicalIngredientKey(sorted[1])}`;
+      const pCur = pairUnlockMap.get(pKey);
+      if (pCur) {
+        if (!pCur.recipes.includes(r.name)) pCur.recipes.push(r.name);
+      } else {
+        pairUnlockMap.set(pKey, { a: sorted[0], b: sorted[1], recipes: [r.name] });
+      }
     }
+    miss.forEach((rawIng) => {
+      const key = canonicalIngredientKey(rawIng);
+      const cur = overallMissingMap.get(key);
+      if (cur) {
+        if (!cur.recipes.includes(r.name)) cur.recipes.push(r.name);
+      } else {
+        overallMissingMap.set(key, { label: rawIng, recipes: [r.name] });
+      }
+    });
   });
+
   const unlockSuggestions = Array.from(unlockMap.values()).sort(
     (a, b) => b.recipes.length - a.recipes.length || a.label.localeCompare(b.label)
   );
+  const pairSuggestions = Array.from(pairUnlockMap.values())
+    .sort((a, b) => b.recipes.length - a.recipes.length)
+    .slice(0, 6);
+  const topMissingIngredients = Array.from(overallMissingMap.values())
+    .sort((a, b) => b.recipes.length - a.recipes.length || a.label.localeCompare(b.label))
+    .slice(0, 8);
 
   const allCatalogEntries = cats.flatMap((c) =>
     (CAT[c] || []).map((s) => ({
@@ -968,12 +1462,12 @@ export const StockView: React.FC<{
       )}
 
       {showShopping && (
-        <div className="panel mt-3 !border-[var(--ac)]">
+        <div className="panel mt-3 !border-[var(--ac)] space-y-3">
           <div className="row sp">
             <div>
               <h3 className="!m-0">💡 O que comprar para liberar receitas</h3>
               <p className="mu mt-0.5 text-[0.78rem]">
-                Itens que faltam sozinhos para desbloquear novos drinks imediatamente no seu bar.
+                Ranking inteligente do que mais destrava drinks no seu cardápio com o menor investimento.
               </p>
             </div>
             <button
@@ -984,16 +1478,16 @@ export const StockView: React.FC<{
               Fechar
             </button>
           </div>
-          {unlockSuggestions.length > 0 ? (
-            <div className="list mt-2.5">
-              {unlockSuggestions.map((sug) => {
+          {unlockSuggestions.length > 0 && (
+            <div className="list">
+              {unlockSuggestions.slice(0, 15).map((sug) => {
                 const isAdding = quickAddingIng === norm(sug.label);
                 return (
                   <div key={sug.label} className="!items-start">
                     <div className="flex-1 min-w-[180px]">
                       <b>{sug.label}</b>{' '}
                       <span className="chip st1 !py-0.5 !px-2 !text-[0.72rem]">
-                        +{sug.recipes.length} {sug.recipes.length === 1 ? 'receita' : 'receitas'}
+                        +{sug.recipes.length} {sug.recipes.length === 1 ? 'receita' : 'receitas'} na hora
                       </span>
                       <br />
                       <span className="mu text-[0.78rem]">
@@ -1013,11 +1507,80 @@ export const StockView: React.FC<{
                 );
               })}
             </div>
-          ) : (
+          )}
+
+          {pairSuggestions.length > 0 && (
+            <div className="pt-2 border-t border-[var(--bd)]">
+              <div className="text-xs font-bold text-[var(--ac)] mb-1.5">
+                🎯 Duplas que liberam vários drinks juntos (faltam 2 itens):
+              </div>
+              <div className="list">
+                {pairSuggestions.map((pair) => (
+                  <div key={`${pair.a}+${pair.b}`} className="!items-start">
+                    <div className="flex-1 min-w-[180px]">
+                      <b>
+                        {pair.a} + {pair.b}
+                      </b>{' '}
+                      <span className="chip !py-0.5 !px-2 !text-[0.72rem]">
+                        +{pair.recipes.length} {pair.recipes.length === 1 ? 'drink' : 'drinks'}
+                      </span>
+                      <br />
+                      <span className="mu text-[0.76rem]">
+                        Libera: {pair.recipes.slice(0, 4).join(', ')}
+                        {pair.recipes.length > 4 ? ` e +${pair.recipes.length - 4}` : ''}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      className="b sm g"
+                      onClick={() => void handleAddStarterKit(`pair-${pair.a}-${pair.b}`, [pair.a, pair.b])}
+                    >
+                      + Adicionar dupla
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {unlockSuggestions.length === 0 && topMissingIngredients.length > 0 && (
+            <div className="pt-2 border-t border-[var(--bd)]">
+              <div className="text-xs font-bold text-[var(--ac)] mb-1.5">
+                🏆 Base mais presente nas receitas do cardápio (comece por aqui):
+              </div>
+              <div className="list">
+                {topMissingIngredients.map((item) => {
+                  const isAdding = quickAddingIng === norm(item.label);
+                  return (
+                    <div key={item.label} className="!items-start">
+                      <div className="flex-1 min-w-[180px]">
+                        <b>{item.label}</b>{' '}
+                        <span className="chip !py-0.5 !px-2 !text-[0.72rem]">
+                          em {item.recipes.length} receitas
+                        </span>
+                        <br />
+                        <span className="mu text-[0.76rem]">
+                          Ex: {item.recipes.slice(0, 4).join(', ')}
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        className="b sm ok"
+                        disabled={isAdding}
+                        onClick={() => void handleQuickAddIngredient(item.label)}
+                      >
+                        {isAdding ? 'Salvando…' : '+ Já tenho / Comprar'}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {unlockSuggestions.length === 0 && pairSuggestions.length === 0 && topMissingIngredients.length === 0 && (
             <p className="mu mt-2">
-              {nearTwoList.length > 0
-                ? `Nenhum drink está a apenas 1 ingrediente. ${nearTwoList.length} receita(s) precisam de 2 itens (ex: ${nearTwoList[0].recipe}: ${nearTwoList[0].missing.join(' + ')}).`
-                : 'Você já tem ingredientes para todas as receitas cadastradas ou falta montar sua base no estoque!'}
+              Você já tem ingredientes para todas as receitas cadastradas!
             </p>
           )}
         </div>
@@ -1951,7 +2514,9 @@ export const QueueView: React.FC<{
               g.recipe ||
               recipeMapById.get(g.recipeId) ||
               recipeMapByName.get(norm(g.recipeName));
-            const cleanIngs = (rec?.ingredients || []).filter((i) => !i.n.startsWith('__'));
+            const cleanIngs = normalizeRecipeIngredients(rec?.ingredients).filter(
+              (i) => !i.n.startsWith('__')
+            );
             const hasRecipeDetails = Boolean(
               rec && (cleanIngs.length > 0 || rec.steps || rec.instructions || rec.description)
             );
@@ -2983,15 +3548,21 @@ export const MoreView: React.FC<{
   onOpenAlertSettings?: () => void;
   onOpenPlans?: () => void;
   onOpenSuperAdmin?: () => void;
+  onOpenSalesArea?: () => void;
   onOpenSupportDesk?: () => void;
   onOpenSupportChat?: () => void;
   unreadSupportCount?: number;
   isSupportAgent?: boolean;
+  canOpenSalesArea?: boolean;
   quickProfile?: SavedQuickProfile | null;
   onQuickProfileChanged?: (next: SavedQuickProfile | null) => void;
   onLockApp?: () => void;
   onOpenSalesSite?: () => void;
   onOpenLegal?: (tab: 'terms' | 'privacy') => void;
+  actorName?: string;
+  userEmail?: string | null;
+  avatarUrl?: string | null;
+  onOpenEditProfile?: () => void;
   onToast?: (msg: string) => void;
 }> = ({
   bar,
@@ -3003,6 +3574,7 @@ export const MoreView: React.FC<{
   isProPlan = true,
   isPlatformAdmin = false,
   isSupportAgent = false,
+  canOpenSalesArea = false,
   unreadAdminAlerts = 0,
   unreadSupportCount = 0,
   activeDeliveryCount = 0,
@@ -3018,12 +3590,17 @@ export const MoreView: React.FC<{
   onOpenAlertSettings,
   onOpenPlans,
   onOpenSuperAdmin,
+  onOpenSalesArea,
   onOpenSupportDesk,
   onOpenSupportChat,
   onQuickProfileChanged,
   onLockApp,
   onOpenSalesSite,
   onOpenLegal,
+  actorName,
+  userEmail,
+  avatarUrl,
+  onOpenEditProfile,
   onToast,
 }) => {
   const open = bar.accepting_orders !== false;
@@ -3424,6 +4001,36 @@ export const MoreView: React.FC<{
           Equipe, Conta & Suporte
         </div>
         <div className="menu-row-list !mt-0">
+          {onOpenEditProfile && (
+            <button
+              type="button"
+              className="menu-row-item"
+              onClick={onOpenEditProfile}
+            >
+              <div className="flex items-center gap-3 min-w-0 flex-1">
+                {avatarUrl ? (
+                  <img
+                    src={avatarUrl}
+                    alt={actorName || 'Perfil'}
+                    className="w-9 h-9 rounded-full object-cover border border-[var(--ac)]/50 shrink-0"
+                  />
+                ) : (
+                  <div className="w-9 h-9 rounded-full bg-[var(--ac)]/20 border border-[var(--ac)]/50 text-[var(--ac)] font-extrabold text-sm flex items-center justify-center shrink-0">
+                    {(actorName || userEmail || 'U').charAt(0).toUpperCase()}
+                  </div>
+                )}
+                <div className="menu-row-text">
+                  <div className="menu-row-title truncate">
+                    👤 Meu Perfil · {actorName || 'Definir nome'}
+                  </div>
+                  <div className="menu-row-sub truncate">
+                    {userEmail ? `${userEmail} · ` : ''}Alterar nome de exibição e foto de perfil
+                  </div>
+                </div>
+              </div>
+              <span className="b g sm shrink-0">Editar</span>
+            </button>
+          )}
           {isPlatformAdmin && onOpenSuperAdmin && (
             <button
               type="button"
@@ -3438,7 +4045,25 @@ export const MoreView: React.FC<{
                   )}
                 </div>
                 <div className="menu-row-sub">
-                  Área dedicada somente à administração: contas, planos, chat suporte e anúncios
+                  Área dedicada à administração da plataforma conforme suas permissões
+                </div>
+              </div>
+              <span className="menu-row-chev">›</span>
+            </button>
+          )}
+
+          {canOpenSalesArea && onOpenSalesArea && (
+            <button
+              type="button"
+              className="menu-row-item !border-[var(--ac)]/50"
+              onClick={onOpenSalesArea}
+            >
+              <div className="menu-row-text">
+                <div className="menu-row-title text-[var(--ac)]">
+                  💼 Perfil de Vendas & Simulador Demo
+                </div>
+                <div className="menu-row-sub">
+                  Simulador ao vivo, roteiro de apresentação comercial e calculadora de economia
                 </div>
               </div>
               <span className="menu-row-chev">›</span>

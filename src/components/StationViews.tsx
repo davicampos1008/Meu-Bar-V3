@@ -27,6 +27,7 @@ import {
   makeDrink,
   money,
   norm,
+  normalizeRecipeIngredients,
 } from '../lib/utils';
 import type {
   Bar,
@@ -199,9 +200,12 @@ export const BarmanStationView: React.FC<BarmanStationViewProps> = ({
             const rec = group.recipe || recipeMap[group.recipeId] || recipeByName[norm(group.name)];
             const isOpen = expandedRecipeKey === group.groupKey;
             const isAvulso = rec && getRecipeItemType(rec) === 'avulso';
+            const cleanRecIngs = normalizeRecipeIngredients(rec?.ingredients).filter(
+              (i) => !i.n.startsWith('__')
+            );
             const hasRecipeDetails = Boolean(
               rec &&
-                ((rec.ingredients && rec.ingredients.filter((i) => !i.n.startsWith('__')).length > 0) ||
+                (cleanRecIngs.length > 0 ||
                   rec.steps ||
                   rec.instructions ||
                   rec.description)
@@ -259,16 +263,14 @@ export const BarmanStationView: React.FC<BarmanStationViewProps> = ({
                     <div className="font-bold text-[var(--ac)]">
                       Ingredientes ({rec.glass || 'Copo padrão'} · {rec.technique || 'Preparo'})
                     </div>
-                    {(rec.ingredients || []).filter((ing) => !ing.n.startsWith('__')).length > 0 && (
+                    {cleanRecIngs.length > 0 && (
                       <ul className="list-disc pl-4 m-0 space-y-0.5">
-                        {(rec.ingredients || [])
-                          .filter((ing) => !ing.n.startsWith('__'))
-                          .map((ing, idx) => (
-                            <li key={idx}>
-                              <strong>{ing.n}</strong>
-                              {ing.q ? ` — ${ing.q}` : ''}
-                            </li>
-                          ))}
+                        {cleanRecIngs.map((ing, idx) => (
+                          <li key={idx}>
+                            <strong>{ing.n}</strong>
+                            {ing.q ? ` — ${ing.q}` : ''}
+                          </li>
+                        ))}
                       </ul>
                     )}
                     {(rec.steps || rec.instructions || rec.description) && (
@@ -602,7 +604,9 @@ export const KitchenStationView: React.FC<KitchenStationViewProps> = ({
               const mins = elapsedMinutes(o.created_at);
               const urgent = mins >= 15;
               const rec = resolveKitchenRecipe(o);
-              const cleanIngs = (rec?.ingredients || []).filter((i) => !i.n.startsWith('__'));
+              const cleanIngs = normalizeRecipeIngredients(rec?.ingredients).filter(
+                (i) => !i.n.startsWith('__')
+              );
               const hasRecipeInfo = Boolean(
                 rec && (cleanIngs.length > 0 || rec.steps || rec.instructions || rec.description)
               );

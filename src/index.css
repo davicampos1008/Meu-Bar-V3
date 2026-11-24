@@ -487,12 +487,20 @@ label {
   font-size: 2.5rem;
 }
 
-.c0 { background: linear-gradient(135deg, #164e63, #0f172a); }
-.c1 { background: linear-gradient(135deg, #7c2d12, #1c1917); }
-.c2 { background: linear-gradient(135deg, #713f12, #1c1917); }
-.c3 { background: linear-gradient(135deg, #065f46, #111827); }
-.c4 { background: linear-gradient(135deg, #831843, #1e1b4b); }
-.c5 { background: linear-gradient(135deg, #312e81, #18181b); }
+.c0 { background: linear-gradient(135deg, #1e3a5f, #0f172a); }
+.c1 { background: linear-gradient(135deg, #6d28d9, #1e1b4b); }
+.c2 { background: linear-gradient(135deg, #047857, #064e3b); }
+.c3 { background: linear-gradient(135deg, #164e63, #0f172a); }
+.c4 { background: linear-gradient(135deg, #b45309, #1c1917); }
+.c5 { background: linear-gradient(135deg, #065f46, #111827); }
+.c6 { background: linear-gradient(135deg, #9a3412, #1c1917); }
+.c7 { background: linear-gradient(135deg, #7c2d12, #1c1917); }
+.c8 { background: linear-gradient(135deg, #831843, #1e1b4b); }
+.c9 { background: linear-gradient(135deg, #0369a1, #1e293b); }
+.c10 { background: linear-gradient(135deg, #4338ca, #18181b); }
+.c11 { background: linear-gradient(135deg, #991b1b, #1c1917); }
+.c12 { background: linear-gradient(135deg, #0f766e, #111827); }
+.c13 { background: linear-gradient(135deg, #15803d, #0f172a); }
 
 .card .t {
   padding: 11px 13px;
@@ -516,6 +524,103 @@ label {
   color: var(--ok);
   font-weight: 700;
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Catálogo interno de Receitas (limpo, informativo e responsivo) */
+.recipes-catalog-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 14px;
+  margin-top: 14px;
+}
+
+@media (min-width: 600px) {
+  .recipes-catalog-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+  }
+}
+
+@media (min-width: 900px) {
+  .recipes-catalog-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+.recipe-pro-card {
+  background: var(--s1);
+  border: 1px solid var(--bd);
+  border-radius: 16px;
+  overflow: hidden;
+  text-align: left;
+  color: var(--tx);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  transition: transform .16s cubic-bezier(0.16, 1, 0.3, 1), border-color .16s ease, box-shadow .16s ease;
+}
+
+.recipe-pro-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--bd-strong);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, .24);
+}
+
+.recipe-pro-card:focus-visible {
+  outline: 2px solid var(--ac);
+  outline-offset: 2px;
+}
+
+.recipe-pro-media {
+  aspect-ratio: 16 / 10;
+  width: 100%;
+  background-size: cover;
+  background-position: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 2.75rem;
+  border-bottom: 1px solid var(--bd);
+}
+
+.recipe-cat-strip {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 2px 0 4px;
+  scrollbar-width: none;
+}
+
+.recipe-cat-strip::-webkit-scrollbar {
+  display: none;
+}
+
+.recipe-cat-btn {
+  background: transparent;
+  color: var(--mu);
+  border: 1px solid var(--bd);
+  border-radius: 10px;
+  padding: 7px 12px;
+  font-size: .82rem;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background-color .14s ease, color .14s ease, border-color .14s ease;
+}
+
+.recipe-cat-btn:hover {
+  color: var(--tx);
+  background: var(--pill-bg);
+}
+
+.recipe-cat-btn.on {
+  background: var(--tx);
+  color: var(--bg);
+  border-color: var(--tx);
+  font-weight: 700;
 }
 
 /* Banner da loja e história */

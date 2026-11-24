@@ -3,7 +3,12 @@
  * Validação de URLs, uploads, senhas, sanitização e anti-spam
  * ============================================================ */
 
-const ALLOWED_IMAGE_MIMES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+const ALLOWED_IMAGE_MIMES = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'image/avif',
+]);
 const MAX_IMAGE_BYTES = 6 * 1024 * 1024; // 6 MB
 const MAX_PDF_BYTES = 5 * 1024 * 1024; // 5 MB
 

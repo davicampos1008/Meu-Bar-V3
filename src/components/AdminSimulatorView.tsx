@@ -29,6 +29,7 @@ import {
   makeDrink,
   money,
   norm,
+  normalizeRecipe,
   today,
 } from '../lib/utils';
 import type {
@@ -169,7 +170,7 @@ const FALLBACK_RECIPES: Recipe[] = [
   {
     id: 'sim-rec-gt',
     name: 'Gin Tônica Clássico',
-    category: 'Gin',
+    category: 'Clássicos',
     item_type: 'drink',
     ingredients: [
       { n: 'Gin', q: '50 ml' },
@@ -184,11 +185,11 @@ const FALLBACK_RECIPES: Recipe[] = [
   {
     id: 'sim-rec-caipirinha',
     name: 'Caipirinha Clássica',
-    category: 'Caipirinhas',
+    category: 'Brasileiríssimos',
     item_type: 'drink',
     ingredients: [
-      { n: 'Cachaça', q: '50 ml' },
-      { n: 'Limão', q: '1 unidade' },
+      { n: 'Cachaça', q: '50 ml (Prata)' },
+      { n: 'Limão', q: '1 unidade (Taiti)' },
       { n: 'Açúcar', q: '2 colheres' },
       { n: 'Gelo', q: 'à vontade' },
     ],
@@ -199,7 +200,7 @@ const FALLBACK_RECIPES: Recipe[] = [
   {
     id: 'sim-rec-caipiroska',
     name: 'Caipiroska de Morango',
-    category: 'Caipirinhas',
+    category: 'Doces & Frutados',
     item_type: 'drink',
     ingredients: [
       { n: 'Vodka', q: '50 ml' },
@@ -214,10 +215,10 @@ const FALLBACK_RECIPES: Recipe[] = [
   {
     id: 'sim-rec-mojito',
     name: 'Mojito Clássico',
-    category: 'Rum',
+    category: 'Refrescantes',
     item_type: 'drink',
     ingredients: [
-      { n: 'Rum branco', q: '50 ml' },
+      { n: 'Rum', q: '50 ml (Branco)' },
       { n: 'Limão', q: '30 ml' },
       { n: 'Hortelã', q: '8 folhas' },
       { n: 'Açúcar', q: '2 colheres' },
@@ -231,7 +232,7 @@ const FALLBACK_RECIPES: Recipe[] = [
   {
     id: 'sim-rec-aperol',
     name: 'Aperol Spritz',
-    category: 'Clássicos',
+    category: 'Aperitivos',
     item_type: 'drink',
     ingredients: [
       { n: 'Aperol', q: '60 ml' },
@@ -252,7 +253,7 @@ const FALLBACK_RECIPES: Recipe[] = [
     ingredients: [
       { n: 'Gin', q: '30 ml' },
       { n: 'Campari', q: '30 ml' },
-      { n: 'Vermute tinto', q: '30 ml' },
+      { n: 'Vermute', q: '30 ml (Tinto)' },
       { n: 'Laranja', q: '1 casca' },
       { n: 'Gelo', q: '1 cubo grande' },
     ],
@@ -263,10 +264,10 @@ const FALLBACK_RECIPES: Recipe[] = [
   {
     id: 'sim-rec-cuba',
     name: 'Cuba Libre',
-    category: 'Rum',
+    category: 'Clássicos',
     item_type: 'drink',
     ingredients: [
-      { n: 'Rum branco', q: '50 ml' },
+      { n: 'Rum', q: '50 ml (Branco)' },
       { n: 'Coca-Cola', q: '150 ml' },
       { n: 'Limão', q: '15 ml' },
       { n: 'Gelo', q: 'à vontade' },
@@ -380,23 +381,21 @@ function getStockIngredientsForPreset(preset: StockPresetId): string[] {
     'Gin',
     'Vodka',
     'Cachaça',
-    'Rum branco',
+    'Rum',
     'Tequila',
-    'Whisky Bourbon',
+    'Whisky',
     'Aperol',
     'Campari',
-    'Vermute tinto',
+    'Vermute',
     'Prosecco',
-    'Licor de laranja',
+    'Cointreau',
     'Água tônica',
     'Água com gás',
     'Coca-Cola',
     'Refrigerante de limão',
     'Suco de laranja',
-    'Suco de limão',
     'Suco de cranberry',
     'Limão',
-    'Limão siciliano',
     'Laranja',
     'Morango',
     'Maracujá',
@@ -405,8 +404,8 @@ function getStockIngredientsForPreset(preset: StockPresetId): string[] {
     'Gengibre',
     'Açúcar',
     'Xarope de açúcar',
+    'Xarope de gengibre',
     'Leite condensado',
-    'Espuma de gengibre',
     'Gelo',
   ];
   return Array.from(new Set([...eco, ...gin, ...extra]));
@@ -681,7 +680,7 @@ export const AdminSimulatorView: React.FC<{
       try {
         const res = await realSb.from('recipes').select('*').order('name');
         if (!res.error && Array.isArray(res.data) && res.data.length > 0) {
-          globalRecipes = (res.data as Recipe[]).filter((r) => !r.owner);
+          globalRecipes = (res.data as Recipe[]).filter((r) => r.is_public !== false);
         }
       } catch {
         // usa fallback se offline
@@ -689,6 +688,7 @@ export const AdminSimulatorView: React.FC<{
       if (globalRecipes.length === 0) {
         globalRecipes = FALLBACK_RECIPES.map((r) => ({ ...r }));
       }
+      globalRecipes = globalRecipes.map((r) => normalizeRecipe(r));
 
       // 2) Constrói petiscos e avulsos da loja simulada
       const customRecipes: Recipe[] = cfg.extraItems.map((it) => ({
@@ -2143,11 +2143,14 @@ export const AdminSimulatorView: React.FC<{
             hasPricing={true}
             unpricedCount={unpricedCount}
             canEditMenu={true}
+            userId={SIM_OWNER_ID}
             onGoPrices={() => setOwnerSubView('prices')}
             onOpenCreateDrink={(editExisting) => setCreateDrinkModal({ editExisting })}
             onOpenCatalog={() => setOwnerSubView('catalog')}
             onOpenShakers={() => setShakersModalOpen(true)}
             onSelectRecipe={(rec) => setSelectedRecipeModal(rec)}
+            onRecipeUpdated={() => setSnap(getSimSnapshot())}
+            onToast={onToast}
           />
         ) : ownerTab === 'stock' ? (
           <StockView
@@ -2450,8 +2453,13 @@ export const AdminSimulatorView: React.FC<{
           prices={simPrices}
           orders={simOrders}
           tableTabs={simTableTabs}
+          userId={SIM_OWNER_ID}
           onClose={() => setSelectedRecipeModal(null)}
           onOrderCreated={refreshSnap}
+          onRecipeUpdated={(updated) => {
+            setSelectedRecipeModal(updated);
+            setSnap(getSimSnapshot());
+          }}
           onToast={onToast}
         />
       )}

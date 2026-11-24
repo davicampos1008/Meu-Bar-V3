@@ -1,5 +1,10 @@
 import { createClient } from '@supabase/supabase-js';
-import type { Bar } from '../types/meubar';
+import type { Bar, Recipe } from '../types/meubar';
+import {
+  inferImagePresetFromFolder,
+  optimizeImageFile,
+  type ImagePreset,
+} from './imageOptimizer';
 import {
   sanitizeStorageSegment,
   validateImageUpload,
@@ -21,6 +26,7 @@ const FALLBACK_KEY = 'sb_publishable_bs4eqPwTL4LEMi2ZiB-ROA_eTVoX1ll';
 export const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || FALLBACK_URL;
 export const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || FALLBACK_KEY;
 export const MEDIA_BUCKET = 'bar-media';
+export const RECIPE_BUCKET = 'recipes';
 
 export const realSb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
@@ -171,86 +177,194 @@ export async function broadcastMenuUpdate(barId: string, updatedBar?: Partial<Ba
   }
 }
 
-export function compressImageFile(file: File): Promise<File> {
-  return new Promise((resolve) => {
-    if (!file || !file.type || !file.type.startsWith('image/')) {
-      resolve(file);
-      return;
-    }
-    const img = new Image();
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      img.onload = () => {
-        const maxSide = 960;
-        let w = img.width;
-        let h = img.height;
-        if (w > maxSide || h > maxSide) {
-          if (w >= h) {
-            h = Math.round((h * maxSide) / w);
-            w = maxSide;
-          } else {
-            w = Math.round((w * maxSide) / h);
-            h = maxSide;
-          }
-        }
-        const canvas = document.createElement('canvas');
-        canvas.width = w;
-        canvas.height = h;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) {
-          resolve(file);
-          return;
-        }
-        ctx.drawImage(img, 0, 0, w, h);
-        canvas.toBlob(
-          (blob) => {
-            resolve(blob ? new File([blob], 'foto.jpg', { type: 'image/jpeg' }) : file);
-          },
-          'image/jpeg',
-          0.78
-        );
-      };
-      img.onerror = () => resolve(file);
-      img.src = String(e.target?.result || '');
-    };
-    reader.onerror = () => resolve(file);
-    reader.readAsDataURL(file);
-  });
+export function compressImageFile(
+  file: File,
+  preset: ImagePreset = 'general'
+): Promise<File> {
+  return optimizeImageFile(file, preset);
+}
+
+export interface UploadMediaOptions {
+  preset?: ImagePreset;
+  entityId?: string;
+  bucket?: 'recipes' | 'bar-media';
+}
+
+function appendCacheVersion(publicUrl: string): string {
+  if (!publicUrl) return '';
+  const sep = publicUrl.includes('?') ? '&' : '?';
+  return `${publicUrl}${sep}v=${Date.now()}`;
 }
 
 export async function uploadMediaFile(
   file: File,
   folder: string,
-  userId?: string
+  userId?: string,
+  options?: UploadMediaOptions
 ): Promise<{ url?: string; error?: string }> {
   const check = validateImageUpload(file);
   if (!check.ok) {
     return { error: check.error };
   }
+
+  const preset = options?.preset || inferImagePresetFromFolder(folder);
+  const prepared = await optimizeImageFile(file, preset);
+
   if (isSimDbActive()) {
-    return { url: registerSimBlobUrl(file) };
+    return { url: registerSimBlobUrl(prepared) };
   }
-  const prepared = await compressImageFile(file);
+
+  let resolvedUserId = userId;
+  if (!resolvedUserId) {
+    try {
+      const { data } = await realSb.auth.getSession();
+      resolvedUserId = data.session?.user?.id || undefined;
+    } catch {
+      // ignore
+    }
+  }
+
   const ext =
-    prepared.type === 'image/jpeg'
-      ? 'jpg'
-      : prepared.type === 'image/png'
-      ? 'png'
-      : prepared.type === 'image/webp'
+    prepared.type === 'image/webp'
       ? 'webp'
-      : 'jpg';
-  const safeUser = sanitizeStorageSegment(userId || 'anon', 'anon');
+      : prepared.type === 'image/png'
+        ? 'png'
+        : 'jpg';
+  const safeUser = sanitizeStorageSegment(resolvedUserId || 'anon', 'anon');
   const safeFolder = sanitizeStorageSegment(folder, 'media');
-  const path = `${safeUser}/${safeFolder}/${Date.now()}-${Math.random().toString(36).slice(2, 7)}.${ext}`;
-  const up = await sb.storage.from(MEDIA_BUCKET).upload(path, prepared, {
+  const safeEntity = options?.entityId
+    ? sanitizeStorageSegment(options.entityId, '')
+    : '';
+  const uniqueName = safeEntity
+    ? `${safeEntity}.${ext}`
+    : `${Date.now()}-${Math.random().toString(36).slice(2, 7)}.${ext}`;
+
+  const targetBucket =
+    options?.bucket || (safeFolder === 'recipes' && safeEntity ? RECIPE_BUCKET : MEDIA_BUCKET);
+
+  const primaryPath =
+    targetBucket === RECIPE_BUCKET && safeEntity
+      ? `catalog/${uniqueName}`
+      : `${safeUser}/${safeFolder}/${uniqueName}`;
+
+  const up = await sb.storage.from(targetBucket).upload(primaryPath, prepared, {
     upsert: true,
-    contentType: prepared.type || 'image/jpeg',
+    cacheControl: '3600',
+    contentType: prepared.type || 'image/webp',
   });
-  if (up.error) {
-    return { error: up.error.message };
+
+  if (!up.error) {
+    const pub = sb.storage.from(targetBucket).getPublicUrl(primaryPath);
+    return { url: appendCacheVersion(pub.data?.publicUrl || '') };
   }
-  const pub = sb.storage.from(MEDIA_BUCKET).getPublicUrl(path);
-  return { url: pub.data?.publicUrl || '' };
+
+  // Fallback seguro para pasta própria em bar-media caso políticas antigas do bucket 'recipes' ainda estejam ativas
+  if (targetBucket === RECIPE_BUCKET) {
+    const fallbackPath = `${safeUser}/recipes/${uniqueName}`;
+    const fallbackUp = await sb.storage.from(MEDIA_BUCKET).upload(fallbackPath, prepared, {
+      upsert: true,
+      cacheControl: '3600',
+      contentType: prepared.type || 'image/webp',
+    });
+    if (!fallbackUp.error) {
+      const pub = sb.storage.from(MEDIA_BUCKET).getPublicUrl(fallbackPath);
+      return { url: appendCacheVersion(pub.data?.publicUrl || '') };
+    }
+    return { error: fallbackUp.error.message || up.error.message };
+  }
+
+  return { error: up.error.message };
+}
+
+export async function broadcastGlobalRecipeUpdate(recipe: Recipe): Promise<void> {
+  if (isSimDbActive()) {
+    notifySimDbChange();
+    return;
+  }
+  try {
+    const ch = realSb.channel('global-recipes-sync');
+    await new Promise<void>((resolve) => {
+      const timeout = setTimeout(resolve, 750);
+      ch.subscribe((status) => {
+        if (status === 'SUBSCRIBED') {
+          clearTimeout(timeout);
+          void ch
+            .send({
+              type: 'broadcast',
+              event: 'recipe-updated',
+              payload: { recipe, ts: Date.now() },
+            })
+            .finally(() => {
+              setTimeout(() => void realSb.removeChannel(ch), 250);
+              resolve();
+            });
+        }
+      });
+    });
+  } catch {
+    // ignore broadcast issues
+  }
+}
+
+export async function saveRecipeImageGlobally(
+  recipe: Recipe,
+  imageUrl: string | null
+): Promise<{ ok: true; recipe: Recipe } | { ok: false; error: string }> {
+  const cleanUrl = imageUrl ? imageUrl.trim() || null : null;
+  const upRec = await sb
+    .from('recipes')
+    .update({ image_url: cleanUrl })
+    .eq('id', recipe.id)
+    .select()
+    .single();
+
+  if (upRec.error || !upRec.data) {
+    const msg = String(upRec.error?.message || 'Não foi possível salvar a foto no catálogo.');
+    return {
+      ok: false,
+      error:
+        msg.includes('policy') || msg.includes('permission')
+          ? 'Sem permissão no banco para editar foto global. Peça acesso ao Administrador.'
+          : msg,
+    };
+  }
+
+  const saved = upRec.data as Recipe;
+  if (saved.is_public !== false && (!saved.item_type || saved.item_type === 'drink')) {
+    try {
+      await sb
+        .from('recipes')
+        .update({ image_url: cleanUrl })
+        .eq('is_public', true)
+        .eq('name', saved.name)
+        .neq('id', saved.id);
+    } catch {
+      // ignore optional sibling sync errors
+    }
+  }
+  void broadcastGlobalRecipeUpdate(saved);
+  return { ok: true, recipe: saved };
+}
+
+export async function uploadAndSaveRecipePhoto(
+  recipe: Recipe,
+  file: File,
+  userId?: string
+): Promise<{ ok: true; recipe: Recipe; url: string } | { ok: false; error: string }> {
+  const up = await uploadMediaFile(file, 'recipes', userId, {
+    preset: 'recipe',
+    bucket: RECIPE_BUCKET,
+    entityId: `drink-${recipe.id}`,
+  });
+  if (up.error || !up.url) {
+    return { ok: false, error: up.error || 'Erro ao enviar foto do drink.' };
+  }
+
+  const saved = await saveRecipeImageGlobally(recipe, up.url);
+  if (!saved.ok) {
+    return saved;
+  }
+  return { ok: true, recipe: saved.recipe, url: up.url };
 }
 
 export async function uploadPdfFile(

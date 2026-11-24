@@ -1,20 +1,45 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useAlertPrefs } from '../lib/alertPrefs';
 import {
+  adminAuditRecipe,
   adminListAllBars,
   adminListUsers,
   adminUpdateBarPlan,
+  ALL_PLATFORM_PERMISSION_KEYS,
   buildAdsTxtLine,
+  buildPresetPermissions,
   getBarPlanStatus,
+  getDelegateConfig,
+  hasPlatformPermission,
+  isPrimarySuperAdmin,
   isSuperAdmin,
   isValidAdSenseClient,
   isValidAdSenseSlot,
   loadPartnerAds,
+  PLATFORM_PERMISSIONS_META,
   sanitizeHttpUrl,
   savePlatformConfig,
 } from '../lib/saas';
-import { sb } from '../lib/supabase';
-import { money } from '../lib/utils';
+import { CATS, EMO } from '../lib/catalog';
+import { buildResetRecipesSql } from '../lib/recipesResetSql';
+import { EXTENDED_RECIPES } from '../lib/recipesSeed';
+import {
+  broadcastGlobalRecipeUpdate,
+  RECIPE_BUCKET,
+  saveRecipeImageGlobally,
+  sb,
+  uploadAndSaveRecipePhoto,
+  uploadMediaFile,
+} from '../lib/supabase';
+import {
+  getRecipeAuditStatus,
+  getRecipeCreatorBrand,
+  getRecipeItemType,
+  money,
+  norm,
+  normalizeRecipeCategory,
+  normalizeRecipeIngredients,
+} from '../lib/utils';
 import type {
   AdminAlertItem,
   AdminBarOverview,
@@ -22,13 +47,27 @@ import type {
   BarPlanTier,
   PartnerAdBanner,
   PartnerAdPlacement,
+  PlatformDelegateConfig,
+  PlatformPermissionKey,
+  PlatformRolePreset,
   PlatformSaaSConfig,
+  Recipe,
 } from '../types/meubar';
 import { AdminSimulatorView } from './AdminSimulatorView';
+import { DrinkImageSearchModal } from './DrinkImageSearchModal';
 import { ImageUploader } from './SharedUI';
 import { SupportDeskView } from './SupportChatView';
 
-export type AdminTab = 'accounts' | 'stores' | 'support' | 'simulator' | 'partners' | 'adsense' | 'sales';
+export type AdminTab =
+  | 'accounts'
+  | 'stores'
+  | 'recipes_audit'
+  | 'support'
+  | 'simulator'
+  | 'partners'
+  | 'adsense'
+  | 'sales'
+  | 'team_access';
 type AccountFilter = 'all' | 'recent' | 'with_bars' | 'no_bars' | 'vip_pro';
 
 const PLACEMENT_LABELS: Record<PartnerAdPlacement, string> = {
@@ -71,6 +110,7 @@ export const SuperAdminView: React.FC<{
     note: string | null
   ) => void;
   onAdsUpdated: (ads: PartnerAdBanner[]) => void;
+  onRecipeUpdated?: (updated: Recipe) => void;
   onBack?: () => void;
   onToast: (msg: string) => void;
 }> = ({
@@ -87,20 +127,78 @@ export const SuperAdminView: React.FC<{
   onConfigUpdated,
   onBarPlanChanged,
   onAdsUpdated,
+  onRecipeUpdated,
   onBack,
   onToast,
 }) => {
   const { prefs: alertPrefs, setPref: setAlertPref, patchPrefs: patchAlertPrefs } = useAlertPrefs();
   const adminAlertOn = alertPrefs.allEnabled && alertPrefs.adminNewAccount;
-  const [internalTab, setInternalTab] = useState<AdminTab>(controlledTab || 'accounts');
+
+  const isPrimaryOwner = isPrimarySuperAdmin(userEmail);
+  const canViewAccounts = hasPlatformPermission(userEmail, 'view_accounts', config);
+  const canManageVip = hasPlatformPermission(userEmail, 'manage_vip_plans', config);
+  const canManageStores = hasPlatformPermission(userEmail, 'manage_stores', config);
+  const canAuditRecipes = hasPlatformPermission(userEmail, 'audit_recipes', config);
+  const canEditGlobalRecipes = hasPlatformPermission(userEmail, 'edit_global_recipes', config);
+  const canSearchImages = hasPlatformPermission(userEmail, 'search_recipe_images', config);
+  const canSupport = hasPlatformPermission(userEmail, 'support_desk', config);
+  const canSimulator = hasPlatformPermission(userEmail, 'use_simulator', config);
+  const canPartnerAds = hasPlatformPermission(userEmail, 'manage_partner_ads', config);
+  const canAdSense = hasPlatformPermission(userEmail, 'manage_adsense', config);
+  const canSaasPricing = hasPlatformPermission(userEmail, 'manage_saas_pricing', config);
+
+  const isTabAllowed = (t: AdminTab): boolean => {
+    switch (t) {
+      case 'accounts':
+        return canViewAccounts || canManageVip;
+      case 'stores':
+        return canManageStores || canManageVip;
+      case 'recipes_audit':
+        return canAuditRecipes || canSearchImages || canEditGlobalRecipes;
+      case 'support':
+        return canSupport;
+      case 'simulator':
+        return canSimulator;
+      case 'partners':
+        return canPartnerAds;
+      case 'adsense':
+        return canAdSense;
+      case 'sales':
+        return canSaasPricing;
+      case 'team_access':
+        return isPrimaryOwner;
+      default:
+        return false;
+    }
+  };
+
+  const tabPriorityOrder: AdminTab[] = [
+    'accounts',
+    'recipes_audit',
+    'stores',
+    'support',
+    'partners',
+    'adsense',
+    'simulator',
+    'sales',
+    'team_access',
+  ];
+  const firstAllowedTab: AdminTab =
+    tabPriorityOrder.find((t) => isTabAllowed(t)) || 'accounts';
+
+  const [internalTab, setInternalTab] = useState<AdminTab>(
+    controlledTab && isTabAllowed(controlledTab) ? controlledTab : firstAllowedTab
+  );
   const [supportFocus, setSupportFocus] = useState<{
     barId: string;
     barName: string;
     ownerEmail?: string | null;
   } | null>(null);
 
-  const tab: AdminTab = controlledTab ?? internalTab;
+  const rawTab: AdminTab = controlledTab ?? internalTab;
+  const tab: AdminTab = isTabAllowed(rawTab) ? rawTab : firstAllowedTab;
   const setTab = (next: AdminTab) => {
+    if (!isTabAllowed(next)) return;
     setActiveModal(null);
     setInternalTab(next);
     onTabChange?.(next);
@@ -113,6 +211,7 @@ export const SuperAdminView: React.FC<{
     | { kind: 'store'; id: string }
     | { kind: 'kpi'; topic: 'accounts' | 'stores' | 'vip' | 'alerts' }
   >(null);
+  const [sqlModalText, setSqlModalText] = useState<string | null>(null);
 
   useEffect(() => {
     if (!activeModal) return;
@@ -152,19 +251,53 @@ export const SuperAdminView: React.FC<{
   const [adPriority, setAdPriority] = useState('10');
   const [savingAd, setSavingAd] = useState(false);
 
-  // Config global (AdSense + Preços)
+  // Config global (AdSense + Preços + Delegação ADM/Vendas)
   const [draft, setDraft] = useState<PlatformSaaSConfig>(config);
   const [savingCfg, setSavingCfg] = useState(false);
+  const [syncingCatalog, setSyncingCatalog] = useState(false);
+
+  // Delegação de ADM & Perfil de Vendas (exclusivo do dono principal)
+  const [delegateEmail, setDelegateEmail] = useState('');
+  const [delegateName, setDelegateName] = useState('');
+  const [delegatePreset, setDelegatePreset] = useState<PlatformRolePreset>('custom_admin');
+  const [delegateActive, setDelegateActive] = useState(true);
+  const [delegatePerms, setDelegatePerms] = useState<Record<PlatformPermissionKey, boolean>>(() =>
+    buildPresetPermissions('auditor')
+  );
+
+  // Auditoria de Receitas Autorais + Imagens do Catálogo
+  const [auditRecipes, setAuditRecipes] = useState<Recipe[]>([]);
+  const [loadingAuditRecipes, setLoadingAuditRecipes] = useState(false);
+  const [auditFilter, setAuditFilter] = useState<'pending' | 'approved_custom' | 'rejected' | 'all'>('pending');
+  const [reviewRecipe, setReviewRecipe] = useState<Recipe | null>(null);
+  const [reviewBrand, setReviewBrand] = useState('');
+  const [reviewImage, setReviewImage] = useState('');
+  const [reviewNote, setReviewNote] = useState('');
+  const [auditingBusy, setAuditingBusy] = useState(false);
+  const [uploadingReviewPhoto, setUploadingReviewPhoto] = useState(false);
+  const [showReviewPhotoSearch, setShowReviewPhotoSearch] = useState(false);
+  const [showCatalogPhotoSearch, setShowCatalogPhotoSearch] = useState(false);
+  const [quickPhotoRecipe, setQuickPhotoRecipe] = useState<Recipe | null>(null);
+  const reviewPhotoInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     setDraft(config);
   }, [config]);
 
   const refreshDirectory = async () => {
+    if (!canViewAccounts && !canManageStores && !canManageVip && !isPrimaryOwner) {
+      setLoadingDirectory(false);
+      return;
+    }
     setLoadingDirectory(true);
     setStoresErr('');
     setUsersErr('');
-    const [storesRes, usersRes] = await Promise.all([adminListAllBars(), adminListUsers()]);
+    const needStores = canManageStores || canManageVip || canViewAccounts || isPrimaryOwner;
+    const needUsers = canViewAccounts || canManageVip || isPrimaryOwner;
+    const [storesRes, usersRes] = await Promise.all([
+      needStores ? adminListAllBars() : Promise.resolve({ bars: [], error: undefined }),
+      needUsers ? adminListUsers() : Promise.resolve({ users: [], error: undefined }),
+    ]);
     setStores(storesRes.bars);
     if (storesRes.error) setStoresErr(storesRes.error);
     setUsers(usersRes.users);
@@ -180,10 +313,122 @@ export const SuperAdminView: React.FC<{
     setAdsLoading(false);
   };
 
+  const refreshAuditRecipes = async () => {
+    setLoadingAuditRecipes(true);
+    try {
+      let res = await sb
+        .from('recipes')
+        .select('*')
+        .order('created_at', { ascending: false });
+      if (res.error) {
+        res = await sb.from('recipes').select('*').order('name');
+      }
+      if (!res.error && Array.isArray(res.data)) {
+        const drinks = (res.data as Recipe[]).filter((r) => getRecipeItemType(r) === 'drink');
+        setAuditRecipes(drinks);
+      }
+    } finally {
+      setLoadingAuditRecipes(false);
+    }
+  };
+
+  const openRecipeAuditModal = (r: Recipe) => {
+    setReviewRecipe(r);
+    setReviewBrand(getRecipeCreatorBrand(r) || '');
+    setReviewImage(r.image_url || '');
+    setReviewNote(r.audit_note || '');
+  };
+
+  const openAuditByAlert = async (al: AdminAlertItem) => {
+    setTab('recipes_audit');
+    const existing = al.recipe_id ? auditRecipes.find((r) => r.id === al.recipe_id) : undefined;
+    if (existing) {
+      openRecipeAuditModal(existing);
+      return;
+    }
+    if (al.recipe_id) {
+      const fetchOne = await sb.from('recipes').select('*').eq('id', al.recipe_id).maybeSingle();
+      if (!fetchOne.error && fetchOne.data) {
+        const rec = fetchOne.data as Recipe;
+        setAuditRecipes((prev) =>
+          prev.some((x) => x.id === rec.id) ? prev : [rec, ...prev]
+        );
+        openRecipeAuditModal(rec);
+        return;
+      }
+    }
+    void refreshAuditRecipes();
+  };
+
+  const handleAuditDecision = async (decision: 'approved' | 'rejected') => {
+    if (!reviewRecipe) return;
+    const cleanBrand = reviewBrand.trim();
+    if (decision === 'approved' && cleanBrand.length < 2) {
+      onToast('Informe o nome ou marca do criador que aparecerá dentro do drink publicado.');
+      return;
+    }
+    setAuditingBusy(true);
+    const res = await adminAuditRecipe({
+      recipe: reviewRecipe,
+      decision,
+      creatorBrand: cleanBrand || getRecipeCreatorBrand(reviewRecipe) || 'Autor Parceiro',
+      note: reviewNote,
+      imageUrl: reviewImage.trim() || null,
+    });
+    setAuditingBusy(false);
+
+    if (!res.ok) {
+      onToast(`Erro ao auditar receita: ${res.error || 'verifique as permissões no Supabase.'}`);
+      return;
+    }
+
+    const updatedRec: Recipe = res.updated || {
+      ...reviewRecipe,
+      is_public: decision === 'approved',
+      verified: decision === 'approved',
+      audit_status: decision,
+      creator_name: cleanBrand || getRecipeCreatorBrand(reviewRecipe),
+      author_nick: cleanBrand || getRecipeCreatorBrand(reviewRecipe),
+      audit_note: reviewNote.trim() || null,
+      image_url: reviewImage.trim() || null,
+    };
+
+    setAuditRecipes((prev) => prev.map((r) => (r.id === updatedRec.id ? updatedRec : r)));
+    onRecipeUpdated?.(updatedRec);
+    void broadcastGlobalRecipeUpdate(updatedRec);
+
+    const relatedAlertIds = adminAlerts
+      .filter((al) => !al.read && al.kind === 'recipe_audit' && al.recipe_id === reviewRecipe.id)
+      .map((al) => al.id);
+    if (relatedAlertIds.length > 0) {
+      await onMarkAlertsRead?.(relatedAlertIds);
+    }
+
+    onToast(
+      decision === 'approved'
+        ? `✓ "${reviewRecipe.name}" autorizado e publicado com a marca "${cleanBrand}"! Criador notificado.`
+        : `✕ "${reviewRecipe.name}" marcado como recusado e criador notificado.`
+    );
+    setReviewRecipe(null);
+  };
+
   useEffect(() => {
     void refreshDirectory();
-    void refreshAds();
+    if (canPartnerAds || isPrimaryOwner) void refreshAds();
+    if (canAuditRecipes || canSearchImages || canEditGlobalRecipes) void refreshAuditRecipes();
   }, []);
+
+  useEffect(() => {
+    if (tab === 'recipes_audit' && (canAuditRecipes || canSearchImages || canEditGlobalRecipes)) {
+      void refreshAuditRecipes();
+    }
+  }, [tab]);
+
+  useEffect(() => {
+    if (canAuditRecipes && adminAlerts.some((a) => !a.read && a.kind === 'recipe_audit')) {
+      void refreshAuditRecipes();
+    }
+  }, [adminAlerts.length]);
 
   const handleSetPlan = async (
     barId: string,
@@ -287,6 +532,231 @@ export const SuperAdminView: React.FC<{
     }
     setNewVipEmail('');
     await handleToggleEmailVip(clean, true);
+  };
+
+  const loadDelegateIntoEditor = (rawEmail: string, suggestedName?: string) => {
+    const clean = rawEmail.trim().toLowerCase();
+    setDelegateEmail(clean);
+    const existing = draft.admin_delegates?.[clean];
+    if (existing) {
+      setDelegateName(existing.name || suggestedName || '');
+      setDelegatePreset(existing.preset || 'custom_admin');
+      setDelegateActive(existing.active !== false);
+      const nextPerms = buildPresetPermissions('empty');
+      for (const k of ALL_PLATFORM_PERMISSION_KEYS) {
+        nextPerms[k] = Boolean(existing.permissions?.[k]);
+      }
+      setDelegatePerms(nextPerms);
+    } else {
+      setDelegateName(suggestedName || '');
+      setDelegateActive(true);
+    }
+  };
+
+  const applyDelegateTemplate = (
+    mode: 'full_admin' | 'sales' | 'support' | 'auditor' | 'empty'
+  ) => {
+    setDelegatePerms(buildPresetPermissions(mode));
+    if (mode === 'sales') setDelegatePreset('sales');
+    else if (mode === 'support') setDelegatePreset('support');
+    else setDelegatePreset('custom_admin');
+  };
+
+  const handleSaveDelegate = async () => {
+    if (!isPrimaryOwner) {
+      onToast('Somente o proprietário principal pode delegar acessos.');
+      return;
+    }
+    const clean = delegateEmail.trim().toLowerCase();
+    if (!clean || !clean.includes('@')) {
+      onToast('Selecione uma conta ou digite um e-mail válido.');
+      return;
+    }
+    if (isSuperAdmin(clean)) {
+      onToast('O proprietário principal já possui acesso total permanente.');
+      return;
+    }
+    const enabledCount = ALL_PLATFORM_PERMISSION_KEYS.filter((k) => delegatePerms[k]).length;
+    if (enabledCount === 0 && delegatePreset !== 'sales') {
+      onToast('Ative ao menos uma permissão ou escolha o Perfil de Vendas.');
+      return;
+    }
+    const cleanPerms: Partial<Record<PlatformPermissionKey, boolean>> = {};
+    for (const k of ALL_PLATFORM_PERMISSION_KEYS) {
+      if (delegatePerms[k]) cleanPerms[k] = true;
+    }
+    if (delegatePreset === 'sales' && enabledCount === 0) {
+      cleanPerms.sales_showcase = true;
+      cleanPerms.use_simulator = true;
+    }
+
+    const entry: PlatformDelegateConfig = {
+      email: clean,
+      name: delegateName.trim() || undefined,
+      preset: delegatePreset,
+      active: delegateActive,
+      permissions: cleanPerms,
+      updated_at: new Date().toISOString(),
+      updated_by: (userEmail || '').trim().toLowerCase() || undefined,
+    };
+
+    const nextDelegates = {
+      ...(draft.admin_delegates || {}),
+      [clean]: entry,
+    };
+    const nextCfg: PlatformSaaSConfig = {
+      ...draft,
+      admin_delegates: nextDelegates,
+    };
+    setDraft(nextCfg);
+    await handleSaveConfig(
+      nextCfg,
+      delegatePreset === 'sales'
+        ? `✓ Perfil de Vendas salvo para ${clean}!`
+        : `✓ Permissões de ADM salvas para ${clean}!`
+    );
+  };
+
+  const handleToggleDelegateActive = async (email: string) => {
+    if (!isPrimaryOwner) return;
+    const clean = email.trim().toLowerCase();
+    const cur = draft.admin_delegates?.[clean];
+    if (!cur) return;
+    const nextCfg: PlatformSaaSConfig = {
+      ...draft,
+      admin_delegates: {
+        ...(draft.admin_delegates || {}),
+        [clean]: {
+          ...cur,
+          active: !cur.active,
+          updated_at: new Date().toISOString(),
+        },
+      },
+    };
+    setDraft(nextCfg);
+    if (delegateEmail.trim().toLowerCase() === clean) {
+      setDelegateActive(!cur.active);
+    }
+    await handleSaveConfig(
+      nextCfg,
+      !cur.active ? `Acesso reativado para ${clean}.` : `Acesso pausado para ${clean}.`
+    );
+  };
+
+  const handleRemoveDelegate = async (email: string) => {
+    if (!isPrimaryOwner) return;
+    const clean = email.trim().toLowerCase();
+    const nextDelegates = { ...(draft.admin_delegates || {}) };
+    delete nextDelegates[clean];
+    const nextCfg: PlatformSaaSConfig = {
+      ...draft,
+      admin_delegates: nextDelegates,
+    };
+    setDraft(nextCfg);
+    if (delegateEmail.trim().toLowerCase() === clean) {
+      setDelegateEmail('');
+      setDelegateName('');
+    }
+    await handleSaveConfig(nextCfg, `Acesso delegado removido para ${clean}.`);
+  };
+
+  const handleSyncCatalog = async () => {
+    setSyncingCatalog(true);
+    try {
+      const existingRes = await sb
+        .from('recipes')
+        .select('id, name, owner, image_url, item_type');
+      if (existingRes.error) {
+        onToast('Erro ao ler catálogo: ' + existingRes.error.message);
+        return;
+      }
+      const existingRows = (existingRes.data || []) as {
+        id: string;
+        name: string;
+        owner?: string | null;
+        image_url?: string | null;
+        item_type?: string | null;
+      }[];
+      const byName = new Map<string, typeof existingRows[number]>();
+      existingRows.forEach((row) => {
+        if (!row.owner && (!row.item_type || row.item_type === 'drink')) {
+          const k = norm(row.name);
+          if (k && !byName.has(k)) byName.set(k, row);
+        }
+      });
+
+      const toInsert: Record<string, unknown>[] = [];
+      let updatedCount = 0;
+
+      for (const sr of EXTENDED_RECIPES) {
+        const hit = byName.get(norm(sr.name));
+        if (hit) {
+          const upd = await sb
+            .from('recipes')
+            .update({
+              category: sr.category,
+              ingredients: sr.ingredients,
+              steps: sr.steps,
+              instructions: sr.steps,
+              description: sr.description,
+              story: sr.story,
+              glass: sr.glass,
+              technique: sr.technique,
+              garnish: sr.garnish,
+              shaken: sr.shaken,
+              tags: sr.tags,
+              is_public: true,
+            })
+            .eq('id', hit.id);
+          if (!upd.error) updatedCount++;
+        } else {
+          toInsert.push({
+            owner: null,
+            name: sr.name,
+            category: sr.category,
+            ingredients: sr.ingredients,
+            steps: sr.steps,
+            instructions: sr.steps,
+            description: sr.description,
+            story: sr.story,
+            glass: sr.glass,
+            technique: sr.technique,
+            garnish: sr.garnish,
+            shaken: sr.shaken,
+            tags: sr.tags,
+            author_nick: 'Meu Bar',
+            is_public: true,
+            verified: true,
+            item_type: 'drink',
+          });
+        }
+      }
+
+      let insertedCount = 0;
+      let firstErr = '';
+      const CHUNK = 30;
+      for (let i = 0; i < toInsert.length; i += CHUNK) {
+        const slice = toInsert.slice(i, i + CHUNK);
+        const ins = await sb.from('recipes').insert(slice);
+        if (ins.error) {
+          if (!firstErr) firstErr = ins.error.message;
+        } else {
+          insertedCount += slice.length;
+        }
+      }
+
+      if (firstErr) {
+        onToast(
+          `Inseridos ${insertedCount}, mas houve erro do banco: ${firstErr}. Use o SQL Reset no Supabase.`
+        );
+      } else {
+        onToast(
+          `✓ Catálogo sincronizado: ${insertedCount} novo(s) drink(s) e ${updatedCount} atualizado(s)!`
+        );
+      }
+    } finally {
+      setSyncingCatalog(false);
+    }
   };
 
   const resetAdForm = () => {
@@ -530,7 +1000,32 @@ export const SuperAdminView: React.FC<{
     );
   });
 
-  const unreadAlerts = adminAlerts.filter((a) => !a.read);
+  const unreadAlerts = adminAlerts.filter((a) => {
+    if (a.read) return false;
+    if (a.kind === 'recipe_audit') return canAuditRecipes;
+    return canViewAccounts;
+  });
+  const pendingAuditCount = auditRecipes.filter((r) => getRecipeAuditStatus(r) === 'pending').length;
+  const approvedCustomRecipes = auditRecipes.filter(
+    (r) =>
+      getRecipeAuditStatus(r) === 'approved' &&
+      Boolean(r.owner || getRecipeCreatorBrand(r))
+  );
+  const rejectedAuditRecipes = auditRecipes.filter(
+    (r) => getRecipeAuditStatus(r) === 'rejected'
+  );
+  const filteredAuditRecipes = useMemo(() => {
+    if (auditFilter === 'pending') {
+      return auditRecipes.filter((r) => getRecipeAuditStatus(r) === 'pending');
+    }
+    if (auditFilter === 'approved_custom') {
+      return approvedCustomRecipes;
+    }
+    if (auditFilter === 'rejected') {
+      return rejectedAuditRecipes;
+    }
+    return auditRecipes;
+  }, [auditRecipes, auditFilter, approvedCustomRecipes, rejectedAuditRecipes]);
   const adsTxtLine = buildAdsTxtLine(draft.adsense_client_id);
 
   return (
@@ -546,84 +1041,94 @@ export const SuperAdminView: React.FC<{
           Administração da Plataforma
         </div>
         <h1 className="!mt-1 !mb-1">
-          {tab === 'support'
-            ? '🎧 Central de Suporte & Equipe'
-            : tab === 'stores'
-              ? '🏪 Gestão de Lojas & Planos'
-              : tab === 'partners' || tab === 'adsense'
-                ? '📣 Anúncios & Parceiros'
-                : tab === 'sales'
-                  ? '⚙️ Preços, Planos & Vendas SaaS'
-                  : '👑 Contas, Bares & Planos'}
+          {tab === 'team_access'
+            ? '🔑 Delegar ADM & Perfil de Vendas'
+            : tab === 'support'
+              ? '🎧 Central de Suporte & Equipe'
+              : tab === 'stores'
+                ? '🏪 Gestão de Lojas & Planos'
+                : tab === 'recipes_audit'
+                  ? '🍸 Auditoria de Receitas & Imagens'
+                  : tab === 'partners' || tab === 'adsense'
+                    ? '📣 Anúncios & Parceiros'
+                    : tab === 'sales'
+                      ? '⚙️ Preços, Planos & Vendas SaaS'
+                      : tab === 'simulator'
+                        ? '🧪 Simulador Interativo Demo'
+                        : '👑 Contas, Bares & Planos'}
         </h1>
         <p className="mu text-xs">
-          Controle exclusivo da administração do Meu Bar: contas, alteração de planos das lojas, chat de suporte com equipe delegada e monetização.
+          {isPrimaryOwner
+            ? 'Controle completo da plataforma: contas, delegação de acessos ADM/Vendas, auditoria de drinks, fotos, planos e suporte.'
+            : 'Painel administrativo delegado conforme as permissões liberadas pelo proprietário.'}
         </p>
       </div>
 
       {/* CONTROLE DO ALERTA DE NOVAS CONTAS */}
-      <div className="panel mt-3 flex flex-wrap items-center justify-between gap-2.5">
-        <div className="min-w-0 flex-1">
-          <div className="text-xs font-bold text-[var(--fg)]">
-            {adminAlertOn ? '🔔 Alerta de nova conta: Ativado' : '🔕 Alerta de nova conta: Desativado'}
+      {canViewAccounts && (
+        <div className="panel mt-3 flex flex-wrap items-center justify-between gap-2.5">
+          <div className="min-w-0 flex-1">
+            <div className="text-xs font-bold text-[var(--fg)]">
+              {adminAlertOn ? '🔔 Alerta de nova conta: Ativado' : '🔕 Alerta de nova conta: Desativado'}
+            </div>
+            <div className="text-[11px] text-[var(--mut)]">
+              {adminAlertOn
+                ? 'Você recebe som, aviso na tela, contador e banner sempre que uma nova conta for criada.'
+                : 'Os alertas de novos cadastros estão pausados neste aparelho (você ainda pode ver todas as contas abaixo).'}
+            </div>
           </div>
-          <div className="text-[11px] text-[var(--mut)]">
-            {adminAlertOn
-              ? 'Você recebe som, aviso na tela, contador e banner sempre que uma nova conta for criada.'
-              : 'Os alertas de novos cadastros estão pausados neste aparelho (você ainda pode ver todas as contas abaixo).'}
-          </div>
-        </div>
-        <div className="flex items-center gap-2 shrink-0">
-          {onOpenAlertSettings && (
+          <div className="flex items-center gap-2 shrink-0">
+            {onOpenAlertSettings && (
+              <button
+                type="button"
+                className="b g sm"
+                onClick={onOpenAlertSettings}
+              >
+                Todos os alertas
+              </button>
+            )}
             <button
               type="button"
-              className="b g sm"
-              onClick={onOpenAlertSettings}
-            >
-              Todos os alertas
-            </button>
-          )}
-          <button
-            type="button"
-            role="switch"
-            aria-checked={adminAlertOn}
-            aria-label="Ativar ou desativar alerta de nova conta criada"
-            onClick={() => {
-              if (!adminAlertOn) {
-                if (!alertPrefs.allEnabled) {
-                  patchAlertPrefs({ allEnabled: true, adminNewAccount: true });
+              role="switch"
+              aria-checked={adminAlertOn}
+              aria-label="Ativar ou desativar alerta de nova conta criada"
+              onClick={() => {
+                if (!adminAlertOn) {
+                  if (!alertPrefs.allEnabled) {
+                    patchAlertPrefs({ allEnabled: true, adminNewAccount: true });
+                  } else {
+                    setAlertPref('adminNewAccount', true);
+                  }
                 } else {
-                  setAlertPref('adminNewAccount', true);
+                  setAlertPref('adminNewAccount', false);
                 }
-              } else {
-                setAlertPref('adminNewAccount', false);
-              }
-            }}
-            className={`relative inline-flex h-7 w-12 shrink-0 cursor-pointer items-center rounded-full border transition-colors ${
-              adminAlertOn
-                ? 'bg-emerald-500 border-emerald-400'
-                : 'bg-white/10 border-white/15'
-            }`}
-          >
-            <span
-              className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${
-                adminAlertOn ? 'translate-x-6' : 'translate-x-1'
+              }}
+              className={`relative inline-flex h-7 w-12 shrink-0 cursor-pointer items-center rounded-full border transition-colors ${
+                adminAlertOn
+                  ? 'bg-emerald-500 border-emerald-400'
+                  : 'bg-white/10 border-white/15'
               }`}
-            />
-          </button>
+            >
+              <span
+                className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${
+                  adminAlertOn ? 'translate-x-6' : 'translate-x-1'
+                }`}
+              />
+            </button>
+          </div>
         </div>
-      </div>
+      )}
 
-      {/* ALERTA DE NOVAS CONTAS CRIADAS */}
-      {adminAlertOn && unreadAlerts.length > 0 && (
+      {/* ALERTAS DA PLATAFORMA (NOVAS CONTAS E AUDITORIAS DE DRINKS) */}
+      {(adminAlertOn || unreadAlerts.some((a) => a.kind === 'recipe_audit')) && unreadAlerts.length > 0 && (
         <div className="panel mt-3 !border-emerald-400/50 bg-emerald-500/10 space-y-2.5">
           <div className="row sp flex-wrap gap-2">
             <div>
               <div className="text-sm font-bold text-emerald-200">
-                🔔 {unreadAlerts.length} nova(s) conta(s) criada(s) recentemente
+                🔔 {unreadAlerts.length} alerta(s) pendente(s) para o ADM
               </div>
               <div className="text-xs text-[var(--mut)]">
-                Você pode liberar Pro VIP direto por aqui ou marcar como lido.
+                Novos cadastros e drinks autorais enviados para revisão e autorização de publicação.
               </div>
             </div>
             {onMarkAlertsRead && (
@@ -638,32 +1143,46 @@ export const SuperAdminView: React.FC<{
           </div>
 
           <div className="space-y-1.5">
-            {unreadAlerts.slice(0, 6).map((al) => {
+            {unreadAlerts.slice(0, 8).map((al) => {
               const em = (al.user_email || '').trim().toLowerCase();
               const alreadyVip = Boolean(em && draft.free_user_emails.includes(em));
+              const isAuditAlert = al.kind === 'recipe_audit';
               return (
                 <div
                   key={al.id}
                   className="rounded-xl bg-black/25 border border-white/10 px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-xs"
                 >
-                  <div className="min-w-0">
+                  <div className="min-w-0 flex-1">
                     <div className="font-bold text-[var(--fg)] truncate">
-                      {em || al.title}
+                      {isAuditAlert ? `🍸 ${al.title}` : em || al.title}
                     </div>
                     <div className="text-[var(--mut)]">
-                      {al.message || 'Nova conta cadastrada'} · {fmtDateTime(al.created_at)}
+                      {al.message || 'Nova notificação'} · {fmtDateTime(al.created_at)}
                     </div>
                   </div>
                   <div className="flex items-center gap-1.5 shrink-0">
-                    {em && !isSuperAdmin(em) && (
+                    {isAuditAlert && canAuditRecipes ? (
                       <button
                         type="button"
-                        className={`b sm ${alreadyVip ? 'g' : 'ok'}`}
-                        disabled={savingCfg}
-                        onClick={() => void handleToggleEmailVip(em, !alreadyVip)}
+                        className="b ok sm"
+                        onClick={() => void openAuditByAlert(al)}
                       >
-                        {alreadyVip ? 'VIP Ativo' : 'Liberar VIP'}
+                        Revisar e Autorizar →
                       </button>
+                    ) : (
+                      !isAuditAlert &&
+                      canManageVip &&
+                      em &&
+                      !isSuperAdmin(em) && (
+                        <button
+                          type="button"
+                          className={`b sm ${alreadyVip ? 'g' : 'ok'}`}
+                          disabled={savingCfg}
+                          onClick={() => void handleToggleEmailVip(em, !alreadyVip)}
+                        >
+                          {alreadyVip ? 'VIP Ativo' : 'Liberar VIP'}
+                        </button>
+                      )
                     )}
                     {onMarkAlertsRead && (
                       <button
@@ -685,58 +1204,92 @@ export const SuperAdminView: React.FC<{
       {/* Navegação por abas */}
       {!hideInternalNav ? (
         <div className="chips !flex-wrap !overflow-visible mt-3 mb-3">
-          <button
-            type="button"
-            className={`chip ${tab === 'accounts' ? 'on' : ''}`}
-            onClick={() => setTab('accounts')}
-          >
-            Contas & Bares ({accountStats.total})
-          </button>
-          <button
-            type="button"
-            className={`chip ${tab === 'stores' ? 'on' : ''}`}
-            onClick={() => setTab('stores')}
-          >
-            Todos os Bares ({storeStats.total})
-          </button>
-          <button
-            type="button"
-            className={`chip ${tab === 'support' ? 'on' : ''}`}
-            onClick={() => setTab('support')}
-          >
-            💬 Suporte & Equipe
-          </button>
-          <button
-            type="button"
-            className={`chip ${tab === 'simulator' ? 'on' : ''}`}
-            onClick={() => setTab('simulator')}
-          >
-            🧪 Simulador Demo
-          </button>
-          <button
-            type="button"
-            className={`chip ${tab === 'partners' ? 'on' : ''}`}
-            onClick={() => setTab('partners')}
-          >
-            Parceiros ({ads.filter((a) => a.active).length})
-          </button>
-          <button
-            type="button"
-            className={`chip ${tab === 'adsense' ? 'on' : ''}`}
-            onClick={() => setTab('adsense')}
-          >
-            Google AdSense {draft.adsense_enabled ? '· Ativo' : ''}
-          </button>
-          <button
-            type="button"
-            className={`chip ${tab === 'sales' ? 'on' : ''}`}
-            onClick={() => setTab('sales')}
-          >
-            Preços & Vendas
-          </button>
+          {isTabAllowed('accounts') && (
+            <button
+              type="button"
+              className={`chip ${tab === 'accounts' ? 'on' : ''}`}
+              onClick={() => setTab('accounts')}
+            >
+              Contas & Bares ({accountStats.total})
+            </button>
+          )}
+          {isPrimaryOwner && (
+            <button
+              type="button"
+              className={`chip ${tab === 'team_access' ? 'on' : ''}`}
+              onClick={() => setTab('team_access')}
+            >
+              🔑 Equipe ADM & Vendas ({Object.keys(draft.admin_delegates || {}).length})
+            </button>
+          )}
+          {isTabAllowed('stores') && (
+            <button
+              type="button"
+              className={`chip ${tab === 'stores' ? 'on' : ''}`}
+              onClick={() => setTab('stores')}
+            >
+              Todos os Bares ({storeStats.total})
+            </button>
+          )}
+          {isTabAllowed('recipes_audit') && (
+            <button
+              type="button"
+              className={`chip ${tab === 'recipes_audit' ? 'on' : ''}`}
+              onClick={() => setTab('recipes_audit')}
+            >
+              🍸 Auditoria Receitas{pendingAuditCount > 0 ? ` (${pendingAuditCount})` : ''}
+            </button>
+          )}
+          {isTabAllowed('support') && (
+            <button
+              type="button"
+              className={`chip ${tab === 'support' ? 'on' : ''}`}
+              onClick={() => setTab('support')}
+            >
+              💬 Suporte & Equipe
+            </button>
+          )}
+          {isTabAllowed('simulator') && (
+            <button
+              type="button"
+              className={`chip ${tab === 'simulator' ? 'on' : ''}`}
+              onClick={() => setTab('simulator')}
+            >
+              🧪 Simulador Demo
+            </button>
+          )}
+          {isTabAllowed('partners') && (
+            <button
+              type="button"
+              className={`chip ${tab === 'partners' ? 'on' : ''}`}
+              onClick={() => setTab('partners')}
+            >
+              Parceiros ({ads.filter((a) => a.active).length})
+            </button>
+          )}
+          {isTabAllowed('adsense') && (
+            <button
+              type="button"
+              className={`chip ${tab === 'adsense' ? 'on' : ''}`}
+              onClick={() => setTab('adsense')}
+            >
+              Google AdSense {draft.adsense_enabled ? '· Ativo' : ''}
+            </button>
+          )}
+          {isTabAllowed('sales') && (
+            <button
+              type="button"
+              className={`chip ${tab === 'sales' ? 'on' : ''}`}
+              onClick={() => setTab('sales')}
+            >
+              Preços & Vendas
+            </button>
+          )}
         </div>
       ) : (
-        (tab === 'partners' || tab === 'adsense') && (
+        (tab === 'partners' || tab === 'adsense') &&
+        isTabAllowed('partners') &&
+        isTabAllowed('adsense') && (
           <div className="chips !flex-wrap !overflow-visible mt-3 mb-3">
             <button
               type="button"
@@ -756,6 +1309,531 @@ export const SuperAdminView: React.FC<{
         )
       )}
 
+      {/* ABA DELEGAÇÃO DE ADM & PERFIL DE VENDAS (EXCLUSIVO PROPRIETÁRIO PRINCIPAL) */}
+      {tab === 'team_access' && isPrimaryOwner && (
+        <div className="space-y-4 mt-3">
+          <div className="panel !border-[var(--ac)]/50 space-y-3">
+            <div className="row sp flex-wrap gap-2">
+              <div>
+                <h2 className="!m-0 text-lg font-extrabold">
+                  🔑 Selecionar Conta & Definir Permissões
+                </h2>
+                <p className="mu text-xs !mt-0.5 !mb-0">
+                  Escolha qualquer conta cadastrada para liberar acesso ADM personalizado ou Perfil de Vendas com acesso ao simulador.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="b g sm"
+                onClick={() => void refreshDirectory()}
+              >
+                🔄 Atualizar contas
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+              <div>
+                <label className="!mt-0 text-xs">Selecionar conta cadastrada</label>
+                <select
+                  value={delegateEmail}
+                  onChange={(e) => {
+                    const chosen = e.target.value;
+                    if (!chosen) {
+                      setDelegateEmail('');
+                      return;
+                    }
+                    const foundAcc = organizedAccounts.find(
+                      (a) => (a.email || '').trim().toLowerCase() === chosen
+                    );
+                    loadDelegateIntoEditor(chosen, foundAcc?.display_name || undefined);
+                  }}
+                >
+                  <option value="">— Selecione uma conta ou digite abaixo —</option>
+                  {organizedAccounts
+                    .filter((a) => a.email && a.email.includes('@') && !isSuperAdmin(a.email))
+                    .map((a) => {
+                      const em = a.email.trim().toLowerCase();
+                      const ex = draft.admin_delegates?.[em];
+                      const tag = ex
+                        ? ex.preset === 'sales'
+                          ? ' [Vendas]'
+                          : ' [ADM Delegado]'
+                        : '';
+                      return (
+                        <option key={a.id} value={em}>
+                          {a.display_name ? `${a.display_name} (${em})` : em}
+                          {tag}
+                        </option>
+                      );
+                    })}
+                </select>
+              </div>
+              <div>
+                <label className="!mt-0 text-xs">Ou digitar e-mail da conta *</label>
+                <input
+                  type="email"
+                  value={delegateEmail}
+                  onChange={(e) => setDelegateEmail(e.target.value)}
+                  placeholder="pessoa@gmail.com"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <div>
+                <label className="!mt-0 text-xs">Nome / Identificação na equipe (opcional)</label>
+                <input
+                  value={delegateName}
+                  onChange={(e) => setDelegateName(e.target.value)}
+                  placeholder="Ex: Lucas · Consultor Comercial"
+                  maxLength={60}
+                />
+              </div>
+              <div>
+                <label className="!mt-0 text-xs">Tipo de perfil principal</label>
+                <select
+                  value={delegatePreset}
+                  onChange={(e) => {
+                    const nextPreset = e.target.value as PlatformRolePreset;
+                    setDelegatePreset(nextPreset);
+                    if (nextPreset === 'sales') {
+                      setDelegatePerms(buildPresetPermissions('sales'));
+                    } else if (nextPreset === 'support') {
+                      setDelegatePerms(buildPresetPermissions('support'));
+                    }
+                  }}
+                >
+                  <option value="custom_admin">👑 ADM Delegado (painel personalizado)</option>
+                  <option value="sales">💼 Perfil de Vendas (Simulador & Apresentação)</option>
+                  <option value="support">🎧 Perfil Suporte (Atendimento)</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <div className="text-xs font-bold text-[var(--mut)]">Modelos rápidos de seleção:</div>
+              <div className="flex flex-wrap gap-1.5">
+                <button
+                  type="button"
+                  className="b g sm"
+                  onClick={() => applyDelegateTemplate('full_admin')}
+                >
+                  👑 Admin Completo (tudo)
+                </button>
+                <button
+                  type="button"
+                  className="b g sm"
+                  onClick={() => applyDelegateTemplate('sales')}
+                >
+                  💼 Perfil de Vendas (Simulador + Roteiro)
+                </button>
+                <button
+                  type="button"
+                  className="b g sm"
+                  onClick={() => applyDelegateTemplate('auditor')}
+                >
+                  🍸 Auditoria de Receitas & Fotos
+                </button>
+                <button
+                  type="button"
+                  className="b g sm"
+                  onClick={() => applyDelegateTemplate('support')}
+                >
+                  🎧 Suporte & Lojas
+                </button>
+                <button
+                  type="button"
+                  className="b g sm"
+                  onClick={() => applyDelegateTemplate('empty')}
+                >
+                  🧹 Desmarcar tudo
+                </button>
+              </div>
+            </div>
+
+            <div className="space-y-3 pt-2 border-t border-[var(--bd)]">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <div>
+                  <div className="text-sm font-extrabold">
+                    Permissões detalhadas (o que esta pessoa pode ou não fazer)
+                  </div>
+                  <div className="text-[11px] text-[var(--mut)]">
+                    Marque exatamente cada função exclusiva do ADM que você deseja liberar para esta conta.
+                  </div>
+                </div>
+                <label className="!m-0 flex items-center gap-2 text-xs font-semibold cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={delegateActive}
+                    onChange={(e) => setDelegateActive(e.target.checked)}
+                    className="!w-4 !h-4"
+                  />
+                  Acesso ativo
+                </label>
+              </div>
+
+              {(
+                [
+                  { id: 'gestao', title: 'Gestão de Contas, Lojas & Planos' },
+                  { id: 'catalogo', title: 'Catálogo, Auditoria de Receitas & Pesquisa de Fotos' },
+                  { id: 'comercial', title: 'Vendas, Simulador Demo & Monetização' },
+                  { id: 'suporte', title: 'Atendimento às Lojas' },
+                ] as const
+              ).map((grp) => {
+                const itemsInGroup = PLATFORM_PERMISSIONS_META.filter((p) => p.group === grp.id);
+                return (
+                  <div key={grp.id} className="space-y-2">
+                    <div className="text-[11px] font-bold uppercase tracking-wider text-[var(--ac)]">
+                      {grp.title}
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                      {itemsInGroup.map((perm) => {
+                        const checked = Boolean(delegatePerms[perm.key]);
+                        return (
+                          <button
+                            key={perm.key}
+                            type="button"
+                            onClick={() =>
+                              setDelegatePerms((prev) => ({
+                                ...prev,
+                                [perm.key]: !prev[perm.key],
+                              }))
+                            }
+                            className={`text-left rounded-xl border p-3 flex items-start justify-between gap-2.5 cursor-pointer transition-colors ${
+                              checked
+                                ? 'border-[var(--ok)]/60 bg-emerald-500/10'
+                                : 'border-[var(--bd)] bg-[var(--s2)]/60 hover:border-[var(--ac)]/50'
+                            }`}
+                          >
+                            <div className="min-w-0 flex-1">
+                              <div className="text-xs font-bold text-[var(--fg)]">
+                                {perm.icon} {perm.label}
+                              </div>
+                              <div className="text-[11px] text-[var(--mut)] mt-0.5 leading-snug">
+                                {perm.description}
+                              </div>
+                            </div>
+                            <span
+                              className={`shrink-0 px-2 py-0.5 rounded-full text-[10px] font-extrabold border ${
+                                checked
+                                  ? 'bg-emerald-500 text-[#09180f] border-emerald-400'
+                                  : 'bg-black/25 text-[var(--mut)] border-white/15'
+                              }`}
+                            >
+                              {checked ? 'SIM' : 'NÃO'}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <button
+              type="button"
+              className="b ok full"
+              disabled={savingCfg}
+              onClick={() => void handleSaveDelegate()}
+            >
+              {savingCfg ? 'Salvando permissões...' : '💾 Salvar Acesso & Permissões desta Conta'}
+            </button>
+          </div>
+
+          <div className="panel space-y-3">
+            <h2 className="!m-0 text-lg font-extrabold">
+              Contas com Acesso Delegado ({Object.keys(draft.admin_delegates || {}).length})
+            </h2>
+            {Object.keys(draft.admin_delegates || {}).length === 0 ? (
+              <p className="mu text-xs !m-0">
+                Nenhuma conta delegada ainda. Selecione uma conta acima para delegar funções ADM ou criar um Perfil de Vendas.
+              </p>
+            ) : (
+              <div className="space-y-2.5">
+                {Object.values(draft.admin_delegates || {}).map((del) => {
+                  const enabledPerms = PLATFORM_PERMISSIONS_META.filter(
+                    (p) => Boolean(del.permissions?.[p.key])
+                  );
+                  return (
+                    <div
+                      key={del.email}
+                      className="rounded-2xl border border-[var(--bd)] bg-[var(--s2)]/70 p-3.5 space-y-2.5"
+                    >
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="font-extrabold text-sm text-[var(--fg)] truncate">
+                            {del.preset === 'sales'
+                              ? '💼'
+                              : del.preset === 'support'
+                                ? '🎧'
+                                : '👑'}{' '}
+                            {del.name || del.email}
+                          </div>
+                          <div className="text-xs text-[var(--mut)] truncate">{del.email}</div>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <span
+                            className={`chip !text-[11px] ${del.active ? 'on' : ''}`}
+                          >
+                            {del.preset === 'sales'
+                              ? 'Perfil de Vendas'
+                              : del.preset === 'support'
+                                ? 'Suporte'
+                                : 'ADM Delegado'}
+                            {del.active ? ' · Ativo' : ' · Pausado'}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap gap-1">
+                        {enabledPerms.length > 0 ? (
+                          enabledPerms.map((p) => (
+                            <span
+                              key={p.key}
+                              className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-black/25 border border-white/10 text-[var(--fg)]"
+                            >
+                              {p.icon} {p.label.split(' ')[0]} {p.label.split(' ')[1] || ''}
+                            </span>
+                          ))
+                        ) : (
+                          <span className="text-[11px] text-[var(--mut)]">
+                            Sem permissões extras marcadas
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="flex flex-wrap gap-1.5 pt-2 border-t border-[var(--bd)]">
+                        <button
+                          type="button"
+                          className="b sm"
+                          onClick={() => {
+                            loadDelegateIntoEditor(del.email, del.name);
+                            window.scrollTo({ top: 0, behavior: 'smooth' });
+                          }}
+                        >
+                          ✏️ Editar permissões
+                        </button>
+                        <button
+                          type="button"
+                          className="b g sm"
+                          disabled={savingCfg}
+                          onClick={() => void handleToggleDelegateActive(del.email)}
+                        >
+                          {del.active ? '⏸️ Pausar acesso' : '▶️ Reativar'}
+                        </button>
+                        <button
+                          type="button"
+                          className="b g sm !text-[var(--dn)]"
+                          disabled={savingCfg}
+                          onClick={() => void handleRemoveDelegate(del.email)}
+                        >
+                          🗑️ Remover
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ABA AUDITORIA DE RECEITAS AUTORAIS & IMAGENS (EXCLUSIVO ADM) */}
+      {tab === 'recipes_audit' && (
+        <div className="space-y-4 mt-3">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <button
+              type="button"
+              onClick={() => setAuditFilter('pending')}
+              className="panel !m-0 !p-4 text-left cursor-pointer hover:border-amber-400 transition-colors"
+            >
+              <div className="text-xs font-semibold text-[var(--mut)]">⏳ Pendentes</div>
+              <div className="text-2xl font-extrabold tabular-nums text-amber-400 mt-1">
+                {pendingAuditCount}
+              </div>
+              <div className="text-xs text-[var(--mut)] mt-1">Aguardando revisão</div>
+            </button>
+            <button
+              type="button"
+              onClick={() => setAuditFilter('approved_custom')}
+              className="panel !m-0 !p-4 text-left cursor-pointer hover:border-[var(--ok)] transition-colors"
+            >
+              <div className="text-xs font-semibold text-[var(--mut)]">✦ Autorais publicadas</div>
+              <div className="text-2xl font-extrabold tabular-nums text-[var(--ok)] mt-1">
+                {approvedCustomRecipes.length}
+              </div>
+              <div className="text-xs text-[var(--mut)] mt-1">Com marca do criador</div>
+            </button>
+            <button
+              type="button"
+              onClick={() => setAuditFilter('rejected')}
+              className="panel !m-0 !p-4 text-left cursor-pointer hover:border-[var(--dn)] transition-colors"
+            >
+              <div className="text-xs font-semibold text-[var(--mut)]">✕ Recusadas</div>
+              <div className="text-2xl font-extrabold tabular-nums text-[var(--dn)] mt-1">
+                {rejectedAuditRecipes.length}
+              </div>
+              <div className="text-xs text-[var(--mut)] mt-1">Mantidas fora do geral</div>
+            </button>
+            <button
+              type="button"
+              onClick={() => setAuditFilter('all')}
+              className="panel !m-0 !p-4 text-left cursor-pointer hover:border-[var(--ac)] transition-colors"
+            >
+              <div className="text-xs font-semibold text-[var(--mut)]">🍹 Total catálogo</div>
+              <div className="text-2xl font-extrabold tabular-nums mt-1">{auditRecipes.length}</div>
+              <div className="text-xs text-[var(--ac)] font-semibold mt-1">
+                {auditRecipes.filter((r) => !r.image_url).length} sem foto
+              </div>
+            </button>
+          </div>
+
+          <div className="panel space-y-3">
+            <div className="row sp flex-wrap gap-2">
+              <div>
+                <h2 className="!m-0 text-lg font-extrabold">Fila de Auditoria & Catálogo</h2>
+                <p className="mu text-xs !mt-0.5 !mb-0">
+                  Leia as receitas autorais enviadas pelos usuários, ajuste foto/marca e autorize ou recuse a publicação global.
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  className="b g sm"
+                  onClick={() => void refreshAuditRecipes()}
+                >
+                  🔄 Atualizar
+                </button>
+                {canSearchImages && (
+                  <button
+                    type="button"
+                    className="b sm"
+                    onClick={() => setShowCatalogPhotoSearch(true)}
+                  >
+                    🌐 Buscar fotos no catálogo
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="flex flex-wrap gap-1.5">
+              {(
+                [
+                  { id: 'pending', label: `⏳ Pendentes (${pendingAuditCount})` },
+                  { id: 'approved_custom', label: `✦ Autorais publicadas (${approvedCustomRecipes.length})` },
+                  { id: 'rejected', label: `✕ Recusadas (${rejectedAuditRecipes.length})` },
+                  { id: 'all', label: `Todas (${auditRecipes.length})` },
+                ] as { id: typeof auditFilter; label: string }[]
+              ).map((f) => (
+                <button
+                  key={f.id}
+                  type="button"
+                  onClick={() => setAuditFilter(f.id)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold border cursor-pointer transition-colors ${
+                    auditFilter === f.id
+                      ? 'bg-[var(--ac)] text-[#120d0c] border-transparent'
+                      : 'bg-black/20 text-[var(--mut)] border-white/10 hover:text-[var(--fg)]'
+                  }`}
+                >
+                  {f.label}
+                </button>
+              ))}
+            </div>
+
+            {loadingAuditRecipes ? (
+              <p className="mu text-sm mt-2">Carregando receitas para auditoria…</p>
+            ) : filteredAuditRecipes.length === 0 ? (
+              <p className="mu text-sm mt-2">
+                {auditFilter === 'pending'
+                  ? 'Nenhuma receita autoral aguardando auditoria no momento.'
+                  : 'Nenhuma receita encontrada neste filtro.'}
+              </p>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {filteredAuditRecipes.map((r) => {
+                  const status = getRecipeAuditStatus(r);
+                  const creator = getRecipeCreatorBrand(r);
+                  const ings = normalizeRecipeIngredients(r.ingredients).filter(
+                    (i) => !i.n.startsWith('__')
+                  );
+                  const catIdx = Math.max(0, CATS.indexOf(normalizeRecipeCategory(r.category)));
+                  return (
+                    <div
+                      key={r.id}
+                      className="rounded-2xl border border-[var(--bd)] bg-[var(--s2)]/70 p-3.5 space-y-2.5 flex flex-col justify-between"
+                    >
+                      <div className="flex items-start gap-3">
+                        <div
+                          className={`w-16 h-16 rounded-xl shrink-0 bg-cover bg-center flex items-center justify-center text-2xl c${catIdx}`}
+                          style={r.image_url ? { backgroundImage: `url('${r.image_url}')` } : undefined}
+                        >
+                          {r.image_url ? null : EMO[catIdx] || '🍸'}
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="font-extrabold text-base text-[var(--fg)] truncate">
+                              {r.name}
+                            </div>
+                            <span
+                              className={`text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0 ${
+                                status === 'pending'
+                                  ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                                  : status === 'rejected'
+                                    ? 'bg-red-500/20 text-red-300 border border-red-500/40'
+                                    : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                              }`}
+                            >
+                              {status === 'pending'
+                                ? '⏳ Pendente'
+                                : status === 'rejected'
+                                  ? '✕ Recusado'
+                                  : '✓ Publicado'}
+                            </span>
+                          </div>
+                          <div className="text-xs text-[var(--mut)] mt-0.5">
+                            {normalizeRecipeCategory(r.category)}
+                            {creator ? ` · ✦ Marca: ${creator}` : ''}
+                          </div>
+                          <div className="text-xs text-[var(--tx)] opacity-85 mt-1 line-clamp-2">
+                            {ings.map((i) => i.n).join(' · ') || 'Sem ingredientes'}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center justify-between gap-2 pt-2 border-t border-[var(--bd)]">
+                        <span className="text-[11px] text-[var(--mut)]">
+                          {r.created_at ? fmtDateTime(r.created_at) : 'Catálogo'}
+                        </span>
+                        <div className="flex flex-wrap gap-1.5">
+                          {canSearchImages && (
+                            <button
+                              type="button"
+                              className="b g sm"
+                              onClick={() => setQuickPhotoRecipe(r)}
+                            >
+                              🌐 Foto
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className={`b sm ${status === 'pending' ? 'ok' : 'g'}`}
+                            onClick={() => openRecipeAuditModal(r)}
+                          >
+                            {status === 'pending' ? '👁️ Ler e Autorizar' : '👁️ Revisar / Foto'}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* ABA SIMULADOR DE LOJA FICTÍCIA (EXCLUSIVO ADM) */}
       {tab === 'simulator' && (
         <div className="mt-3">
@@ -771,7 +1849,7 @@ export const SuperAdminView: React.FC<{
             userEmail={userEmail}
             actorName={actorName}
             config={draft}
-            canManageTeam
+            canManageTeam={isPrimaryOwner}
             focusBarId={supportFocus?.barId}
             focusBarName={supportFocus?.barName}
             focusOwnerEmail={supportFocus?.ownerEmail}
@@ -837,32 +1915,99 @@ export const SuperAdminView: React.FC<{
           </div>
 
           {/* Atalho rápido para liberar qualquer e-mail manualmente */}
-          <div className="panel">
-            <h2 className="!mt-0">Liberar Pro VIP Grátis por E-mail</h2>
-            <p className="mu text-xs">
-              Libere o Plano Pro gratuito para qualquer pessoa mesmo antes de ela criar um bar. Todas as lojas dela já nascem Pro e sem anúncios.
-            </p>
-            <div className="row mt-2">
-              <input
-                type="email"
-                value={newVipEmail}
-                onChange={(e) => setNewVipEmail(e.target.value)}
-                placeholder="email.da.pessoa@gmail.com"
-                className="grow"
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') void handleAddVipEmail();
-                }}
-              />
-              <button
-                type="button"
-                className="b sm shrink-0"
-                disabled={savingCfg}
-                onClick={() => void handleAddVipEmail()}
-              >
-                Liberar VIP
-              </button>
+          {canManageVip && (
+            <div className="panel">
+              <h2 className="!mt-0">Liberar Pro VIP Grátis por E-mail</h2>
+              <p className="mu text-xs">
+                Libere o Plano Pro gratuito para qualquer pessoa mesmo antes de ela criar um bar. Todas as lojas dela já nascem Pro e sem anúncios.
+              </p>
+              <div className="row mt-2">
+                <input
+                  type="email"
+                  value={newVipEmail}
+                  onChange={(e) => setNewVipEmail(e.target.value)}
+                  placeholder="email.da.pessoa@gmail.com"
+                  className="grow"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') void handleAddVipEmail();
+                  }}
+                />
+                <button
+                  type="button"
+                  className="b sm shrink-0"
+                  disabled={savingCfg}
+                  onClick={() => void handleAddVipEmail()}
+                >
+                  Liberar VIP
+                </button>
+              </div>
             </div>
-          </div>
+          )}
+
+          {canEditGlobalRecipes && (
+            <div className="panel row sp flex-wrap gap-2">
+              <div className="min-w-[200px] flex-1">
+                <h2 className="!m-0">Catálogo Global de Receitas ({EXTENDED_RECIPES.length} drinks)</h2>
+                <p className="mu text-xs !mt-1 !mb-0">
+                  Atualiza categorias, ingredientes padronizados e histórias dos drinks públicos preservando as fotos já salvas.
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  className="b g sm"
+                  onClick={async () => {
+                    const sql = buildResetRecipesSql();
+                    try {
+                      if (!navigator.clipboard?.writeText) throw new Error('no-clipboard');
+                      await navigator.clipboard.writeText(sql);
+                      onToast(`SQL completo (${EXTENDED_RECIPES.length} receitas) copiado! Cole no SQL Editor do Supabase e clique Run.`);
+                    } catch {
+                      setSqlModalText(sql);
+                    }
+                  }}
+                >
+                  📋 Copiar SQL Reset
+                </button>
+                <button
+                  type="button"
+                  className="b g sm"
+                  onClick={() => setSqlModalText(buildResetRecipesSql())}
+                >
+                  👁️ Ver SQL
+                </button>
+                <button
+                  type="button"
+                  className="b g sm"
+                  onClick={() => {
+                    const sql = buildResetRecipesSql();
+                    const blob = new Blob([sql], { type: 'application/sql;charset=utf-8' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `reset_receitas_${EXTENDED_RECIPES.length}_drinks.sql`;
+                    document.body.appendChild(a);
+                    a.click();
+                    a.remove();
+                    setTimeout(() => URL.revokeObjectURL(url), 1000);
+                    onToast('Arquivo SQL baixado!');
+                  }}
+                >
+                  📥 Baixar .sql
+                </button>
+                <button
+                  type="button"
+                  className="b g sm"
+                  disabled={syncingCatalog}
+                  onClick={() => void handleSyncCatalog()}
+                >
+                  {syncingCatalog
+                    ? 'Sincronizando…'
+                    : `🔄 Sincronizar Catálogo (${EXTENDED_RECIPES.length})`}
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Diretório organizado de Contas + seus Bares */}
           <div className="panel">
@@ -927,6 +2072,7 @@ export const SuperAdminView: React.FC<{
                     Boolean(acc.created_at) &&
                     nowMs - new Date(acc.created_at!).getTime() <= 48 * 3600000;
                   const isSelected = activeModal?.kind === 'account' && activeModal.id === acc.id;
+                  const delCfg = getDelegateConfig(acc.email, draft);
                   return (
                     <button
                       key={acc.id}
@@ -949,16 +2095,22 @@ export const SuperAdminView: React.FC<{
                         </div>
                         <span
                           className={`chip shrink-0 !text-xs ${
-                            acc.isAdmin || acc.isVipEmail ? 'on' : ''
+                            acc.isAdmin || acc.isVipEmail || delCfg ? 'on' : ''
                           }`}
                         >
                           {acc.isAdmin
                             ? '👑 Admin'
-                            : acc.isVipEmail
-                              ? '✨ Pro VIP'
-                              : isNewAccount
-                                ? '🆕 Nova'
-                                : 'Conta'}
+                            : delCfg
+                              ? delCfg.preset === 'sales'
+                                ? '💼 Vendas'
+                                : delCfg.preset === 'support'
+                                  ? '🎧 Suporte'
+                                  : '🔑 ADM Delegado'
+                              : acc.isVipEmail
+                                ? '✨ Pro VIP'
+                                : isNewAccount
+                                  ? '🆕 Nova'
+                                  : 'Conta'}
                         </span>
                       </div>
 
@@ -1194,6 +2346,8 @@ export const SuperAdminView: React.FC<{
               label="Imagem / Logo do parceiro (quadrada ou horizontal)"
               value={adImage}
               folder="partner-ads"
+              entityId={editingAdId ? `ad-${editingAdId}` : undefined}
+              imagePreset="banner"
               userId={userId}
               onChange={setAdImage}
               onToast={onToast}
@@ -1574,18 +2728,33 @@ export const SuperAdminView: React.FC<{
                       </div>
                     </div>
 
-                    {canToggleEmail && (
-                      <button
-                        type="button"
-                        className={`b full ${acc.isVipEmail ? 'g' : 'ok'}`}
-                        disabled={savingCfg}
-                        onClick={() => void handleToggleEmailVip(acc.email, !acc.isVipEmail)}
-                      >
-                        {acc.isVipEmail
-                          ? 'Remover Pro VIP desta conta'
-                          : '👑 Liberar Pro VIP Grátis para esta conta'}
-                      </button>
-                    )}
+                    <div className="flex flex-wrap gap-2">
+                      {canToggleEmail && canManageVip && (
+                        <button
+                          type="button"
+                          className={`b flex-1 ${acc.isVipEmail ? 'g' : 'ok'}`}
+                          disabled={savingCfg}
+                          onClick={() => void handleToggleEmailVip(acc.email, !acc.isVipEmail)}
+                        >
+                          {acc.isVipEmail
+                            ? 'Remover Pro VIP desta conta'
+                            : '👑 Liberar Pro VIP Grátis para esta conta'}
+                        </button>
+                      )}
+                      {isPrimaryOwner && canToggleEmail && (
+                        <button
+                          type="button"
+                          className="b g flex-1 !border-[var(--ac)]/60 text-[var(--ac)]"
+                          onClick={() => {
+                            loadDelegateIntoEditor(acc.email, acc.display_name || undefined);
+                            setActiveModal(null);
+                            setTab('team_access');
+                          }}
+                        >
+                          🔑 Delegar ADM / Perfil de Vendas
+                        </button>
+                      )}
+                    </div>
 
                     <div className="space-y-2.5 pt-2 border-t border-[var(--bd)]">
                       <h4 className="!m-0 text-base font-bold">
@@ -1646,48 +2815,54 @@ export const SuperAdminView: React.FC<{
                                 </span>
                               </div>
                               <div className="flex flex-wrap gap-2">
-                                <button
-                                  type="button"
-                                  className={`b sm ${isVip ? '' : 'g'}`}
-                                  disabled={isBusy}
-                                  onClick={() => void handleSetPlan(b.id, 'vip', null)}
-                                >
-                                  {isVip ? '✓ Bar VIP' : 'Bar VIP'}
-                                </button>
-                                <button
-                                  type="button"
-                                  className={`b sm ${isPro30 ? 'ok' : 'g'}`}
-                                  disabled={isBusy}
-                                  onClick={() => void handleSetPlan(b.id, 'pro', 30)}
-                                >
-                                  {isPro30 ? '✓ Pro +30d' : 'Pro +30d'}
-                                </button>
-                                <button
-                                  type="button"
-                                  className={`b sm ${isProYear ? 'ok' : 'g'}`}
-                                  disabled={isBusy}
-                                  onClick={() => void handleSetPlan(b.id, 'pro', 365)}
-                                >
-                                  {isProYear ? '✓ Pro +1 ano' : 'Pro +1 ano'}
-                                </button>
-                                <button
-                                  type="button"
-                                  className={`b sm ${isFree ? '' : 'g'}`}
-                                  disabled={isBusy}
-                                  onClick={() => void handleSetPlan(b.id, 'free', null)}
-                                >
-                                  {isFree ? '✓ Grátis' : 'Grátis'}
-                                </button>
-                                <button
-                                  type="button"
-                                  className="b g sm"
-                                  onClick={() => {
-                                    setActiveModal(null);
-                                    openChatWithBar(b.id, b.name, acc.email);
-                                  }}
-                                >
-                                  💬 Abrir Chat
-                                </button>
+                                {canManageVip && (
+                                  <>
+                                    <button
+                                      type="button"
+                                      className={`b sm ${isVip ? '' : 'g'}`}
+                                      disabled={isBusy}
+                                      onClick={() => void handleSetPlan(b.id, 'vip', null)}
+                                    >
+                                      {isVip ? '✓ Bar VIP' : 'Bar VIP'}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className={`b sm ${isPro30 ? 'ok' : 'g'}`}
+                                      disabled={isBusy}
+                                      onClick={() => void handleSetPlan(b.id, 'pro', 30)}
+                                    >
+                                      {isPro30 ? '✓ Pro +30d' : 'Pro +30d'}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className={`b sm ${isProYear ? 'ok' : 'g'}`}
+                                      disabled={isBusy}
+                                      onClick={() => void handleSetPlan(b.id, 'pro', 365)}
+                                    >
+                                      {isProYear ? '✓ Pro +1 ano' : 'Pro +1 ano'}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className={`b sm ${isFree ? '' : 'g'}`}
+                                      disabled={isBusy}
+                                      onClick={() => void handleSetPlan(b.id, 'free', null)}
+                                    >
+                                      {isFree ? '✓ Grátis' : 'Grátis'}
+                                    </button>
+                                  </>
+                                )}
+                                {canSupport && (
+                                  <button
+                                    type="button"
+                                    className="b g sm"
+                                    onClick={() => {
+                                      setActiveModal(null);
+                                      openChatWithBar(b.id, b.name, acc.email);
+                                    }}
+                                  >
+                                    💬 Abrir Chat
+                                  </button>
+                                )}
                               </div>
                             </div>
                           );
@@ -1766,66 +2941,72 @@ export const SuperAdminView: React.FC<{
                       </div>
                     </div>
 
-                    <div>
-                      <label className="!mt-0 text-sm">Observação interna da assinatura</label>
-                      <input
-                        value={noteByBar[st.id] ?? st.plan_note ?? ''}
-                        onChange={(e) =>
-                          setNoteByBar((prev) => ({ ...prev, [st.id]: e.target.value }))
-                        }
-                        placeholder="Ex: Pago Pix, Amigo VIP, Parceiro..."
-                      />
-                    </div>
+                    {canManageVip && (
+                      <>
+                        <div>
+                          <label className="!mt-0 text-sm">Observação interna da assinatura</label>
+                          <input
+                            value={noteByBar[st.id] ?? st.plan_note ?? ''}
+                            onChange={(e) =>
+                              setNoteByBar((prev) => ({ ...prev, [st.id]: e.target.value }))
+                            }
+                            placeholder="Ex: Pago Pix, Amigo VIP, Parceiro..."
+                          />
+                        </div>
 
-                    <div className="space-y-2">
-                      <div className="text-sm font-bold">Alterar plano desta loja</div>
-                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                        <button
-                          type="button"
-                          className={`b sm ${isVip ? '' : 'g'}`}
-                          disabled={isBusy}
-                          onClick={() => void handleSetPlan(st.id, 'vip', null)}
-                        >
-                          {isVip ? '✓ VIP Ativo' : 'Liberar VIP'}
-                        </button>
-                        <button
-                          type="button"
-                          className={`b sm ${isPro30 ? 'ok' : 'g'}`}
-                          disabled={isBusy}
-                          onClick={() => void handleSetPlan(st.id, 'pro', 30)}
-                        >
-                          {isPro30 ? '✓ Pro +30d' : 'Pro +30d'}
-                        </button>
-                        <button
-                          type="button"
-                          className={`b sm ${isProYear ? 'ok' : 'g'}`}
-                          disabled={isBusy}
-                          onClick={() => void handleSetPlan(st.id, 'pro', 365)}
-                        >
-                          {isProYear ? '✓ Pro +1 ano' : 'Pro +1 ano'}
-                        </button>
-                        <button
-                          type="button"
-                          className={`b sm ${isFree ? '' : 'g'}`}
-                          disabled={isBusy}
-                          onClick={() => void handleSetPlan(st.id, 'free', null)}
-                        >
-                          {isFree ? '✓ Grátis' : 'Voltar Grátis'}
-                        </button>
-                      </div>
-                    </div>
+                        <div className="space-y-2">
+                          <div className="text-sm font-bold">Alterar plano desta loja</div>
+                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                            <button
+                              type="button"
+                              className={`b sm ${isVip ? '' : 'g'}`}
+                              disabled={isBusy}
+                              onClick={() => void handleSetPlan(st.id, 'vip', null)}
+                            >
+                              {isVip ? '✓ VIP Ativo' : 'Liberar VIP'}
+                            </button>
+                            <button
+                              type="button"
+                              className={`b sm ${isPro30 ? 'ok' : 'g'}`}
+                              disabled={isBusy}
+                              onClick={() => void handleSetPlan(st.id, 'pro', 30)}
+                            >
+                              {isPro30 ? '✓ Pro +30d' : 'Pro +30d'}
+                            </button>
+                            <button
+                              type="button"
+                              className={`b sm ${isProYear ? 'ok' : 'g'}`}
+                              disabled={isBusy}
+                              onClick={() => void handleSetPlan(st.id, 'pro', 365)}
+                            >
+                              {isProYear ? '✓ Pro +1 ano' : 'Pro +1 ano'}
+                            </button>
+                            <button
+                              type="button"
+                              className={`b sm ${isFree ? '' : 'g'}`}
+                              disabled={isBusy}
+                              onClick={() => void handleSetPlan(st.id, 'free', null)}
+                            >
+                              {isFree ? '✓ Grátis' : 'Voltar Grátis'}
+                            </button>
+                          </div>
+                        </div>
+                      </>
+                    )}
 
                     <div className="pt-2 border-t border-[var(--bd)] flex justify-between gap-2 flex-wrap">
-                      <button
-                        type="button"
-                        className="b g"
-                        onClick={() => {
-                          setActiveModal(null);
-                          openChatWithBar(st.id, st.name, st.owner_email);
-                        }}
-                      >
-                        💬 Abrir Chat de Suporte com esta Loja
-                      </button>
+                      {canSupport && (
+                        <button
+                          type="button"
+                          className="b g"
+                          onClick={() => {
+                            setActiveModal(null);
+                            openChatWithBar(st.id, st.name, st.owner_email);
+                          }}
+                        >
+                          💬 Abrir Chat de Suporte com esta Loja
+                        </button>
+                      )}
                       <button
                         type="button"
                         className="b"
@@ -1890,6 +3071,391 @@ export const SuperAdminView: React.FC<{
             )}
           </div>
         </div>
+      )}
+      {sqlModalText !== null && (
+        <div className="ov" onClick={() => setSqlModalText(null)}>
+          <div className="modal !max-w-2xl" onClick={(e) => e.stopPropagation()}>
+            <div className="row sp items-center mb-2">
+              <h3 className="!m-0">SQL Completo ({EXTENDED_RECIPES.length} drinks)</h3>
+              <button
+                type="button"
+                className="b g sm"
+                onClick={() => setSqlModalText(null)}
+              >
+                ✕ Fechar
+              </button>
+            </div>
+            <p className="mu text-xs mb-2">
+              Já inclui desativação temporária de triggers (<code>orders_guard</code>) na transação para rodar sem erro no SQL Editor do Supabase.
+            </p>
+            <textarea
+              readOnly
+              value={sqlModalText}
+              onFocus={(e) => e.currentTarget.select()}
+              className="w-full h-64 font-mono text-[11px] leading-relaxed"
+            />
+            <div className="flex flex-wrap gap-2 mt-3">
+              <button
+                type="button"
+                className="b ok sm flex-1"
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard?.writeText(sqlModalText);
+                    onToast('SQL copiado! Cole no SQL Editor do Supabase e clique Run.');
+                  } catch {
+                    onToast('Selecione o texto acima (Ctrl+A / Ctrl+C) ou clique em Baixar .sql.');
+                  }
+                }}
+              >
+                📋 Copiar SQL
+              </button>
+              <button
+                type="button"
+                className="b g sm"
+                onClick={() => {
+                  const blob = new Blob([sqlModalText], { type: 'application/sql;charset=utf-8' });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement('a');
+                  a.href = url;
+                  a.download = `reset_receitas_${EXTENDED_RECIPES.length}_drinks.sql`;
+                  document.body.appendChild(a);
+                  a.click();
+                  a.remove();
+                  setTimeout(() => URL.revokeObjectURL(url), 1000);
+                  onToast('Arquivo SQL baixado!');
+                }}
+              >
+                📥 Baixar .sql
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL DE LEITURA E AUDITORIA DE RECEITA AUTORAL (EXCLUSIVO ADM) */}
+      {reviewRecipe && (
+        <div className="ov" onClick={() => !auditingBusy && setReviewRecipe(null)}>
+          <div
+            className="modal !max-w-2xl !w-full max-h-[88vh] overflow-y-auto space-y-3.5"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-2 pb-3 border-b border-[var(--bd)]">
+              <div className="min-w-0">
+                <span className="text-xs font-bold uppercase tracking-wider text-[var(--ac)]">
+                  🍸 Auditoria de Receita Autoral
+                </span>
+                <h3 className="!m-0 text-xl font-extrabold mt-0.5">{reviewRecipe.name}</h3>
+                <div className="text-xs text-[var(--mut)] mt-0.5">
+                  {normalizeRecipeCategory(reviewRecipe.category)}
+                  {reviewRecipe.glass ? ` · ${reviewRecipe.glass}` : ''}
+                  {reviewRecipe.technique ? ` · ${reviewRecipe.technique}` : ''}
+                  {reviewRecipe.garnish ? ` · Guarnição: ${reviewRecipe.garnish}` : ''}
+                </div>
+              </div>
+              <button
+                type="button"
+                className="b g sm shrink-0"
+                disabled={auditingBusy}
+                onClick={() => setReviewRecipe(null)}
+              >
+                ✕ Fechar
+              </button>
+            </div>
+
+            {reviewRecipe.description && (
+              <p className="text-sm text-[var(--fg)] !m-0">{reviewRecipe.description}</p>
+            )}
+
+            <div className="rounded-xl p-3 bg-[var(--s2)] border border-[var(--bd)] space-y-1.5">
+              <div className="text-xs font-bold uppercase tracking-wider text-[var(--ac)]">
+                Ingredientes
+              </div>
+              {normalizeRecipeIngredients(reviewRecipe.ingredients)
+                .filter((i) => !i.n.startsWith('__'))
+                .map((ing, idx) => (
+                  <div
+                    key={`${ing.n}-${idx}`}
+                    className="flex items-center justify-between text-xs py-1 border-b border-[var(--bd)] last:border-b-0"
+                  >
+                    <span className="font-semibold">{ing.n}</span>
+                    <span className="text-[var(--mut)]">{ing.q || 'a gosto'}</span>
+                  </div>
+                ))}
+            </div>
+
+            {(reviewRecipe.instructions || reviewRecipe.steps) && (
+              <div className="rounded-xl p-3 bg-[var(--s2)] border border-[var(--bd)] space-y-1">
+                <div className="text-xs font-bold uppercase tracking-wider text-[var(--ac)]">
+                  Modo de preparo
+                </div>
+                <p className="text-xs whitespace-pre-line text-[var(--fg)] !m-0">
+                  {reviewRecipe.instructions || reviewRecipe.steps}
+                </p>
+              </div>
+            )}
+
+            {reviewRecipe.story && (
+              <div className="rounded-xl p-3 bg-[var(--s2)] border border-[var(--bd)] space-y-1">
+                <div className="text-xs font-bold uppercase tracking-wider text-[var(--mut)]">
+                  História do drink
+                </div>
+                <p className="text-xs text-[var(--mut)] !m-0">{reviewRecipe.story}</p>
+              </div>
+            )}
+
+            <div className="panel space-y-2.5 !border-[var(--ac)]/40">
+              {canAuditRecipes && (
+                <div>
+                  <label className="!mt-0 text-xs font-bold">
+                    Nome / Marca do criador dentro do drink publicado *
+                  </label>
+                  <input
+                    value={reviewBrand}
+                    onChange={(e) => setReviewBrand(e.target.value)}
+                    placeholder="Ex: Lucas Mixology · Bar do Centro"
+                    maxLength={60}
+                  />
+                  <p className="mu text-[11px] mt-1 !mb-0">
+                    Ao autorizar, o drink aparecerá para todos os bares com a assinatura:{' '}
+                    <b>✦ Criação de {reviewBrand.trim() || '...'}</b>
+                  </p>
+                </div>
+              )}
+
+              <div className="flex flex-wrap items-center gap-3 pt-1">
+                {reviewImage ? (
+                  <img
+                    src={reviewImage}
+                    alt={reviewRecipe.name}
+                    className="w-16 h-16 rounded-xl object-cover border border-[var(--bd)] shrink-0"
+                  />
+                ) : (
+                  <div className="w-16 h-16 rounded-xl bg-[var(--s2)] border border-[var(--bd)] flex items-center justify-center text-2xl shrink-0">
+                    🍸
+                  </div>
+                )}
+                <div className="flex-1 min-w-[180px] space-y-1.5">
+                  <div className="text-xs font-bold">Foto oficial do drink (equipe autorizada)</div>
+                  <div className="flex flex-wrap gap-2">
+                    {(canSearchImages || canAuditRecipes || canEditGlobalRecipes) && (
+                      <>
+                        <button
+                          type="button"
+                          className="b g sm"
+                          disabled={uploadingReviewPhoto}
+                          onClick={() => reviewPhotoInputRef.current?.click()}
+                        >
+                          {uploadingReviewPhoto ? 'Otimizando…' : '📷 Enviar do aparelho'}
+                        </button>
+                        <input
+                          ref={reviewPhotoInputRef}
+                          type="file"
+                          accept="image/*"
+                          className="hidden"
+                          onChange={async (e) => {
+                            const file = e.target.files?.[0];
+                            e.target.value = '';
+                            if (!file || !reviewRecipe) return;
+                            setUploadingReviewPhoto(true);
+                            try {
+                              if (getRecipeAuditStatus(reviewRecipe) === 'approved') {
+                                const res = await uploadAndSaveRecipePhoto(reviewRecipe, file, userId);
+                                if (!res.ok) {
+                                  onToast(res.error);
+                                  return;
+                                }
+                                setReviewImage(res.url);
+                                setReviewRecipe(res.recipe);
+                                setAuditRecipes((prev) =>
+                                  prev.map((r) => (r.id === res.recipe.id ? res.recipe : r))
+                                );
+                                onRecipeUpdated?.(res.recipe);
+                                onToast(`✓ Foto de "${res.recipe.name}" salva para todas as lojas!`);
+                              } else {
+                                const up = await uploadMediaFile(file, 'recipes', userId, {
+                                  preset: 'recipe',
+                                  bucket: RECIPE_BUCKET,
+                                  entityId: `drink-${reviewRecipe.id}`,
+                                });
+                                if (up.error || !up.url) {
+                                  onToast(up.error || 'Erro ao enviar foto.');
+                                  return;
+                                }
+                                setReviewImage(up.url);
+                                onToast('Foto otimizada! Clique em Autorizar para publicar.');
+                              }
+                            } finally {
+                              setUploadingReviewPhoto(false);
+                            }
+                          }}
+                        />
+                      </>
+                    )}
+                    {canSearchImages && (
+                      <button
+                        type="button"
+                        className="b sm"
+                        onClick={() => setShowReviewPhotoSearch(true)}
+                      >
+                        🌐 {reviewImage ? 'Trocar foto (Internet)' : 'Buscar foto na Internet'}
+                      </button>
+                    )}
+                    {(canSearchImages || canAuditRecipes) && reviewImage && (
+                      <button
+                        type="button"
+                        className="b g sm"
+                        onClick={() => setReviewImage('')}
+                      >
+                        Remover foto
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {canAuditRecipes && (
+                <div>
+                  <label className="!mt-0 text-xs">
+                    Mensagem para o criador (opcional — enviada na notificação)
+                  </label>
+                  <input
+                    value={reviewNote}
+                    onChange={(e) => setReviewNote(e.target.value)}
+                    placeholder="Ex: Ótima criação! / Ajuste as medidas e reenvie."
+                    maxLength={140}
+                  />
+                </div>
+              )}
+            </div>
+
+            {canAuditRecipes && getRecipeAuditStatus(reviewRecipe) === 'approved' ? (
+              <div className="flex flex-wrap gap-2 pt-1">
+                <button
+                  type="button"
+                  className="b ok flex-1 min-w-[200px]"
+                  disabled={auditingBusy}
+                  onClick={async () => {
+                    if (!reviewRecipe) return;
+                    setAuditingBusy(true);
+                    const res = await saveRecipeImageGlobally(reviewRecipe, reviewImage.trim() || null);
+                    setAuditingBusy(false);
+                    if (!res.ok) {
+                      onToast(res.error);
+                      return;
+                    }
+                    setAuditRecipes((prev) =>
+                      prev.map((r) => (r.id === res.recipe.id ? res.recipe : r))
+                    );
+                    onRecipeUpdated?.(res.recipe);
+                    onToast(`✓ Foto de "${res.recipe.name}" atualizada para todas as lojas!`);
+                    setReviewRecipe(null);
+                  }}
+                >
+                  {auditingBusy ? 'Salvando foto…' : '💾 Salvar foto no catálogo global'}
+                </button>
+                <button
+                  type="button"
+                  className="b g sm"
+                  onClick={() => setReviewRecipe(null)}
+                >
+                  Fechar
+                </button>
+              </div>
+            ) : canAuditRecipes ? (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                <button
+                  type="button"
+                  className="b ok"
+                  disabled={auditingBusy}
+                  onClick={() => void handleAuditDecision('approved')}
+                >
+                  {auditingBusy ? 'Processando…' : '✓ Autorizar, Publicar e Notificar Criador'}
+                </button>
+                <button
+                  type="button"
+                  className="b g !border-[var(--dn)]/50 !text-[var(--dn)]"
+                  disabled={auditingBusy}
+                  onClick={() => void handleAuditDecision('rejected')}
+                >
+                  ✕ Recusar publicação pública
+                </button>
+              </div>
+            ) : (
+              canSearchImages && (
+                <button
+                  type="button"
+                  className="b ok full"
+                  disabled={auditingBusy}
+                  onClick={async () => {
+                    if (!reviewRecipe) return;
+                    setAuditingBusy(true);
+                    const res = await saveRecipeImageGlobally(reviewRecipe, reviewImage.trim() || null);
+                    setAuditingBusy(false);
+                    if (!res.ok) {
+                      onToast(res.error);
+                      return;
+                    }
+                    setAuditRecipes((prev) =>
+                      prev.map((r) => (r.id === res.recipe.id ? res.recipe : r))
+                    );
+                    onRecipeUpdated?.(res.recipe);
+                    onToast('Foto oficial atualizada para todas as lojas!');
+                    setReviewRecipe(null);
+                  }}
+                >
+                  {auditingBusy ? 'Salvando foto…' : '✓ Salvar foto do drink'}
+                </button>
+              )
+            )}
+          </div>
+        </div>
+      )}
+
+      {canSearchImages && showReviewPhotoSearch && reviewRecipe && (
+        <DrinkImageSearchModal
+          mode="single"
+          initialRecipe={getRecipeAuditStatus(reviewRecipe) === 'approved' ? reviewRecipe : null}
+          initialQuery={reviewRecipe.name}
+          userId={userId}
+          onSelectUrl={(url) => setReviewImage(url)}
+          onRecipeUpdated={(updated) => {
+            setReviewImage(updated.image_url || '');
+            setReviewRecipe(updated);
+            setAuditRecipes((prev) => prev.map((r) => (r.id === updated.id ? updated : r)));
+            onRecipeUpdated?.(updated);
+          }}
+          onClose={() => setShowReviewPhotoSearch(false)}
+          onToast={onToast}
+        />
+      )}
+
+      {canSearchImages && quickPhotoRecipe && (
+        <DrinkImageSearchModal
+          mode="single"
+          initialRecipe={quickPhotoRecipe}
+          initialQuery={quickPhotoRecipe.name}
+          userId={userId}
+          onRecipeUpdated={(updated) => {
+            setAuditRecipes((prev) => prev.map((r) => (r.id === updated.id ? updated : r)));
+            onRecipeUpdated?.(updated);
+          }}
+          onClose={() => setQuickPhotoRecipe(null)}
+          onToast={onToast}
+        />
+      )}
+
+      {canSearchImages && showCatalogPhotoSearch && (
+        <DrinkImageSearchModal
+          mode="catalog"
+          recipes={auditRecipes}
+          userId={userId}
+          onRecipeUpdated={(updated) => {
+            setAuditRecipes((prev) => prev.map((r) => (r.id === updated.id ? updated : r)));
+            onRecipeUpdated?.(updated);
+          }}
+          onClose={() => setShowCatalogPhotoSearch(false)}
+          onToast={onToast}
+        />
       )}
     </div>
   );

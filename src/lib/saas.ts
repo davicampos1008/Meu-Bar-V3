@@ -5,7 +5,12 @@ import type {
   Bar,
   BarPlanTier,
   PartnerAdBanner,
+  PlatformDelegateConfig,
+  PlatformPermissionKey,
+  PlatformRolePreset,
   PlatformSaaSConfig,
+  Recipe,
+  UserNotificationItem,
 } from '../types/meubar';
 import { sb } from './supabase';
 
@@ -13,6 +18,126 @@ export const SUPER_ADMIN_EMAIL = 'nygames92@gmail.com';
 
 const LOCAL_CONFIG_KEY = 'meubar_platform_saas_config_v1';
 const LOCAL_ADS_KEY = 'meubar_partner_ads_cache_v1';
+
+export interface PlatformPermissionMeta {
+  key: PlatformPermissionKey;
+  icon: string;
+  label: string;
+  description: string;
+  group: 'gestao' | 'catalogo' | 'comercial' | 'suporte';
+}
+
+export const PLATFORM_PERMISSIONS_META: PlatformPermissionMeta[] = [
+  {
+    key: 'view_accounts',
+    icon: '👥',
+    label: 'Ver contas criadas & alertas de cadastro',
+    description: 'Lista todas as contas cadastradas e recebe alertas quando alguém cria conta.',
+    group: 'gestao',
+  },
+  {
+    key: 'manage_stores',
+    icon: '🏪',
+    label: 'Visualizar e gerenciar todos os bares',
+    description: 'Acessa a aba Todos os Bares com métricas de pedidos, estoque e detalhes das lojas.',
+    group: 'gestao',
+  },
+  {
+    key: 'manage_vip_plans',
+    icon: '👑',
+    label: 'Liberar VIP Grátis e alterar planos de lojas',
+    description: 'Ativa Pro +30d, Pro +1 ano, VIP cortesia ou volta loja para Grátis.',
+    group: 'gestao',
+  },
+  {
+    key: 'audit_recipes',
+    icon: '🍸',
+    label: 'Auditar e publicar drinks autorais',
+    description: 'Recebe alertas de drinks enviados, edita marca do criador e aprova ou recusa.',
+    group: 'catalogo',
+  },
+  {
+    key: 'edit_global_recipes',
+    icon: '✏️',
+    label: 'Editar receitas globais e sincronizar catálogo',
+    description: 'Edita textos/ingredientes de receitas públicas e sincroniza o catálogo base.',
+    group: 'catalogo',
+  },
+  {
+    key: 'search_recipe_images',
+    icon: '🌐',
+    label: 'Pesquisar e trocar fotos na Internet',
+    description: 'Usa o buscador web de fotos profissionais (🌐 Fotos) para atualizar drinks.',
+    group: 'catalogo',
+  },
+  {
+    key: 'support_desk',
+    icon: '🎧',
+    label: 'Central de Atendimento / Chat Suporte',
+    description: 'Visualiza e responde conversas de suporte das lojas em tempo real.',
+    group: 'suporte',
+  },
+  {
+    key: 'sales_showcase',
+    icon: '💼',
+    label: 'Perfil de Vendas & Apresentação Comercial',
+    description: 'Acessa o Painel de Vendas para demonstrar ao cliente, calculadora de economia e links.',
+    group: 'comercial',
+  },
+  {
+    key: 'use_simulator',
+    icon: '🧪',
+    label: 'Simulador Demo completo (Dono, Garçom, Caixa, QR)',
+    description: 'Roda a loja demonstrativa ao vivo para apresentar ou testar fluxos sem afetar dados reais.',
+    group: 'comercial',
+  },
+  {
+    key: 'manage_partner_ads',
+    icon: '📣',
+    label: 'Gerenciar Banners de Parceiros',
+    description: 'Cria, edita, pausa ou exclui banners patrocinados exibidos no Plano Grátis.',
+    group: 'comercial',
+  },
+  {
+    key: 'manage_adsense',
+    icon: '🌐',
+    label: 'Configurar Google AdSense',
+    description: 'Altera Publisher ID, Slots de anúncio e rotação do AdSense.',
+    group: 'comercial',
+  },
+  {
+    key: 'manage_saas_pricing',
+    icon: '⚙️',
+    label: 'Alterar Preços, Trial e Links de Venda SaaS',
+    description: 'Edita preços mensal/anual, dias de trial, limite de mesas e links de checkout.',
+    group: 'comercial',
+  },
+];
+
+export const ALL_PLATFORM_PERMISSION_KEYS: PlatformPermissionKey[] =
+  PLATFORM_PERMISSIONS_META.map((p) => p.key);
+
+export function buildPresetPermissions(
+  preset: 'full_admin' | 'sales' | 'support' | 'auditor' | 'empty'
+): Record<PlatformPermissionKey, boolean> {
+  const base = {} as Record<PlatformPermissionKey, boolean>;
+  for (const k of ALL_PLATFORM_PERMISSION_KEYS) base[k] = false;
+
+  if (preset === 'full_admin') {
+    for (const k of ALL_PLATFORM_PERMISSION_KEYS) base[k] = true;
+  } else if (preset === 'sales') {
+    base.use_simulator = true;
+    base.sales_showcase = true;
+  } else if (preset === 'support') {
+    base.support_desk = true;
+    base.manage_stores = true;
+  } else if (preset === 'auditor') {
+    base.audit_recipes = true;
+    base.search_recipe_images = true;
+    base.edit_global_recipes = true;
+  }
+  return base;
+}
 
 export const DEFAULT_SAAS_CONFIG: PlatformSaaSConfig = {
   pro_price_monthly: 59.9,
@@ -31,11 +156,80 @@ export const DEFAULT_SAAS_CONFIG: PlatformSaaSConfig = {
   ads_rotation_mode: 'partner_first',
   free_user_emails: [],
   support_agent_emails: [],
+  admin_delegates: {},
   bar_plan_overrides: {},
 };
 
 export function isSuperAdmin(email?: string | null): boolean {
   return Boolean(email && email.trim().toLowerCase() === SUPER_ADMIN_EMAIL);
+}
+
+export function isPrimarySuperAdmin(email?: string | null): boolean {
+  return isSuperAdmin(email);
+}
+
+export function getDelegateConfig(
+  email?: string | null,
+  config: PlatformSaaSConfig = DEFAULT_SAAS_CONFIG
+): PlatformDelegateConfig | null {
+  const clean = (email || '').trim().toLowerCase();
+  if (!clean) return null;
+  const map = config.admin_delegates || {};
+  const found = map[clean];
+  if (!found || !found.active) return null;
+  return found;
+}
+
+export function hasPlatformPermission(
+  email: string | null | undefined,
+  permission: PlatformPermissionKey,
+  config: PlatformSaaSConfig = DEFAULT_SAAS_CONFIG
+): boolean {
+  if (isSuperAdmin(email)) return true;
+  const del = getDelegateConfig(email, config);
+  if (!del) return false;
+  return Boolean(del.permissions?.[permission]);
+}
+
+const ADMIN_AREA_PERMS: PlatformPermissionKey[] = [
+  'view_accounts',
+  'manage_vip_plans',
+  'manage_stores',
+  'audit_recipes',
+  'edit_global_recipes',
+  'search_recipe_images',
+  'support_desk',
+  'use_simulator',
+  'manage_partner_ads',
+  'manage_adsense',
+  'manage_saas_pricing',
+];
+
+export function canAccessAdminArea(
+  email?: string | null,
+  config: PlatformSaaSConfig = DEFAULT_SAAS_CONFIG
+): boolean {
+  if (isSuperAdmin(email)) return true;
+  const del = getDelegateConfig(email, config);
+  if (!del) return false;
+  if (del.preset === 'sales' && !ADMIN_AREA_PERMS.some((k) => Boolean(del.permissions?.[k]) && k !== 'use_simulator')) {
+    return false;
+  }
+  return ADMIN_AREA_PERMS.some((k) => Boolean(del.permissions?.[k]));
+}
+
+export function canAccessSalesProfile(
+  email?: string | null,
+  config: PlatformSaaSConfig = DEFAULT_SAAS_CONFIG
+): boolean {
+  if (isSuperAdmin(email)) return true;
+  const del = getDelegateConfig(email, config);
+  if (!del) return false;
+  return (
+    del.preset === 'sales' ||
+    Boolean(del.permissions?.sales_showcase) ||
+    Boolean(del.permissions?.use_simulator)
+  );
 }
 
 export function isSupportStaff(
@@ -45,6 +239,7 @@ export function isSupportStaff(
   const clean = (email || '').trim().toLowerCase();
   if (!clean) return false;
   if (isSuperAdmin(clean)) return true;
+  if (hasPlatformPermission(clean, 'support_desk', config)) return true;
   const list = (config.support_agent_emails || []).map((e) => e.trim().toLowerCase());
   return list.includes(clean);
 }
@@ -239,6 +434,30 @@ export function mergeSaasConfig(raw: unknown): PlatformSaaSConfig {
     obj.bar_plan_overrides && typeof obj.bar_plan_overrides === 'object'
       ? obj.bar_plan_overrides
       : {};
+  const normalizedDelegates: Record<string, PlatformDelegateConfig> = {};
+  if (obj.admin_delegates && typeof obj.admin_delegates === 'object') {
+    for (const [k, v] of Object.entries(obj.admin_delegates)) {
+      const cleanEmail = String(v?.email || k || '').trim().toLowerCase();
+      if (!cleanEmail || !cleanEmail.includes('@') || isSuperAdmin(cleanEmail)) continue;
+      const preset: PlatformRolePreset =
+        v?.preset === 'sales' || v?.preset === 'support' ? v.preset : 'custom_admin';
+      const perms: Partial<Record<PlatformPermissionKey, boolean>> = {};
+      if (v?.permissions && typeof v.permissions === 'object') {
+        for (const pk of ALL_PLATFORM_PERMISSION_KEYS) {
+          perms[pk] = Boolean(v.permissions[pk]);
+        }
+      }
+      normalizedDelegates[cleanEmail] = {
+        email: cleanEmail,
+        name: v?.name ? String(v.name).trim() : undefined,
+        preset,
+        active: v?.active !== false,
+        permissions: perms,
+        updated_at: v?.updated_at || new Date().toISOString(),
+        updated_by: v?.updated_by,
+      };
+    }
+  }
   return {
     ...DEFAULT_SAAS_CONFIG,
     ...obj,
@@ -259,6 +478,7 @@ export function mergeSaasConfig(raw: unknown): PlatformSaaSConfig {
           )
         )
       : [],
+    admin_delegates: normalizedDelegates,
     bar_plan_overrides: rawOverrides,
   };
 }
@@ -304,16 +524,25 @@ export async function savePlatformConfig(
   } catch {
     // ignore
   }
-  const res = await sb
-    .from('platform_settings')
-    .upsert(
-      { id: 'default', config: clean, updated_at: new Date().toISOString() },
-      { onConflict: 'id' }
-    );
-  if (res.error) {
+  const { data: sessionData } = await sb.auth.getSession();
+  const actorEmail = sessionData?.session?.user?.email;
+  if (isSuperAdmin(actorEmail)) {
+    const res = await sb
+      .from('platform_settings')
+      .upsert(
+        { id: 'default', config: clean, updated_at: new Date().toISOString() },
+        { onConflict: 'id' }
+      );
+    if (!res.error) return { ok: true };
+    const rpcRes = await sb.rpc('update_platform_saas_config', { p_config: clean });
+    if (!rpcRes.error) return { ok: true };
     return { ok: false, error: res.error.message };
   }
-  return { ok: true };
+
+  // Contas delegadas só podem atualizar os blocos para os quais têm permissão via RPC segura
+  const rpcRes = await sb.rpc('update_platform_saas_config', { p_config: clean });
+  if (!rpcRes.error) return { ok: true };
+  return { ok: false, error: rpcRes.error.message };
 }
 
 export function getCachedPartnerAds(): PartnerAdBanner[] {
@@ -563,4 +792,247 @@ export function buildAdsTxtLine(clientId?: string | null): string {
   }
   const pubOnly = clean.replace(/^ca-/, '');
   return `google.com, ${pubOnly}, DIRECT, f08c47fec0942fa0`;
+}
+
+export async function submitRecipeForAudit(params: {
+  recipeId: string;
+  recipeName: string;
+  creatorName: string;
+  barName?: string | null;
+  userId?: string | null;
+  userEmail?: string | null;
+}): Promise<void> {
+  const creator = params.creatorName.trim() || 'Bartender / Parceiro';
+  try {
+    await sb.rpc('submit_recipe_for_audit', {
+      p_recipe_id: params.recipeId,
+      p_creator_name: creator,
+      p_bar_name: params.barName || null,
+    });
+  } catch {
+    // fallback silencioso se RPC ainda não estiver criada no banco
+  }
+
+  // Dispara alerta em tempo real para o Super Admin via Realtime Broadcast
+  try {
+    const ch = sb.channel('platform-admin-alerts');
+    await new Promise<void>((resolve) => {
+      const timeout = setTimeout(resolve, 900);
+      ch.subscribe((status) => {
+        if (status === 'SUBSCRIBED') {
+          clearTimeout(timeout);
+          void ch
+            .send({
+              type: 'broadcast',
+              event: 'recipe_audit',
+              payload: {
+                id: `audit-${params.recipeId}-${Date.now()}`,
+                kind: 'recipe_audit',
+                title: 'Novo drink aguardando auditoria',
+                message: `"${params.recipeName}" enviado por ${creator}${params.barName ? ` (${params.barName})` : ''} aguarda sua autorização para publicar.`,
+                user_id: params.userId || null,
+                user_email: params.userEmail || null,
+                recipe_id: params.recipeId,
+                read: false,
+                created_at: new Date().toISOString(),
+              } satisfies AdminAlertItem,
+            })
+            .finally(() => {
+              setTimeout(() => void sb.removeChannel(ch), 300);
+              resolve();
+            });
+        }
+      });
+    });
+  } catch {
+    // ignore broadcast issues
+  }
+}
+
+export async function loadUserNotifications(userId?: string | null): Promise<UserNotificationItem[]> {
+  if (!userId) return [];
+  try {
+    const res = await sb
+      .from('user_notifications')
+      .select('*')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(30);
+    if (!res.error && Array.isArray(res.data)) {
+      return res.data as UserNotificationItem[];
+    }
+  } catch {
+    // table may not exist before SQL update
+  }
+  return [];
+}
+
+export async function markUserNotificationsRead(
+  userId?: string | null,
+  ids?: string[]
+): Promise<void> {
+  if (!userId) return;
+  try {
+    if (ids && ids.length > 0) {
+      await sb.from('user_notifications').update({ read: true }).eq('user_id', userId).in('id', ids);
+    } else {
+      await sb.from('user_notifications').update({ read: true }).eq('user_id', userId).eq('read', false);
+    }
+  } catch {
+    // ignore
+  }
+}
+
+export async function adminAuditRecipe(params: {
+  recipe: Recipe;
+  decision: 'approved' | 'rejected';
+  creatorBrand: string;
+  note?: string | null;
+  imageUrl?: string | null;
+}): Promise<{ ok: boolean; updated?: Recipe; error?: string }> {
+  const { recipe, decision, note, imageUrl } = params;
+  const brand = params.creatorBrand.trim() || recipe.creator_name || recipe.author_nick || 'Autor Parceiro';
+  const cleanNote = (note || '').trim() || null;
+
+  // Tenta via RPC segura primeiro (atualiza receita + cria notificação do criador + marca alerta lido)
+  const rpc = await sb.rpc('admin_audit_recipe', {
+    p_recipe_id: recipe.id,
+    p_decision: decision,
+    p_creator_name: brand,
+    p_note: cleanNote,
+    p_image_url: imageUrl !== undefined ? imageUrl : recipe.image_url || null,
+  });
+
+  const existingTags = Array.isArray(recipe.tags) ? recipe.tags : [];
+  const cleanedTags = existingTags.filter(
+    (t) =>
+      typeof t === 'string' &&
+      !t.startsWith('__audit:') &&
+      !t.startsWith('__creator:') &&
+      !(decision === 'approved' && t.startsWith('__bar:'))
+  );
+  const nextTags = [
+    ...cleanedTags,
+    `__audit:${decision}`,
+    `__creator:${brand}`,
+  ];
+
+  let updatedRow: Recipe | undefined;
+  let lastErr = rpc.error?.message;
+
+  if (!rpc.error) {
+    const fetchBack = await sb.from('recipes').select('*').eq('id', recipe.id).maybeSingle();
+    if (!fetchBack.error && fetchBack.data) {
+      updatedRow = fetchBack.data as Recipe;
+    }
+  } else {
+    // Fallback direto caso a RPC ainda não esteja instalada no banco
+    const updateBody: Record<string, unknown> = {
+      is_public: decision === 'approved',
+      verified: decision === 'approved',
+      author_nick: brand,
+      creator_name: brand,
+      audit_status: decision,
+      audit_note: cleanNote,
+      audited_at: new Date().toISOString(),
+      tags: nextTags,
+      ...(imageUrl !== undefined ? { image_url: imageUrl } : {}),
+    };
+
+    let up = await sb.from('recipes').update(updateBody).eq('id', recipe.id).select().single();
+    if (up.error && /audit_|creator_name|column .* does not exist/i.test(up.error.message || '')) {
+      delete updateBody.audit_status;
+      delete updateBody.audit_note;
+      delete updateBody.audited_at;
+      delete updateBody.creator_name;
+      up = await sb.from('recipes').update(updateBody).eq('id', recipe.id).select().single();
+    }
+    if (up.error) {
+      lastErr = up.error.message;
+    } else if (up.data) {
+      updatedRow = up.data as Recipe;
+      lastErr = undefined;
+      if (recipe.owner) {
+        try {
+          await sb.from('user_notifications').insert({
+            user_id: recipe.owner,
+            kind: decision === 'approved' ? 'recipe_approved' : 'recipe_rejected',
+            title:
+              decision === 'approved'
+                ? 'Drink autoral publicado!'
+                : 'Drink autoral não publicado',
+            message:
+              decision === 'approved'
+                ? `Seu drink "${recipe.name}" foi autorizado pela equipe e publicado no catálogo geral com a marca "${brand}"!`
+                : `Seu drink "${recipe.name}" não foi aprovado para o catálogo geral${cleanNote ? `: ${cleanNote}` : '.'}`,
+            recipe_id: recipe.id,
+            recipe_name: recipe.name,
+            creator_name: brand,
+            read: false,
+          });
+        } catch {
+          // ignore if user_notifications table not yet migrated
+        }
+      }
+      try {
+        await sb
+          .from('admin_notifications')
+          .update({ read: true })
+          .eq('kind', 'recipe_audit')
+          .eq('recipe_id', recipe.id);
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  if (lastErr && !updatedRow) {
+    return { ok: false, error: lastErr };
+  }
+
+  // Envia broadcast em tempo real para o criador se ele estiver online
+  if (recipe.owner) {
+    try {
+      const ch = sb.channel(`user-alerts-${recipe.owner}`);
+      await new Promise<void>((resolve) => {
+        const timeout = setTimeout(resolve, 700);
+        ch.subscribe((status) => {
+          if (status === 'SUBSCRIBED') {
+            clearTimeout(timeout);
+            void ch
+              .send({
+                type: 'broadcast',
+                event: 'recipe_audited',
+                payload: {
+                  id: `notif-${recipe.id}-${Date.now()}`,
+                  user_id: recipe.owner!,
+                  kind: decision === 'approved' ? 'recipe_approved' : 'recipe_rejected',
+                  title:
+                    decision === 'approved'
+                      ? 'Drink autoral publicado!'
+                      : 'Drink autoral não publicado',
+                  message:
+                    decision === 'approved'
+                      ? `Seu drink "${recipe.name}" foi autorizado e publicado com a marca "${brand}"!`
+                      : `Seu drink "${recipe.name}" não foi publicado${cleanNote ? `: ${cleanNote}` : '.'}`,
+                  recipe_id: recipe.id,
+                  recipe_name: recipe.name,
+                  creator_name: brand,
+                  read: false,
+                  created_at: new Date().toISOString(),
+                } satisfies UserNotificationItem,
+              })
+              .finally(() => {
+                setTimeout(() => void sb.removeChannel(ch), 250);
+                resolve();
+              });
+          }
+        });
+      });
+    } catch {
+      // ignore broadcast error
+    }
+  }
+
+  return { ok: true, updated: updatedRow };
 }

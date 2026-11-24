@@ -188,6 +188,13 @@ export const ProfileSection: React.FC<{
       onToast('Erro: ' + r.error.message);
       return;
     }
+    void sb.auth.updateUser({
+      data: {
+        display_name: displayName.trim(),
+        full_name: displayName.trim(),
+        avatar_url: avatarUrl.trim() || null,
+      },
+    });
     if (r.data) onProfileSaved(r.data as StaffProfile);
     setMsg('Currículo salvo e pronto para se candidatar às vagas!');
     onToast('Currículo salvo!');
@@ -204,6 +211,8 @@ export const ProfileSection: React.FC<{
         label="Foto de rosto (opcional, recomendada)"
         value={avatarUrl}
         folder="avatars"
+        entityId="profile"
+        imagePreset="avatar"
         userId={userId}
         onChange={setAvatarUrl}
         onToast={onToast}

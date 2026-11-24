@@ -484,6 +484,7 @@ export const OnboardingScreen: React.FC<{
   onBarCreated: (barId: string) => Promise<void>;
   onOpenStandalone: (jobsFirst: boolean) => void;
   onRefreshJobs: () => Promise<void>;
+  onOpenEditProfile?: () => void;
   onBackToApp?: () => void;
   onToast: (msg: string) => void;
 }> = ({
@@ -499,6 +500,7 @@ export const OnboardingScreen: React.FC<{
   onBarCreated,
   onOpenStandalone,
   onRefreshJobs,
+  onOpenEditProfile,
   onBackToApp,
   onToast,
 }) => {
@@ -597,6 +599,25 @@ export const OnboardingScreen: React.FC<{
       <div className="top">
         <BrandMark />
         <div className="row">
+          {onOpenEditProfile && (
+            <button
+              type="button"
+              className="bar-switcher-pill flex items-center gap-1.5 max-w-[140px]"
+              title="Editar meu perfil (nome e foto)"
+              onClick={onOpenEditProfile}
+            >
+              {profile.avatar_url ? (
+                <img
+                  src={profile.avatar_url}
+                  alt={profile.display_name || 'Perfil'}
+                  className="w-4 h-4 rounded-full object-cover shrink-0"
+                />
+              ) : (
+                <span aria-hidden="true">👤</span>
+              )}
+              <span className="truncate">{profile.display_name || 'Perfil'}</span>
+            </button>
+          )}
           <PWAInstallButton variant="pill" />
           <button type="button" className="lnk" onClick={() => void sb.auth.signOut()}>
             Sair
@@ -714,6 +735,7 @@ export const OnboardingScreen: React.FC<{
             label="Logo do bar (foto ou galeria)"
             value={logoUrl}
             folder="logos"
+            imagePreset="logo"
             userId={userId}
             onChange={setLogoUrl}
             onToast={onToast}
@@ -722,6 +744,7 @@ export const OnboardingScreen: React.FC<{
             label="Banner do bar (foto ou galeria)"
             value={bannerUrl}
             folder="banners"
+            imagePreset="banner"
             userId={userId}
             onChange={setBannerUrl}
             onToast={onToast}

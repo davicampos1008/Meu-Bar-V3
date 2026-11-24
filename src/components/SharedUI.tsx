@@ -1,8 +1,10 @@
 import React, { useRef, useState } from 'react';
 import { CATS, EMO } from '../lib/catalog';
+import type { ImagePreset } from '../lib/imageOptimizer';
 import { uploadMediaFile } from '../lib/supabase';
 import { getProximitySuggestions, reverseGeocodeExact } from '../lib/utils';
 import type { Bar, Recipe, UserCoords } from '../types/meubar';
+import { DrinkImageSearchModal } from './DrinkImageSearchModal';
 
 export const BrandMark: React.FC<{ bar?: Partial<Bar> | null; big?: boolean }> = ({
   bar,
@@ -48,6 +50,10 @@ interface ImageUploaderProps {
   value: string;
   folder: string;
   userId?: string;
+  entityId?: string;
+  imagePreset?: ImagePreset;
+  defaultSearchQuery?: string;
+  allowWebSearch?: boolean;
   onChange: (url: string) => void;
   onToast: (msg: string) => void;
 }
@@ -57,17 +63,25 @@ export const ImageUploader: React.FC<ImageUploaderProps> = ({
   value,
   folder,
   userId,
+  entityId,
+  imagePreset,
+  defaultSearchQuery = '',
+  allowWebSearch = false,
   onChange,
   onToast,
 }) => {
   const [status, setStatus] = useState('');
+  const [showWebSearch, setShowWebSearch] = useState(false);
   const camRef = useRef<HTMLInputElement>(null);
   const galRef = useRef<HTMLInputElement>(null);
 
   const handleFile = async (file?: File | null) => {
     if (!file) return;
-    setStatus('Enviando...');
-    const res = await uploadMediaFile(file, folder, userId);
+    setStatus('Otimizando…');
+    const res = await uploadMediaFile(file, folder, userId, {
+      preset: imagePreset,
+      entityId,
+    });
     if (res.error) {
       setStatus('Falha no upload');
       onToast('Erro ao enviar imagem: ' + res.error);
@@ -75,8 +89,8 @@ export const ImageUploader: React.FC<ImageUploaderProps> = ({
     }
     const url = res.url || '';
     onChange(url);
-    setStatus('Link salvo!');
-    onToast('Imagem enviada e link gerado!');
+    setStatus('Salva em WebP!');
+    onToast('Imagem otimizada e salva com sucesso!');
   };
 
   return (
@@ -97,7 +111,7 @@ export const ImageUploader: React.FC<ImageUploaderProps> = ({
             onChange={(e) => onChange(e.target.value)}
             placeholder="Link da imagem (gerado ao enviar foto ou colado)"
           />
-          <div className="row mt-2">
+          <div className="row mt-2 flex-wrap">
             <button
               type="button"
               className="b sm g"
@@ -112,6 +126,15 @@ export const ImageUploader: React.FC<ImageUploaderProps> = ({
             >
               🖼️ Galeria
             </button>
+            {allowWebSearch && (
+              <button
+                type="button"
+                className="b sm"
+                onClick={() => setShowWebSearch(true)}
+              >
+                🌐 Pesquisar foto
+              </button>
+            )}
             {status && <span className="tag">{status}</span>}
           </div>
           <input
@@ -131,6 +154,20 @@ export const ImageUploader: React.FC<ImageUploaderProps> = ({
           />
         </div>
       </div>
+
+      {allowWebSearch && showWebSearch && (
+        <DrinkImageSearchModal
+          mode="single"
+          initialQuery={defaultSearchQuery}
+          userId={userId}
+          onSelectUrl={(url) => {
+            onChange(url);
+            setStatus('Foto da web salva!');
+          }}
+          onClose={() => setShowWebSearch(false)}
+          onToast={onToast}
+        />
+      )}
     </div>
   );
 };

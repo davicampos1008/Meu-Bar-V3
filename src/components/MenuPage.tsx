@@ -4,7 +4,7 @@ import {
   isAlertEnabled,
   useAlertPrefs,
 } from '../lib/alertPrefs';
-import { ALL_TAGS, CATS } from '../lib/catalog';
+import { CATS, EMO, TAG_GROUPS } from '../lib/catalog';
 import {
   cleanWhatsAppDigits,
   DELIVERY_PAYMENT_LABELS,
@@ -23,7 +23,7 @@ import {
   loadPlatformConfig,
 } from '../lib/saas';
 import { checkActionCooldown } from '../lib/security';
-import { sb } from '../lib/supabase';
+import { realSb, sb } from '../lib/supabase';
 import {
   applyBarTheme,
   beep,
@@ -33,11 +33,15 @@ import {
   getContrastingTextColor,
   getMissingIngredientsForRecipe,
   getPromoAdjustedPrice,
+  getRecipeCreatorBrand,
   getRecipeItemType,
   makeDrink,
+  matchRecipeTags,
   money,
   norm,
-  recipeTags,
+  normalizeRecipe,
+  normalizeRecipeCategory,
+  normalizeRecipeIngredients,
   today,
 } from '../lib/utils';
 import type {
@@ -488,7 +492,7 @@ export const MenuPage: React.FC<{
       }
 
       setOwnerDiag(diag);
-      setItems(resolvedItems);
+      setItems(resolvedItems.map((it) => normalizeRecipe(it)));
       document.title = data.bar.name;
 
       if (!silent) {
@@ -575,6 +579,20 @@ export const MenuPage: React.FC<{
       )
       .subscribe();
 
+    const globalRecipesCh = realSb
+      .channel(`menu-recipes-live-${barId}`)
+      .on('broadcast', { event: 'recipe-updated' }, () => {
+        void loadMenu(true);
+      })
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'recipes' },
+        () => {
+          void loadMenu(true);
+        }
+      )
+      .subscribe();
+
     // Checagem silenciosa a cada 5 segundos para conferir novos drinks disponíveis e estado da mesa
     const syncInterval = setInterval(() => {
       void loadMenu(true);
@@ -583,6 +601,7 @@ export const MenuPage: React.FC<{
     return () => {
       clearInterval(syncInterval);
       void sb.removeChannel(ch);
+      void realSb.removeChannel(globalRecipesCh);
       applyBarTheme(null);
     };
   }, [barId, cleanMesa]);
@@ -1101,20 +1120,35 @@ export const MenuPage: React.FC<{
         ? avulsosItems
         : drinksItems;
 
-  const cats = ['Todas', ...Array.from(new Set(sectionItems.map((i) => i.category)))];
+  const catsRaw = Array.from(
+    new Set(
+      sectionItems.map((i) =>
+        menuSection === 'drink' ? normalizeRecipeCategory(i.category) : i.category || 'Outros'
+      )
+    )
+  ).sort((a, b) => {
+    const ia = CATS.indexOf(a);
+    const ib = CATS.indexOf(b);
+    if (ia >= 0 && ib >= 0) return ia - ib;
+    if (ia >= 0) return -1;
+    if (ib >= 0) return 1;
+    return a.localeCompare(b, 'pt-BR');
+  });
+  const cats = ['Todas', ...catsRaw];
   const filtered = sectionItems.filter((i) => {
-    if (cat !== 'Todas' && i.category !== cat) return false;
-    if (menuSection === 'drink' && tags.size > 0) {
-      const t = new Set(recipeTags(i));
-      for (const x of tags) {
-        if (!t.has(x)) return false;
-      }
+    const itemCat =
+      menuSection === 'drink' ? normalizeRecipeCategory(i.category) : i.category || 'Outros';
+    if (cat !== 'Todas' && itemCat !== cat) return false;
+    if (menuSection === 'drink' && tags.size > 0 && !matchRecipeTags(i, tags)) {
+      return false;
     }
     if (query.trim()) {
       const q = query.trim().toLowerCase();
       const inName = (i.name || '').toLowerCase().includes(q);
       const inDesc = (i.story || i.description || '').toLowerCase().includes(q);
-      const inIng = (i.ingredients || []).some((x) => (x.n || '').toLowerCase().includes(q));
+      const inIng = normalizeRecipeIngredients(i.ingredients).some((x) =>
+        x.n.toLowerCase().includes(q)
+      );
       if (!inName && !inIng && !inDesc) return false;
     }
     return true;
@@ -1533,50 +1567,62 @@ export const MenuPage: React.FC<{
 
           {cats.length > 2 && (
             <div className="chips">
-              {cats.map((c) => (
-                <span
-                  key={c}
-                  className={`chip ${cat === c ? 'on' : ''}`}
-                  onClick={() => setCat(c)}
-                >
-                  {c}
-                </span>
-              ))}
+              {cats.map((c) => {
+                const cIdx = CATS.indexOf(c);
+                const emoji = c === 'Todas' ? '✨' : cIdx >= 0 ? EMO[cIdx] : '🍹';
+                return (
+                  <span
+                    key={c}
+                    className={`chip ${cat === c ? 'on' : ''}`}
+                    onClick={() => setCat(c)}
+                  >
+                    {emoji} {c}
+                  </span>
+                );
+              })}
             </div>
           )}
 
           {menuSection === 'drink' && showTags && (
-            <>
-              <div className="chips !flex-wrap !overflow-visible">
-                {ALL_TAGS.map((t) => (
-                  <span
-                    key={t}
-                    className={`chip ${tags.has(t) ? 'on' : ''}`}
-                    onClick={() => {
-                      const next = new Set(tags);
-                      if (next.has(t)) next.delete(t);
-                      else next.add(t);
-                      setTags(next);
-                    }}
-                  >
-                    {t}
-                  </span>
-                ))}
-                {tags.size > 0 && (
-                  <span
-                    className="chip border-dashed"
+            <div className="panel mt-2.5 space-y-2.5">
+              {TAG_GROUPS.map((grp) => (
+                <div key={grp.label}>
+                  <div className="text-[11px] font-bold uppercase tracking-wide text-[var(--mut)] mb-1">
+                    {grp.id === 'vibe' ? '🍸' : grp.id === 'base' ? '🥃' : '✨'} {grp.label}
+                  </div>
+                  <div className="chips !mt-0 !flex-wrap !overflow-visible">
+                    {grp.tags.map((t) => (
+                      <span
+                        key={t}
+                        className={`chip ${tags.has(t) ? 'on' : ''}`}
+                        onClick={() => {
+                          const next = new Set(tags);
+                          if (next.has(t)) next.delete(t);
+                          else next.add(t);
+                          setTags(next);
+                        }}
+                      >
+                        {t}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ))}
+              {tags.size > 0 && (
+                <div className="row sp pt-1">
+                  <p className="mu !m-0">
+                    {tags.size} filtro(s) · {filtered.length} opção(ões)
+                  </p>
+                  <button
+                    type="button"
+                    className="b g sm"
                     onClick={() => setTags(new Set())}
                   >
                     Limpar filtros
-                  </span>
-                )}
-              </div>
-              {tags.size > 0 && (
-                <p className="mu">
-                  {tags.size} filtro(s) · {filtered.length} opção(ões)
-                </p>
+                  </button>
+                </div>
               )}
-            </>
+            </div>
           )}
         </div>
       );
@@ -1923,7 +1969,7 @@ export const MenuPage: React.FC<{
       {selectedRecipe && (
         <div className="ov">
           <div
-            className={`hero c${Math.max(0, CATS.indexOf(selectedRecipe.category))}`}
+            className={`hero c${Math.max(0, CATS.indexOf(normalizeRecipeCategory(selectedRecipe.category)))}`}
             style={
               selectedRecipe.image_url
                 ? { backgroundImage: `url('${selectedRecipe.image_url}')` }
@@ -1947,6 +1993,15 @@ export const MenuPage: React.FC<{
               ← Voltar
             </button>
             <h1 className="mt-4">{selectedRecipe.name}</h1>
+            {(() => {
+              const creatorBrand = getRecipeCreatorBrand(selectedRecipe);
+              if (!creatorBrand) return null;
+              return (
+                <p className="text-xs font-semibold text-[var(--ac)] mt-1">
+                  ✦ Criação de {creatorBrand}
+                </p>
+              );
+            })()}
             {selectedPriceInfo?.finalPrice != null && (
               <p className="text-[1.4rem] text-[var(--ok)] font-bold flex items-center gap-2 flex-wrap">
                 {selectedPriceInfo.discounted && selectedPriceInfo.originalPrice != null && (
@@ -1964,18 +2019,24 @@ export const MenuPage: React.FC<{
             )}
             {selectedRecipe.description && <p className="desc">{selectedRecipe.description}</p>}
 
-            {(selectedRecipe.ingredients || []).length > 0 && (
-              <>
-                <h2 className="mt-5.5 mb-1">O que leva</h2>
-                <div className="chips !flex-wrap !overflow-visible">
-                  {(selectedRecipe.ingredients || []).map((i, idx) => (
-                    <span key={`${i.n}-${idx}`} className="chip st1">
-                      {i.n}
-                    </span>
-                  ))}
-                </div>
-              </>
-            )}
+            {(() => {
+              const selIngs = normalizeRecipeIngredients(selectedRecipe.ingredients).filter(
+                (i) => !i.n.startsWith('__')
+              );
+              if (selIngs.length === 0) return null;
+              return (
+                <>
+                  <h2 className="mt-5.5 mb-1">O que leva</h2>
+                  <div className="chips !flex-wrap !overflow-visible">
+                    {selIngs.map((i, idx) => (
+                      <span key={`${i.n}-${idx}`} className="chip st1">
+                        {i.n}
+                      </span>
+                    ))}
+                  </div>
+                </>
+              );
+            })()}
 
             {selectedRecipe.story && (
               <>

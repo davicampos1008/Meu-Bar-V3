@@ -8,6 +8,7 @@ import {
   getPromoAdjustedPrice,
   isColorLight,
   money,
+  normalizeRecipeIngredients,
   recipeTags,
 } from '../lib/utils';
 import type { Bar, MenuBlockId, MenuDesignConfig, MenuPromotion, Recipe } from '../types/meubar';
@@ -1127,7 +1128,8 @@ export const MenuDrinksCatalog: React.FC<{
     );
 
     const tg = recipeTags(r).slice(0, 2);
-    const ingLine = (r.ingredients || [])
+    const ingLine = normalizeRecipeIngredients(r.ingredients)
+      .filter((i) => !i.n.startsWith('__'))
       .map((i) => i.n)
       .filter(Boolean)
       .slice(0, 4)

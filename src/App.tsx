@@ -26,6 +26,7 @@ import { MenuPage } from './components/MenuPage';
 import type { StudioTab } from './components/MenuStudio';
 import {
   CreateDrinkModal,
+  EditProfileModal,
   MakeDrinkModal,
   QrModal,
   ShakersModal,
@@ -35,6 +36,7 @@ import { OwnerSummaryView } from './components/OwnerSummaryView';
 import { LegalDocsModal, PlansView, ProGateCard } from './components/PlansAndLegalModal';
 import { OfflineIndicator, PWAInstallButton } from './components/PWAControls';
 import { SalesLandingPage } from './components/SalesLandingPage';
+import { SalesWorkspaceView } from './components/SalesWorkspaceView';
 import { SecondScreenDisplay } from './components/SecondScreenDisplay';
 import { BrandMark } from './components/SharedUI';
 import { StaffLoginGate } from './components/StaffLoginGate';
@@ -76,23 +78,34 @@ import {
 import { EXTENDED_RECIPES } from './lib/recipesSeed';
 import {
   buildWhatsAppLink,
+  canAccessAdminArea,
+  canAccessSalesProfile,
   getBarPlanStatus,
   getCachedPartnerAds,
   getCachedPlatformConfig,
+  hasPlatformPermission,
   isSuperAdmin,
   isSupportStaff,
   loadAdminNotifications,
   loadPartnerAds,
   loadPlatformConfig,
+  loadUserNotifications,
   markAdminNotificationsRead,
+  markUserNotificationsRead,
 } from './lib/saas';
-import { broadcastMenuUpdate, sb } from './lib/supabase';
+import {
+  broadcastGlobalRecipeUpdate,
+  broadcastMenuUpdate,
+  realSb,
+  sb,
+} from './lib/supabase';
 import { fetchStoreThreads, subscribeSupportRealtime } from './lib/supportChat';
 import {
   applyBarTheme,
   getStoredUiThemeMode,
   getUnpricedAvailableDrinks,
   norm,
+  normalizeRecipe,
   setStoredUiThemeMode,
   type UiThemeMode,
 } from './lib/utils';
@@ -114,11 +127,12 @@ import type {
   TableCallAlert,
   TableTab,
   UserCoords,
+  UserNotificationItem,
 } from './types/meubar';
 
 interface PersistedNavState {
   screenMode: 'bar' | 'seeker' | 'onboarding';
-  workspaceMode: 'normal' | 'admin' | 'support';
+  workspaceMode: 'normal' | 'admin' | 'support' | 'sales';
   adminAreaTab: AdminTab;
   tab: string;
   seekerTab: 'careers' | 'profile' | 'explore' | 'createbar';
@@ -206,8 +220,10 @@ export default function App() {
       ? savedNav.screenMode
       : 'seeker'
   );
-  const [workspaceMode, setWorkspaceMode] = useState<'normal' | 'admin' | 'support'>(
-    savedNav.workspaceMode === 'admin' || savedNav.workspaceMode === 'support'
+  const [workspaceMode, setWorkspaceMode] = useState<'normal' | 'admin' | 'support' | 'sales'>(
+    savedNav.workspaceMode === 'admin' ||
+      savedNav.workspaceMode === 'support' ||
+      savedNav.workspaceMode === 'sales'
       ? savedNav.workspaceMode
       : 'normal'
   );
@@ -273,6 +289,7 @@ export default function App() {
 
   // Modal states
   const [showSwitchBar, setShowSwitchBar] = useState(false);
+  const [showEditProfile, setShowEditProfile] = useState(false);
   const [makeDrinkRecipe, setMakeDrinkRecipe] = useState<Recipe | null>(null);
   const [showQr, setShowQr] = useState(false);
   const [showShakers, setShowShakers] = useState(false);
@@ -309,6 +326,7 @@ export default function App() {
   const [saasConfig, setSaasConfig] = useState<PlatformSaaSConfig>(() => getCachedPlatformConfig());
   const [partnerAds, setPartnerAds] = useState<PartnerAdBanner[]>(() => getCachedPartnerAds());
   const [adminAlerts, setAdminAlerts] = useState<AdminAlertItem[]>([]);
+  const [userNotifications, setUserNotifications] = useState<UserNotificationItem[]>([]);
   const { prefs: alertPrefs } = useAlertPrefs();
   const alertPrefsRef = useRef(alertPrefs);
   alertPrefsRef.current = alertPrefs;
@@ -320,15 +338,63 @@ export default function App() {
 
   const dedupeRecipes = (list: Recipe[]): Recipe[] => {
     const seen = new Map<string, Recipe>();
-    for (const r of list) {
-      const k = norm(r.name);
-      if (!k) continue;
+    for (const raw of list) {
+      const r = normalizeRecipe(raw);
+      const baseKey = norm(r.name);
+      if (!baseKey) continue;
+      const itemType = norm(r.item_type || 'drink') || 'drink';
+      const k = r.is_public === false ? `priv:${r.id}` : `${itemType}:${baseKey}`;
       const prev = seen.get(k);
       if (!prev || (!prev.image_url && r.image_url)) {
         seen.set(k, r);
       }
     }
     return Array.from(seen.values()).sort((a, b) => a.name.localeCompare(b.name));
+  };
+
+  const applySingleRecipeToState = (raw: Recipe) => {
+    const clean = normalizeRecipe(raw);
+    const cleanKey = norm(clean.name);
+    const cleanType = norm(clean.item_type || 'drink') || 'drink';
+    setRecipes((prev) => {
+      let replaced = false;
+      const mapped = prev.map((r) => {
+        if (r.id === clean.id) {
+          replaced = true;
+          return clean;
+        }
+        if (
+          clean.is_public !== false &&
+          r.is_public !== false &&
+          norm(r.name) === cleanKey &&
+          (norm(r.item_type || 'drink') || 'drink') === cleanType
+        ) {
+          return { ...r, image_url: clean.image_url };
+        }
+        return r;
+      });
+      if (!replaced) mapped.push(clean);
+      return dedupeRecipes(mapped);
+    });
+    setMakeDrinkRecipe((prev) => {
+      if (!prev) return prev;
+      if (prev.id === clean.id) return clean;
+      if (
+        clean.is_public !== false &&
+        prev.is_public !== false &&
+        norm(prev.name) === cleanKey
+      ) {
+        return { ...prev, image_url: clean.image_url };
+      }
+      return prev;
+    });
+  };
+
+  const handleRecipeUpdated = (updated: Recipe) => {
+    const clean = normalizeRecipe(updated);
+    applySingleRecipeToState(clean);
+    void broadcastGlobalRecipeUpdate(clean);
+    if (activeBar) void broadcastMenuUpdate(activeBar.id);
   };
 
   const ensureExtendedRecipesSeeded = async (
@@ -464,11 +530,18 @@ export default function App() {
   // Atualiza perfil salvo de acesso rápido (nunca armazena senha!)
   useEffect(() => {
     if (isPublicStandaloneRoute || !user?.email) return;
+    const metaName = String(
+      user.user_metadata?.display_name ||
+        user.user_metadata?.full_name ||
+        user.user_metadata?.name ||
+        ''
+    ).trim();
+    const metaAvatar = String(user.user_metadata?.avatar_url || '').trim();
     const next = saveQuickProfile({
       userId: user.id,
       email: user.email,
-      displayName: profile.display_name || user.email.split('@')[0] || 'Usuário',
-      avatarUrl: profile.avatar_url || undefined,
+      displayName: profile.display_name || metaName || user.email.split('@')[0] || 'Usuário',
+      avatarUrl: profile.avatar_url || metaAvatar || undefined,
       barName: activeBar?.name || undefined,
     });
     setQuickProfile(next);
@@ -749,11 +822,13 @@ export default function App() {
     setItems((r1.data as BarItem[]) || []);
     const initialRecipes = dedupeRecipes((r2.data as Recipe[]) || []);
     setRecipes(initialRecipes);
-    void ensureExtendedRecipesSeeded(initialRecipes, uid).then((seeded) => {
-      setRecipes((prev) =>
-        JSON.stringify(prev) === JSON.stringify(seeded) ? prev : seeded
-      );
-    });
+    if (isSuperAdmin(user?.email)) {
+      void ensureExtendedRecipesSeeded(initialRecipes, uid).then((seeded) => {
+        setRecipes((prev) =>
+          JSON.stringify(prev) === JSON.stringify(seeded) ? prev : seeded
+        );
+      });
+    }
     const prMap: Record<string, number> = {};
     ((r3.data as { recipe_id: string; price: number }[]) || []).forEach((x) => {
       prMap[x.recipe_id] = Number(x.price);
@@ -792,25 +867,42 @@ export default function App() {
 
   const loadUserWorkspace = async (u: User) => {
     setLoadErr('');
+    void loadUserNotifications(u.id).then((list) => setUserNotifications(list));
     const profRes = await sb
       .from('staff_profiles')
       .select('*')
       .eq('user_id', u.id)
       .maybeSingle();
 
+    const metaDisplayName = String(
+      u.user_metadata?.display_name ||
+        u.user_metadata?.full_name ||
+        u.user_metadata?.name ||
+        ''
+    ).trim();
+    const metaAvatarUrl = String(u.user_metadata?.avatar_url || '').trim();
+    const rowProf = profRes.data as StaffProfile | null;
+
     setProfile(
-      (profRes.data as StaffProfile) || {
-        user_id: u.id,
-        display_name: (u.email || '').split('@')[0] || 'Profissional',
-        avatar_url: '',
-        resume_pdf_url: '',
-        location: '',
-        skills: [],
-        work_mode: 'ambos',
-        experience_years: 0,
-        bio: '',
-        availability: '',
-      }
+      rowProf
+        ? {
+            ...rowProf,
+            display_name:
+              rowProf.display_name || metaDisplayName || (u.email || '').split('@')[0] || 'Profissional',
+            avatar_url: rowProf.avatar_url || metaAvatarUrl || '',
+          }
+        : {
+            user_id: u.id,
+            display_name: metaDisplayName || (u.email || '').split('@')[0] || 'Profissional',
+            avatar_url: metaAvatarUrl || '',
+            resume_pdf_url: '',
+            location: '',
+            skills: [],
+            work_mode: 'ambos',
+            experience_years: 0,
+            bio: '',
+            availability: '',
+          }
     );
 
     const own = await sb.from('bars').select('*').eq('owner', u.id);
@@ -909,9 +1001,16 @@ export default function App() {
     };
   }, [isPublicStandaloneRoute]);
 
-  // Alertas em tempo real para o Super Admin quando uma nova conta é criada
+  // Alertas em tempo real para o Admin / Delegados autorizados (novas contas e receitas enviadas para auditoria)
+  const listenAccountAlerts = Boolean(
+    user && hasPlatformPermission(user.email, 'view_accounts', saasConfig)
+  );
+  const listenAuditAlerts = Boolean(
+    user && hasPlatformPermission(user.email, 'audit_recipes', saasConfig)
+  );
+
   useEffect(() => {
-    if (isPublicStandaloneRoute || !user || !isSuperAdmin(user.email)) {
+    if (isPublicStandaloneRoute || !user || (!listenAccountAlerts && !listenAuditAlerts)) {
       setAdminAlerts([]);
       return;
     }
@@ -919,11 +1018,19 @@ export default function App() {
     let mounted = true;
     void loadAdminNotifications().then((list) => {
       if (!mounted) return;
-      setAdminAlerts(list);
-      const unreadCount = list.filter((a) => !a.read).length;
-      if (unreadCount > 0 && isAlertEnabled('adminNewAccount', alertPrefsRef.current)) {
+      const scoped = list.filter((a) =>
+        a.kind === 'recipe_audit' ? listenAuditAlerts : listenAccountAlerts
+      );
+      setAdminAlerts(scoped);
+      const unreadAudit = scoped.filter((a) => !a.read && a.kind === 'recipe_audit').length;
+      const unreadAccounts = scoped.filter((a) => !a.read && a.kind !== 'recipe_audit').length;
+      if (unreadAudit > 0) {
         showToast(
-          `🔔 ${unreadCount} nova(s) conta(s) criada(s) no Meu Bar!`,
+          `🍸 ${unreadAudit} receita(s) autoral(is) aguardando sua auditoria!`
+        );
+      } else if (unreadAccounts > 0 && isAlertEnabled('adminNewAccount', alertPrefsRef.current)) {
+        showToast(
+          `🔔 ${unreadAccounts} nova(s) conta(s) criada(s) no Meu Bar!`,
           'adminNewAccount'
         );
       }
@@ -931,12 +1038,21 @@ export default function App() {
 
     const handleIncomingAlert = (incoming: AdminAlertItem) => {
       if (!mounted || !incoming) return;
+      if (incoming.kind === 'recipe_audit' && !listenAuditAlerts) return;
+      if (incoming.kind !== 'recipe_audit' && !listenAccountAlerts) return;
       setAdminAlerts((prev) => {
         if (
           prev.some(
             (x) =>
               x.id === incoming.id ||
-              (incoming.user_email &&
+              (incoming.kind === 'recipe_audit' &&
+                incoming.recipe_id &&
+                x.recipe_id === incoming.recipe_id &&
+                Math.abs(
+                  new Date(x.created_at).getTime() - new Date(incoming.created_at).getTime()
+                ) < 15000) ||
+              (incoming.kind !== 'recipe_audit' &&
+                incoming.user_email &&
                 x.user_email === incoming.user_email &&
                 Math.abs(
                   new Date(x.created_at).getTime() - new Date(incoming.created_at).getTime()
@@ -945,7 +1061,22 @@ export default function App() {
         ) {
           return prev;
         }
-        if (isAlertEnabled('adminNewAccount', alertPrefsRef.current)) {
+        if (incoming.kind === 'recipe_audit') {
+          playStationAlert('garcom', 'adminNewAccount');
+          showToast(
+            `🍸 Nova receita para auditoria: ${incoming.title}`,
+            'adminNewAccount'
+          );
+          void sb
+            .from('recipes')
+            .select('*')
+            .order('name')
+            .then((r) => {
+              if (!r.error && r.data && mounted) {
+                setRecipes(dedupeRecipes(r.data as Recipe[]));
+              }
+            });
+        } else if (isAlertEnabled('adminNewAccount', alertPrefsRef.current)) {
           playStationAlert('garcom', 'adminNewAccount');
           showToast(
             `🆕 Nova conta criada: ${incoming.user_email || incoming.title}!`,
@@ -959,6 +1090,10 @@ export default function App() {
     const adminCh = sb
       .channel('platform-admin-alerts')
       .on('broadcast', { event: 'new_user' }, (msg) => {
+        const payload = msg?.payload as AdminAlertItem | undefined;
+        if (payload) handleIncomingAlert(payload);
+      })
+      .on('broadcast', { event: 'recipe_audit' }, (msg) => {
         const payload = msg?.payload as AdminAlertItem | undefined;
         if (payload) handleIncomingAlert(payload);
       })
@@ -976,7 +1111,114 @@ export default function App() {
       mounted = false;
       void sb.removeChannel(adminCh);
     };
-  }, [isPublicStandaloneRoute, user?.id, user?.email]);
+  }, [isPublicStandaloneRoute, user?.id, listenAccountAlerts, listenAuditAlerts]);
+
+  // Notificações em tempo real para o criador sobre o resultado da auditoria da receita
+  useEffect(() => {
+    if (isPublicStandaloneRoute || !user?.id) {
+      setUserNotifications([]);
+      return;
+    }
+
+    let mounted = true;
+    const handleIncomingUserNotif = (incoming: UserNotificationItem) => {
+      if (!mounted || !incoming) return;
+      setUserNotifications((prev) => {
+        if (
+          prev.some(
+            (x) =>
+              x.id === incoming.id ||
+              (incoming.recipe_id &&
+                x.recipe_id === incoming.recipe_id &&
+                x.kind === incoming.kind &&
+                Math.abs(
+                  new Date(x.created_at).getTime() - new Date(incoming.created_at).getTime()
+                ) < 15000)
+          )
+        ) {
+          return prev;
+        }
+        playStationAlert('garcom', 'adminNewAccount');
+        showToast(
+          incoming.kind === 'recipe_approved'
+            ? `✅ ${incoming.title}: ${incoming.message || ''}`
+            : `ℹ️ ${incoming.title}: ${incoming.message || ''}`
+        );
+        void sb
+          .from('recipes')
+          .select('*')
+          .order('name')
+          .then((r) => {
+            if (!r.error && r.data && mounted) {
+              setRecipes(dedupeRecipes(r.data as Recipe[]));
+            }
+          });
+        return [incoming, ...prev].slice(0, 30);
+      });
+    };
+
+    const userCh = sb
+      .channel(`user-alerts-${user.id}`)
+      .on('broadcast', { event: 'recipe_audited' }, (msg) => {
+        const payload = msg?.payload as UserNotificationItem | undefined;
+        if (payload) handleIncomingUserNotif(payload);
+      })
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'user_notifications',
+          filter: `user_id=eq.${user.id}`,
+        },
+        (p) => {
+          const row = p.new as UserNotificationItem | undefined;
+          if (row) handleIncomingUserNotif(row);
+        }
+      )
+      .subscribe();
+
+    return () => {
+      mounted = false;
+      void sb.removeChannel(userCh);
+    };
+  }, [isPublicStandaloneRoute, user?.id]);
+
+  // Sincronização global em tempo real de fotos e receitas para todas as lojas logadas
+  useEffect(() => {
+    if (isPublicStandaloneRoute || !user?.id) return;
+
+    const globalRecipesCh = realSb
+      .channel(`global-recipes-live-${user.id}`)
+      .on('broadcast', { event: 'recipe-updated' }, (msg) => {
+        const incoming = (msg?.payload as { recipe?: Recipe } | undefined)?.recipe;
+        if (incoming?.id) {
+          applySingleRecipeToState(incoming);
+        }
+      })
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'recipes' },
+        (payload) => {
+          if (payload.eventType === 'DELETE') {
+            const oldId = (payload.old as { id?: string } | undefined)?.id;
+            if (oldId) {
+              setRecipes((prev) => prev.filter((r) => r.id !== oldId));
+            }
+            return;
+          }
+          const nextRow = payload.new as Recipe | undefined;
+          if (nextRow?.id) {
+            applySingleRecipeToState(nextRow);
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      void realSb.removeChannel(globalRecipesCh);
+    };
+  }, [isPublicStandaloneRoute, user?.id]);
 
   useEffect(() => {
     if (isPublicStandaloneRoute || !user) return;
@@ -1186,6 +1428,7 @@ export default function App() {
     legalModal,
     seekerOverlay,
     standaloneModal,
+    showEditProfile,
     createDrinkMode,
     showShakers,
     showQr,
@@ -1204,6 +1447,7 @@ export default function App() {
     legalModal,
     seekerOverlay,
     standaloneModal,
+    showEditProfile,
     createDrinkMode,
     showShakers,
     showQr,
@@ -1276,6 +1520,11 @@ export default function App() {
     }
     if (st.seekerOverlay) {
       setSeekerOverlay(null);
+      keepGuard();
+      return;
+    }
+    if (st.showEditProfile) {
+      setShowEditProfile(false);
       keepGuard();
       return;
     }
@@ -1597,13 +1846,118 @@ export default function App() {
   const unpricedCount = activeBar
     ? getUnpricedAvailableDrinks(recipes, items, prices, activeBar).length
     : 0;
-  const actorName = profile.display_name || user.email?.split('@')[0] || 'Equipe';
-  const isPlatformAdmin = isSuperAdmin(user.email);
+  const metaNameFallback = String(
+    user.user_metadata?.display_name ||
+      user.user_metadata?.full_name ||
+      user.user_metadata?.name ||
+      ''
+  ).trim();
+  const actorName =
+    (profile.display_name || metaNameFallback).trim() ||
+    user.email?.split('@')[0] ||
+    'Equipe';
+  const avatarUrl =
+    (profile.avatar_url || String(user.user_metadata?.avatar_url || '')).trim() || '';
+
+  const handleProfileSaved = (saved: StaffProfile) => {
+    setProfile(saved);
+    const nextName = (saved.display_name || '').trim();
+    if (activeBar && nextName) {
+      setMembers((prev) =>
+        prev.map((m) => (m.user_id === user.id ? { ...m, name: nextName } : m))
+      );
+      void sb
+        .from('bar_members')
+        .update({ name: nextName })
+        .eq('bar_id', activeBar.id)
+        .eq('user_id', user.id);
+    }
+  };
+
+  const renderProfilePill = (compactMobile = true) => (
+    <button
+      type="button"
+      className="bar-switcher-pill flex items-center gap-1.5"
+      title={`Meu perfil: ${actorName} (clique para editar)`}
+      onClick={() => setShowEditProfile(true)}
+    >
+      {avatarUrl ? (
+        <img
+          src={avatarUrl}
+          alt={actorName}
+          className="w-4 h-4 rounded-full object-cover shrink-0"
+        />
+      ) : (
+        <span aria-hidden="true">👤</span>
+      )}
+      <span
+        className={`${compactMobile ? 'hidden sm:inline' : 'inline'} truncate max-w-[92px]`}
+      >
+        {actorName}
+      </span>
+    </button>
+  );
+
+  const isPrimaryAdmin = isSuperAdmin(user.email);
+  const isPlatformAdmin = canAccessAdminArea(user.email, saasConfig);
+  const canOpenSalesArea = canAccessSalesProfile(user.email, saasConfig);
   const isSupportAgent = isSupportStaff(user.email, saasConfig);
+
+  const canViewAccounts = hasPlatformPermission(user.email, 'view_accounts', saasConfig);
+  const canManageStores = hasPlatformPermission(user.email, 'manage_stores', saasConfig);
+  const canManageVip = hasPlatformPermission(user.email, 'manage_vip_plans', saasConfig);
+  const canAuditRecipes = hasPlatformPermission(user.email, 'audit_recipes', saasConfig);
+  const canEditGlobalRecipes = hasPlatformPermission(user.email, 'edit_global_recipes', saasConfig);
+  const canSearchImages = hasPlatformPermission(user.email, 'search_recipe_images', saasConfig);
+  const canSupport = hasPlatformPermission(user.email, 'support_desk', saasConfig);
+  const canSimulator = hasPlatformPermission(user.email, 'use_simulator', saasConfig);
+  const canPartnerAds = hasPlatformPermission(user.email, 'manage_partner_ads', saasConfig);
+  const canAdSense = hasPlatformPermission(user.email, 'manage_adsense', saasConfig);
+  const canSaasPricing = hasPlatformPermission(user.email, 'manage_saas_pricing', saasConfig);
+
+  const isAdminTabAllowed = (t: AdminTab): boolean => {
+    switch (t) {
+      case 'accounts':
+        return canViewAccounts || canManageVip;
+      case 'stores':
+        return canManageStores || canManageVip;
+      case 'recipes_audit':
+        return canAuditRecipes || canSearchImages || canEditGlobalRecipes;
+      case 'support':
+        return canSupport;
+      case 'simulator':
+        return canSimulator;
+      case 'partners':
+        return canPartnerAds;
+      case 'adsense':
+        return canAdSense;
+      case 'sales':
+        return canSaasPricing;
+      case 'team_access':
+        return isPrimaryAdmin;
+      default:
+        return false;
+    }
+  };
+
+  const firstAllowedAdminTab: AdminTab =
+    (['accounts', 'recipes_audit', 'stores', 'support', 'partners', 'adsense', 'simulator', 'sales', 'team_access'] as AdminTab[]).find(
+      (t) => isAdminTabAllowed(t)
+    ) || 'accounts';
+
+  const effectiveAdminTab: AdminTab = isAdminTabAllowed(adminAreaTab)
+    ? adminAreaTab
+    : firstAllowedAdminTab;
+
   const adminNewAccountAlertOn = isAlertEnabled('adminNewAccount', alertPrefs);
-  const unreadAdminAlerts = adminNewAccountAlertOn
-    ? adminAlerts.filter((a) => !a.read).length
+  const unreadRecipeAuditAlerts = canAuditRecipes
+    ? adminAlerts.filter((a) => !a.read && a.kind === 'recipe_audit').length
     : 0;
+  const unreadAccountAlerts = canViewAccounts
+    ? adminAlerts.filter((a) => !a.read && a.kind !== 'recipe_audit').length
+    : 0;
+  const unreadAdminAlerts =
+    unreadRecipeAuditAlerts + (adminNewAccountAlertOn ? unreadAccountAlerts : 0);
   const visibleTableCalls = isAlertEnabled('tableCalls', alertPrefs) ? tableCalls : [];
   const seekerAlertSummary = getAlertPrefsSummary(alertPrefs, isPlatformAdmin);
   const hasExplicitBarOverride = Boolean(
@@ -1651,12 +2005,20 @@ export default function App() {
     );
     await markAdminNotificationsRead(ids);
   };
+
+  const handleDismissUserNotifications = async (ids?: string[]) => {
+    if (!user?.id) return;
+    setUserNotifications((prev) =>
+      prev.map((n) => (!ids || ids.includes(n.id) ? { ...n, read: true } : n))
+    );
+    await markUserNotificationsRead(user.id, ids);
+  };
   const supportWhatsAppHref = buildWhatsAppLink(
     saasConfig.support_whatsapp,
     `Olá! Preciso de ajuda no Meu Bar${activeBar ? ` (${activeBar.name})` : ''}.`
   );
 
-  // ÁREA ADM SEPARADA (somente Super Admin)
+  // ÁREA ADM SEPARADA (Proprietário Principal ou ADM Delegado conforme permissões)
   if (workspaceMode === 'admin' && isPlatformAdmin) {
     return (
       <>
@@ -1686,6 +2048,16 @@ export default function App() {
                   onClick={handleLockApp}
                 >
                   🔒
+                </button>
+              )}
+              {renderProfilePill()}
+              {canOpenSalesArea && (
+                <button
+                  type="button"
+                  className="bar-switcher-pill !border-[var(--ac)]/60"
+                  onClick={() => setWorkspaceMode('sales')}
+                >
+                  💼 Vendas
                 </button>
               )}
               <button
@@ -1718,7 +2090,7 @@ export default function App() {
               actorName={actorName}
               config={saasConfig}
               adminAlerts={adminAlerts}
-              controlledTab={adminAreaTab}
+              controlledTab={effectiveAdminTab}
               hideInternalNav={true}
               onTabChange={setAdminAreaTab}
               onMarkAlertsRead={handleMarkAdminAlertsRead}
@@ -1730,64 +2102,190 @@ export default function App() {
               onConfigUpdated={setSaasConfig}
               onBarPlanChanged={handleBarPlanChanged}
               onAdsUpdated={setPartnerAds}
+              onRecipeUpdated={handleRecipeUpdated}
               onToast={showToast}
             />
           </div>
 
           <nav className="bnav">
-            <button
-              type="button"
-              className={`bnav-btn ${adminAreaTab === 'accounts' ? 'on' : ''}`}
-              onClick={() => setAdminAreaTab('accounts')}
-            >
-              <span className="ico">👥</span>
-              <span>Contas{unreadAdminAlerts > 0 ? ` (${unreadAdminAlerts})` : ''}</span>
-            </button>
-            <button
-              type="button"
-              className={`bnav-btn ${adminAreaTab === 'stores' ? 'on' : ''}`}
-              onClick={() => setAdminAreaTab('stores')}
-            >
-              <span className="ico">🏪</span>
-              <span>Lojas</span>
-            </button>
-            <button
-              type="button"
-              className={`bnav-btn ${adminAreaTab === 'support' ? 'on' : ''}`}
-              onClick={() => setAdminAreaTab('support')}
-            >
-              <span className="ico">💬</span>
-              <span>Suporte</span>
-            </button>
-            <button
-              type="button"
-              className={`bnav-btn ${
-                adminAreaTab === 'partners' || adminAreaTab === 'adsense' ? 'on' : ''
-              }`}
-              onClick={() =>
-                setAdminAreaTab(adminAreaTab === 'partners' ? 'adsense' : 'partners')
-              }
-            >
-              <span className="ico">📣</span>
-              <span>Anúncios</span>
-            </button>
-            <button
-              type="button"
-              className={`bnav-btn ${adminAreaTab === 'simulator' ? 'on' : ''}`}
-              onClick={() => setAdminAreaTab('simulator')}
-            >
-              <span className="ico">🧪</span>
-              <span>Simulador</span>
-            </button>
-            <button
-              type="button"
-              className={`bnav-btn ${adminAreaTab === 'sales' ? 'on' : ''}`}
-              onClick={() => setAdminAreaTab('sales')}
-            >
-              <span className="ico">⚙️</span>
-              <span>SaaS</span>
-            </button>
+            {isAdminTabAllowed('accounts') && (
+              <button
+                type="button"
+                className={`bnav-btn ${effectiveAdminTab === 'accounts' ? 'on' : ''}`}
+                onClick={() => setAdminAreaTab('accounts')}
+              >
+                <span className="ico">👥</span>
+                <span>Contas{unreadAccountAlerts > 0 ? ` (${unreadAccountAlerts})` : ''}</span>
+              </button>
+            )}
+            {isPrimaryAdmin && (
+              <button
+                type="button"
+                className={`bnav-btn ${effectiveAdminTab === 'team_access' ? 'on' : ''}`}
+                onClick={() => setAdminAreaTab('team_access')}
+              >
+                <span className="ico">🔑</span>
+                <span>Equipe</span>
+              </button>
+            )}
+            {isAdminTabAllowed('recipes_audit') && (
+              <button
+                type="button"
+                className={`bnav-btn ${effectiveAdminTab === 'recipes_audit' ? 'on' : ''}`}
+                onClick={() => setAdminAreaTab('recipes_audit')}
+              >
+                <span className="ico">🍸</span>
+                <span>Receitas{unreadRecipeAuditAlerts > 0 ? ` (${unreadRecipeAuditAlerts})` : ''}</span>
+              </button>
+            )}
+            {isAdminTabAllowed('stores') && (
+              <button
+                type="button"
+                className={`bnav-btn ${effectiveAdminTab === 'stores' ? 'on' : ''}`}
+                onClick={() => setAdminAreaTab('stores')}
+              >
+                <span className="ico">🏪</span>
+                <span>Lojas</span>
+              </button>
+            )}
+            {isAdminTabAllowed('support') && (
+              <button
+                type="button"
+                className={`bnav-btn ${effectiveAdminTab === 'support' ? 'on' : ''}`}
+                onClick={() => setAdminAreaTab('support')}
+              >
+                <span className="ico">💬</span>
+                <span>Suporte</span>
+              </button>
+            )}
+            {(isAdminTabAllowed('partners') || isAdminTabAllowed('adsense')) && (
+              <button
+                type="button"
+                className={`bnav-btn ${
+                  effectiveAdminTab === 'partners' || effectiveAdminTab === 'adsense' ? 'on' : ''
+                }`}
+                onClick={() =>
+                  setAdminAreaTab(
+                    effectiveAdminTab === 'partners' && isAdminTabAllowed('adsense')
+                      ? 'adsense'
+                      : isAdminTabAllowed('partners')
+                        ? 'partners'
+                        : 'adsense'
+                  )
+                }
+              >
+                <span className="ico">📣</span>
+                <span>Anúncios</span>
+              </button>
+            )}
+            {isAdminTabAllowed('simulator') && (
+              <button
+                type="button"
+                className={`bnav-btn ${effectiveAdminTab === 'simulator' ? 'on' : ''}`}
+                onClick={() => setAdminAreaTab('simulator')}
+              >
+                <span className="ico">🧪</span>
+                <span>Simulador</span>
+              </button>
+            )}
+            {isAdminTabAllowed('sales') && (
+              <button
+                type="button"
+                className={`bnav-btn ${effectiveAdminTab === 'sales' ? 'on' : ''}`}
+                onClick={() => setAdminAreaTab('sales')}
+              >
+                <span className="ico">⚙️</span>
+                <span>SaaS</span>
+              </button>
+            )}
           </nav>
+        </div>
+      </>
+    );
+  }
+
+  // PERFIL DE VENDAS SEPARADO (Simulador Demo + Roteiro Comercial + Calculadora ROI)
+  if (workspaceMode === 'sales' && canOpenSalesArea) {
+    return (
+      <>
+        <OfflineIndicator />
+        {toastMsg && <div className="toast">{toastMsg}</div>}
+        <div>
+          <div className="top">
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="text-base font-extrabold tracking-tight truncate">
+                💼 Perfil de Vendas · Meu Bar
+              </span>
+            </div>
+            <div className="row">
+              <button
+                type="button"
+                className="bar-switcher-pill"
+                title={uiThemeMode === 'dark' ? 'Mudar para modo diurno' : 'Mudar para modo noturno'}
+                onClick={toggleUiThemeMode}
+              >
+                {uiThemeMode === 'dark' ? '☀️' : '🌙'}
+              </button>
+              {quickProfile?.biometricEnabled && (
+                <button
+                  type="button"
+                  className="bar-switcher-pill"
+                  title="Bloquear aplicativo"
+                  onClick={handleLockApp}
+                >
+                  🔒
+                </button>
+              )}
+              {renderProfilePill()}
+              {isPlatformAdmin && (
+                <button
+                  type="button"
+                  className="bar-switcher-pill !border-[var(--ac)]/60"
+                  onClick={() => {
+                    setAdminAreaTab(firstAllowedAdminTab);
+                    setWorkspaceMode('admin');
+                  }}
+                >
+                  👑 ADM
+                </button>
+              )}
+              <button
+                type="button"
+                className="bar-switcher-pill !border-[var(--ok)]/60"
+                onClick={() => setWorkspaceMode('normal')}
+              >
+                🍸 Modo Normal
+              </button>
+              <button
+                type="button"
+                className="lnk"
+                onClick={() => void sb.auth.signOut()}
+              >
+                Sair
+              </button>
+            </div>
+          </div>
+
+          <FloatingBackButton
+            visible={true}
+            label="Voltar ao Modo Normal"
+            onBack={() => setWorkspaceMode('normal')}
+          />
+
+          <div className="w">
+            <SalesWorkspaceView
+              userEmail={user.email}
+              actorName={actorName}
+              config={saasConfig}
+              canOpenAdminArea={isPlatformAdmin}
+              onOpenAdminArea={() => {
+                setAdminAreaTab(canManageVip ? 'stores' : firstAllowedAdminTab);
+                setWorkspaceMode('admin');
+              }}
+              onOpenSalesSite={() => setShowSalesSite(true)}
+              onToast={showToast}
+            />
+          </div>
         </div>
       </>
     );
@@ -1825,6 +2323,7 @@ export default function App() {
                   🔒
                 </button>
               )}
+              {renderProfilePill()}
               <button
                 type="button"
                 className="bar-switcher-pill !border-[var(--ok)]/60"
@@ -1854,7 +2353,7 @@ export default function App() {
               userEmail={user.email}
               actorName={actorName}
               config={saasConfig}
-              canManageTeam={isPlatformAdmin}
+              canManageTeam={isPrimaryAdmin}
               onConfigUpdated={setSaasConfig}
               onToast={showToast}
             />
@@ -1867,6 +2366,7 @@ export default function App() {
   // Determina quando o botão Voltar retrátil fixo deve aparecer e qual rótulo contextual usar
   const floatingBackInfo = (() => {
     if (legalModal) return { show: true, label: 'Fechar documento' };
+    if (showEditProfile) return { show: true, label: 'Fechar perfil' };
     if (seekerOverlay) return { show: true, label: 'Voltar' };
     if (standaloneModal) return { show: true, label: 'Voltar' };
     if (
@@ -1945,6 +2445,7 @@ export default function App() {
             setStandaloneModal(jobsFirst ? 'jobs' : 'profile')
           }
           onRefreshJobs={() => loadJobsAndRequests(user.id, null, false)}
+          onOpenEditProfile={() => setShowEditProfile(true)}
           onBackToApp={
             activeBar
               ? () => {
@@ -1966,11 +2467,20 @@ export default function App() {
                   type="button"
                   className="bar-switcher-pill !border-[var(--ac)]/60"
                   onClick={() => {
-                    setAdminAreaTab('accounts');
+                    setAdminAreaTab(firstAllowedAdminTab);
                     setWorkspaceMode('admin');
                   }}
                 >
                   👑 Área ADM{unreadAdminAlerts > 0 ? ` (${unreadAdminAlerts})` : ''}
+                </button>
+              )}
+              {canOpenSalesArea && (
+                <button
+                  type="button"
+                  className="bar-switcher-pill !border-[var(--ac)]/50"
+                  onClick={() => setWorkspaceMode('sales')}
+                >
+                  💼 Vendas
                 </button>
               )}
               {!isPlatformAdmin && isSupportAgent && (
@@ -2017,6 +2527,7 @@ export default function App() {
                 {seekerAlertSummary.isMuted ? '🔕' : '🔔'}
               </button>
               <PWAInstallButton variant="pill" />
+              {renderProfilePill()}
               <button
                 type="button"
                 className="lnk"
@@ -2093,7 +2604,7 @@ export default function App() {
                 />
                 <AdSlot
                   placement="explore"
-                  showAds={!isPlatformAdmin}
+                  showAds={!isPrimaryAdmin}
                   config={saasConfig}
                   partnerAds={partnerAds}
                   onUpgradeClick={() => setSeekerOverlay('plans')}
@@ -2491,8 +3002,12 @@ export default function App() {
                   prices={prices}
                   orders={orders}
                   tableTabs={tableTabs}
+                  userId={user?.id}
+                  isPlatformAdmin={canEditGlobalRecipes}
+                  canSearchImages={canSearchImages}
                   onClose={() => setMakeDrinkRecipe(null)}
                   onOrderCreated={() => refreshOrders(activeBar.id)}
+                  onRecipeUpdated={handleRecipeUpdated}
                   onToast={showToast}
                 />
               )}
@@ -2646,11 +3161,21 @@ export default function App() {
                   className="bar-switcher-pill !border-[var(--ac)]/60"
                   title="Abrir área exclusiva de administração"
                   onClick={() => {
-                    setAdminAreaTab('accounts');
+                    setAdminAreaTab(firstAllowedAdminTab);
                     setWorkspaceMode('admin');
                   }}
                 >
                   👑 ADM{unreadAdminAlerts > 0 ? ` (${unreadAdminAlerts})` : ''}
+                </button>
+              )}
+              {canOpenSalesArea && (
+                <button
+                  type="button"
+                  className="bar-switcher-pill !border-[var(--ac)]/50"
+                  title="Abrir Perfil de Vendas & Simulador Demo"
+                  onClick={() => setWorkspaceMode('sales')}
+                >
+                  💼 Vendas
                 </button>
               )}
               {!isPlatformAdmin && isSupportAgent && (
@@ -2682,6 +3207,7 @@ export default function App() {
                 </button>
               )}
               <PWAInstallButton variant="pill" />
+              {renderProfilePill()}
               <button
                 type="button"
                 className="bar-switcher-pill"
@@ -2757,11 +3283,19 @@ export default function App() {
                   hasPricing={hasPricing}
                   unpricedCount={unpricedCount}
                   canEditMenu={canEditMenu}
+                  isPlatformAdmin={canEditGlobalRecipes}
+                  canEditGlobalRecipes={canEditGlobalRecipes}
+                  canSearchImages={canSearchImages}
+                  userId={user?.id}
+                  userNotifications={userNotifications}
+                  onDismissUserNotifications={handleDismissUserNotifications}
                   onGoPrices={() => setTab('prices')}
                   onOpenCreateDrink={(edit) => setCreateDrinkMode(edit)}
                   onOpenCatalog={() => setTab('catalog')}
                   onOpenShakers={() => setShowShakers(true)}
                   onSelectRecipe={setMakeDrinkRecipe}
+                  onRecipeUpdated={handleRecipeUpdated}
+                  onToast={showToast}
                 />
                 <AdSlot
                   placement="panel"
@@ -3023,11 +3557,14 @@ export default function App() {
                 actorName={actorName}
                 config={saasConfig}
                 adminAlerts={adminAlerts}
+                controlledTab={effectiveAdminTab}
+                onTabChange={setAdminAreaTab}
                 onMarkAlertsRead={handleMarkAdminAlertsRead}
                 onOpenAlertSettings={() => setTab('alerts')}
                 onConfigUpdated={setSaasConfig}
                 onBarPlanChanged={handleBarPlanChanged}
                 onAdsUpdated={setPartnerAds}
+                onRecipeUpdated={handleRecipeUpdated}
                 onBack={() => setTab('more')}
                 onToast={showToast}
               />
@@ -3035,7 +3572,7 @@ export default function App() {
 
             {tab === 'alerts' && (
               <AlertSettingsView
-                isPlatformAdmin={isPlatformAdmin}
+                isPlatformAdmin={canViewAccounts || canAuditRecipes}
                 onBack={() => setTab('more')}
               />
             )}
@@ -3098,7 +3635,7 @@ export default function App() {
                 userCoords={userCoords}
                 onDetectCoords={() => detectCurrentCoords(true)}
                 onMembersUpdated={setMembers}
-                onProfileSaved={setProfile}
+                onProfileSaved={handleProfileSaved}
                 onRefreshJobs={() => loadJobsAndRequests(user.id, activeBar.id, isManager)}
                 onUsePersonal={() => {
                   applyBarTheme(null, uiThemeModeRef.current);
@@ -3132,6 +3669,7 @@ export default function App() {
                   isProPlan={planStatus.isPro}
                   isPlatformAdmin={isPlatformAdmin}
                   isSupportAgent={isSupportAgent}
+                  canOpenSalesArea={canOpenSalesArea}
                   unreadAdminAlerts={unreadAdminAlerts}
                   unreadSupportCount={unreadSupportCount}
                   activeDeliveryCount={
@@ -3177,15 +3715,20 @@ export default function App() {
                   onOpenAlertSettings={() => setTab('alerts')}
                   onOpenPlans={() => setTab('plans')}
                   onOpenSuperAdmin={() => {
-                    setAdminAreaTab('accounts');
+                    setAdminAreaTab(firstAllowedAdminTab);
                     setWorkspaceMode('admin');
                   }}
+                  onOpenSalesArea={() => setWorkspaceMode('sales')}
                   onOpenSupportDesk={() => setWorkspaceMode('support')}
                   onOpenSupportChat={() => openSupportChat()}
                   onQuickProfileChanged={setQuickProfile}
                   onLockApp={handleLockApp}
                   onOpenSalesSite={() => setShowSalesSite(true)}
                   onOpenLegal={(t) => setLegalModal(t)}
+                  actorName={actorName}
+                  userEmail={user.email}
+                  avatarUrl={avatarUrl}
+                  onOpenEditProfile={() => setShowEditProfile(true)}
                   onToast={showToast}
                 />
                 <AdSlot
@@ -3306,8 +3849,12 @@ export default function App() {
               prices={prices}
               orders={orders}
               tableTabs={tableTabs}
+              userId={user?.id}
+              isPlatformAdmin={canEditGlobalRecipes}
+              canSearchImages={canSearchImages}
               onClose={() => setMakeDrinkRecipe(null)}
               onOrderCreated={() => refreshOrders(activeBar.id)}
+              onRecipeUpdated={handleRecipeUpdated}
               onToast={showToast}
             />
           )}
@@ -3348,20 +3895,25 @@ export default function App() {
 
           {createDrinkMode !== null && (
             <CreateDrinkModal
-              editExisting={createDrinkMode}
+              editExisting={canEditGlobalRecipes ? createDrinkMode : false}
               recipes={recipes}
               userId={user.id}
+              userEmail={user.email}
+              barId={activeBar.id}
+              barName={activeBar.name}
+              creatorDefaultName={actorName || activeBar.name}
+              isPlatformAdmin={canEditGlobalRecipes}
+              canSearchImages={canSearchImages}
               onRecipeSaved={(saved) => {
-                setRecipes((prev) => {
-                  const idx = prev.findIndex((x) => x.id === saved.id);
-                  if (idx >= 0) {
-                    const next = [...prev];
-                    next[idx] = saved;
-                    return next;
-                  }
-                  return [...prev, saved].sort((a, b) => a.name.localeCompare(b.name));
-                });
+                const cleanSaved = normalizeRecipe(saved);
+                applySingleRecipeToState(cleanSaved);
+                void broadcastGlobalRecipeUpdate(cleanSaved);
                 if (activeBar) void broadcastMenuUpdate(activeBar.id);
+              }}
+              onAuditSubmitted={() => {
+                if (canAuditRecipes) {
+                  void loadAdminNotifications().then((list) => setAdminAlerts(list));
+                }
               }}
               onClose={() => setCreateDrinkMode(null)}
               onToast={showToast}
@@ -3398,7 +3950,7 @@ export default function App() {
                 userId={user.id}
                 userCoords={userCoords}
                 onDetectCoords={() => detectCurrentCoords(true)}
-                onProfileSaved={setProfile}
+                onProfileSaved={handleProfileSaved}
                 onToast={showToast}
               />
             )}
@@ -3414,11 +3966,14 @@ export default function App() {
               actorName={actorName}
               config={saasConfig}
               adminAlerts={adminAlerts}
+              controlledTab={effectiveAdminTab}
+              onTabChange={setAdminAreaTab}
               onMarkAlertsRead={handleMarkAdminAlertsRead}
               onOpenAlertSettings={() => setSeekerOverlay('alerts')}
               onConfigUpdated={setSaasConfig}
               onBarPlanChanged={handleBarPlanChanged}
               onAdsUpdated={setPartnerAds}
+              onRecipeUpdated={handleRecipeUpdated}
               onBack={() => setSeekerOverlay(null)}
               onToast={showToast}
             />
@@ -3430,7 +3985,7 @@ export default function App() {
         <div className="ov">
           <div className="w pt-12">
             <AlertSettingsView
-              isPlatformAdmin={isPlatformAdmin}
+              isPlatformAdmin={canViewAccounts || canAuditRecipes}
               onBack={() => setSeekerOverlay(null)}
             />
           </div>
@@ -3476,6 +4031,27 @@ export default function App() {
 
       {legalModal && (
         <LegalDocsModal initialTab={legalModal} onClose={() => setLegalModal(null)} />
+      )}
+
+      {showEditProfile && (
+        <EditProfileModal
+          profile={profile}
+          userId={user.id}
+          userEmail={user.email}
+          userCoords={userCoords}
+          onDetectCoords={() => detectCurrentCoords(true)}
+          onSaved={handleProfileSaved}
+          onOpenFullResume={() => {
+            if (screenMode === 'bar' && activeBar) {
+              setCareerMode('personal');
+              setTab('careers');
+            } else {
+              setStandaloneModal('profile');
+            }
+          }}
+          onClose={() => setShowEditProfile(false)}
+          onToast={showToast}
+        />
       )}
     </>
   );

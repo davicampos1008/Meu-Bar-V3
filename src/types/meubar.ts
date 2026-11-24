@@ -464,6 +464,32 @@ export interface BarPlanOverride {
   updated_at: string;
 }
 
+export type PlatformPermissionKey =
+  | 'view_accounts'
+  | 'manage_vip_plans'
+  | 'manage_stores'
+  | 'audit_recipes'
+  | 'edit_global_recipes'
+  | 'search_recipe_images'
+  | 'support_desk'
+  | 'use_simulator'
+  | 'manage_partner_ads'
+  | 'manage_adsense'
+  | 'manage_saas_pricing'
+  | 'sales_showcase';
+
+export type PlatformRolePreset = 'custom_admin' | 'sales' | 'support';
+
+export interface PlatformDelegateConfig {
+  email: string;
+  name?: string;
+  preset: PlatformRolePreset;
+  active: boolean;
+  permissions: Partial<Record<PlatformPermissionKey, boolean>>;
+  updated_at: string;
+  updated_by?: string;
+}
+
 export interface PlatformSaaSConfig {
   pro_price_monthly: number;
   pro_price_yearly: number;
@@ -481,6 +507,7 @@ export interface PlatformSaaSConfig {
   ads_rotation_mode: 'partner_first' | 'adsense_first' | 'rotate';
   free_user_emails: string[];
   support_agent_emails?: string[];
+  admin_delegates?: Record<string, PlatformDelegateConfig>;
   bar_plan_overrides?: Record<string, BarPlanOverride>;
 }
 
@@ -542,11 +569,25 @@ export interface AdminUserAccount {
 
 export interface AdminAlertItem {
   id: string;
-  kind: 'new_user' | 'new_bar' | string;
+  kind: 'new_user' | 'new_bar' | 'recipe_audit' | string;
   title: string;
   message?: string | null;
   user_id?: string | null;
   user_email?: string | null;
+  recipe_id?: string | null;
+  read: boolean;
+  created_at: string;
+}
+
+export interface UserNotificationItem {
+  id: string;
+  user_id: string;
+  kind: 'recipe_approved' | 'recipe_rejected' | string;
+  title: string;
+  message?: string | null;
+  recipe_id?: string | null;
+  recipe_name?: string | null;
+  creator_name?: string | null;
   read: boolean;
   created_at: string;
 }
@@ -647,9 +688,18 @@ export interface Recipe {
   technique?: string | null;
   garnish?: string | null;
   tags?: string[] | null;
+  shaken?: boolean | null;
+  author_nick?: string | null;
+  creator_name?: string | null;
+  is_public?: boolean | null;
+  verified?: boolean | null;
+  audit_status?: 'private' | 'pending' | 'approved' | 'rejected' | null;
+  audit_note?: string | null;
+  audited_at?: string | null;
   image_url?: string | null;
   base_cost?: number | null;
   price?: number | null;
+  created_at?: string | null;
 }
 
 export interface Order {

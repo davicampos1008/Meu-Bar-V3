@@ -1391,6 +1391,8 @@ export const StoreStudioView: React.FC<{
                   label="Logo da loja (câmera ou galeria)"
                   value={logoUrl}
                   folder="logos"
+                  entityId={`${bar.id}-logo`}
+                  imagePreset="logo"
                   onChange={setLogoUrl}
                   onToast={onToast}
                 />
@@ -1399,6 +1401,8 @@ export const StoreStudioView: React.FC<{
                   label="Banner principal do topo do perfil e cardápio"
                   value={bannerUrl}
                   folder="banners"
+                  entityId={`${bar.id}-banner`}
+                  imagePreset="banner"
                   onChange={setBannerUrl}
                   onToast={onToast}
                 />
@@ -1414,6 +1418,8 @@ export const StoreStudioView: React.FC<{
                           label={`Banner extra #${slotIdx + 1}`}
                           value={val}
                           folder="banners"
+                          entityId={`${bar.id}-extra-${slotIdx + 1}`}
+                          imagePreset="banner"
                           onChange={(url) => {
                             const next = [...currentBanners];
                             while (next.length <= slotIdx) next.push('');
